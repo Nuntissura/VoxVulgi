@@ -1279,9 +1279,12 @@ mod tests {
         paths.ensure_dirs().expect("ensure disposable dirs");
         let connection = open_write_raw(&paths.db_dir().join("app.sqlite")).expect("open raw");
         connection
-            .execute_batch(
-                "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL); PRAGMA user_version=54;",
-            )
+            // Pin to the current schema version so the runtime applies no migrations to this
+            // meta-only fixture (migrations touch tables the fixture intentionally lacks).
+            .execute_batch(&format!(
+                "CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT NOT NULL); PRAGMA user_version={};",
+                crate::db::CURRENT_SCHEMA_VERSION
+            ))
             .expect("minimal isolated runtime fixture");
         drop(connection);
         let database = AppDatabase::for_paths(&paths).expect("runtime");

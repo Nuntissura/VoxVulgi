@@ -3,7 +3,11 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifySafeAgentActions } from "../src/lib/agentUiAudit.ts";
+import {
+  classifySafeAgentActions,
+  normalizeAgentActorId,
+  requireExpectedProductActionId,
+} from "../src/lib/agentUiAudit.ts";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 
@@ -31,16 +35,99 @@ test("agent UI audit allows structural activation and refuses generic buttons", 
   assert.deepEqual(classifySafeAgentActions("button", "button", false, false), [
     "scroll_into_view",
   ]);
+  assert.deepEqual(
+    classifySafeAgentActions("button", "button", false, false, "youtube.test-current-session", "external_probe"),
+    ["scroll_into_view", "activate_product_action"],
+  );
+  assert.deepEqual(
+    classifySafeAgentActions("select", "combobox", false, false, "youtube.browser-source", "reversible_state_change", "select"),
+    ["scroll_into_view", "select_option"],
+  );
+  assert.deepEqual(
+    classifySafeAgentActions("input", "textbox", false, false, "youtube.test-url", "reversible_state_change", "text"),
+    ["scroll_into_view", "set_value"],
+  );
+  assert.deepEqual(
+    classifySafeAgentActions("button", "button", false, false, "youtube.disconnect", "destructive"),
+    ["scroll_into_view"],
+  );
 });
 
-test("agent UI audit bridge is headless-only and has no arbitrary eval route", () => {
+test("agent UI audit is token-authenticated live, actions are explicitly enabled, and arbitrary eval stays absent", () => {
   const rust = readRepoFile("src-tauri", "src", "lib.rs");
   assert.match(rust, /\("POST", "\/agent\/ui_audit"\)/);
   assert.match(rust, /\("POST", "\/agent\/ui_action"\)/);
-  assert.match(rust, /agent_headless/);
+  assert.match(rust, /operation == "action" && !agent_headless && !live_actions_enabled/);
+  assert.match(rust, /VOXVULGI_AGENT_LIVE_ACTIONS/);
+  assert.match(rust, /"bridge_token": action_token/);
+  assert.match(rust, /constant_time_token_eq/);
+  assert.match(rust, /object\.remove\("bridge_token"\)/);
+  assert.match(rust, /let supplied_token = parsed[\s\S]{0,900}if !token_matches/);
+  const stateHandler = rust.match(/fn agent_handle_state\(\)[\s\S]*?\n\}/)?.[0] ?? "";
+  assert.ok(stateHandler, "agent state handler must remain inspectable");
+  assert.doesNotMatch(stateHandler, /bridge_token/);
   assert.doesNotMatch(rust, /\/agent\/eval/);
   assert.doesNotMatch(rust, /\/agent\/execute_script/);
   assert.match(rust, /agent_bridge_marker_owned_by_process/);
+});
+
+test("hidden agent UI requests do not wait for animation frames", () => {
+  const app = readRepoFile("src", "App.tsx");
+  const listener = app.match(/>\("agent-ui-request", async \(event\) => \{[\s\S]*?\n\s*\}\);/)?.[0] ?? "";
+  assert.ok(listener, "agent UI request listener must remain inspectable");
+  assert.doesNotMatch(
+    listener,
+    /requestAnimationFrame/,
+    "hidden WebViews may suspend animation frames, so audit and action receipts must complete immediately",
+  );
+});
+
+test("operator-equivalent actions require bounded stable actor attribution", () => {
+  assert.equal(normalizeAgentActorId("codex.agent-1", true), "codex.agent-1");
+  assert.equal(normalizeAgentActorId(undefined, false), "agent");
+  assert.throws(() => normalizeAgentActorId(undefined, true), /actor_id is required/);
+  assert.throws(() => normalizeAgentActorId("bad actor!", true), /stable 1-64 character token/);
+  assert.throws(() => normalizeAgentActorId(`a${"b".repeat(64)}`, true), /stable 1-64 character token/);
+  assert.equal(
+    requireExpectedProductActionId("youtube.test-current-session", "youtube.test-current-session"),
+    "youtube.test-current-session",
+  );
+  assert.throws(
+    () => requireExpectedProductActionId(undefined, "youtube.test-current-session"),
+    /expected_product_action_id is required/,
+  );
+  assert.throws(
+    () => requireExpectedProductActionId("youtube.wrong", "youtube.test-current-session"),
+    /does not match/,
+  );
+
+  const audit = readRepoFile("src", "lib", "agentUiAudit.ts");
+  const app = readRepoFile("src", "App.tsx");
+  assert.match(audit, /activate_product_action[\s\S]*?normalizeAgentActorId\(request\.actor_id, true\)/);
+  assert.match(audit, /select_option[\s\S]*?normalizeAgentActorId\(request\.actor_id, true\)/);
+  assert.match(audit, /set_value[\s\S]*?normalizeAgentActorId\(request\.actor_id, true\)/);
+  assert.equal(
+    (audit.match(/requireExpectedProductActionId\(request\.expected_product_action_id, before\.product_action_id\)/g) ?? []).length,
+    3,
+  );
+  assert.match(app, /effect_class:[\s\S]{0,320}actor_id:/);
+});
+
+test("YouTube operator controls opt into bounded semantic actions without exposing credentials", () => {
+  const options = readRepoFile("src", "pages", "OptionsPage.tsx");
+  const audit = readRepoFile("src", "lib", "agentUiAudit.ts");
+  assert.match(options, /data-agent-action-id="youtube\.browser-source"[\s\S]{0,180}data-agent-input-kind="select"/);
+  assert.match(audit, /available_choices: inputKind === "select" \? availableChoices : null/);
+  assert.match(audit, /\.slice\(0, 100\)/);
+  assert.match(audit, /filter\(\(option\) => !option\.disabled\)/);
+  assert.match(options, /data-agent-action-id="youtube\.connect-selected-browser"[\s\S]{0,260}onClick=\{connectYoutubeBrowser\}/);
+  assert.match(options, /data-agent-action-id="youtube\.test-current-session"[\s\S]{0,260}onClick=\{testCurrentYoutubeAuth\}/);
+  assert.match(options, /async function testCurrentYoutubeAuth\(\)[\s\S]*?invoke<YoutubeAuthPreflightResult>\("config_youtube_auth_preflight"/);
+  assert.match(audit, /isSensitiveAgentInput/);
+  assert.match(audit, /cookie\|token\|password\|secret\|credential/);
+  assert.match(audit, /refused text interaction without explicit non-secret semantic opt-in/);
+  assert.doesNotMatch(options, /data-agent-action-id="[^"]*(?:cookie|token|password|secret|credential)/i);
+  assert.doesNotMatch(readRepoFile("src-tauri", "src", "lib.rs"), /\/agent\/youtube_auth_preflight/);
 });
 
 test("agent UI audit includes app chrome while preserving stateful-only activation", () => {

@@ -1,3 +1,4 @@
+import { DownloadActivity } from "../components/DownloadActivity";
 import {
   type CSSProperties,
   type Dispatch,
@@ -25,8 +26,10 @@ import {
   useSharedDownloadDirStatus,
 } from "../lib/sharedDownloadDir";
 import { fileName, joinPath, parentPath } from "../lib/pathUtils";
-// WP-0264: shared failure-state classifier (subscription panel + Jobs use the same rules).
-import { classifyFailure, toneStyle, type FailureState } from "../lib/failureStates";
+// WP-0264/WP-0322: shared failure-state classifier (subscription panel + Jobs use the same rules).
+import { classifyFailure, type FailureState } from "../lib/failureStates";
+import { FailureExplainer, type FailureActionHandlers } from "../components/FailureExplainer";
+import { youtubeGateText, type YoutubeGateSnapshot } from "../lib/youtubeGateText";
 import { usePollingLoop } from "../lib/activity";
 import { isProjectionRequestCurrent } from "../lib/projectionFreshness";
 import {
@@ -525,27 +528,46 @@ function resolveSubscriptionActivity(
 // line short; the full label + requirement still shows on each sub's chip.
 function compactFailureLabel(label: string): string {
   switch (label) {
-    case "Sign-in needed":
-      return "sign-in";
-    case "Channel/handle not found":
-      return "handle not found";
-    case "Unavailable":
-      return "unavailable";
-    case "YouTube is rate-limiting":
-      return "rate-limited";
-    case "Members-only / private":
+    case "App was busy":
+      return "app busy";
+    case "YouTube is blocking requests":
+      return "youtube blocked";
+    case "YouTube sign-in was rejected":
+      return "sign-in rejected";
+    case "YouTube download helper problem":
+      return "helper problem";
+    case "YouTube stopped responding":
+      return "not responding";
+    case "Wrong link for this source":
+      return "wrong link";
+    case "Source is gone":
+      return "source gone";
+    case "Members-only or private":
       return "members-only";
-    case "Busy (temporary)":
-      return "busy";
-    case "Network problem":
-      return "network";
-    case "Error":
-      return "error";
+    case "Stalled":
+      return "stalled";
+    case "Could not save the file":
+      return "storage";
+    case "Instagram checkpoint":
+      return "IG checkpoint";
+    case "App-internal problem":
+      return "internal";
+    case "Unrecognized error":
+      return "unrecognized";
     case "Unclassified":
       return "unclassified";
+    case "Unavailable":
+      return "unavailable";
     default:
       return label.toLowerCase();
   }
+}
+
+// WP-0320: the classified label/requirement never shows the operator the raw
+// engine error. Truncate it for inline display; the full text stays in `title`.
+function truncateErrorText(text: string, limit = 240): string {
+  const raw = text.trim();
+  return raw.length > limit ? `${raw.slice(0, limit)}…` : raw;
 }
 
 // WP: single source of truth for "which attention bucket a failing subscription falls in".
@@ -558,16 +580,17 @@ function subscriptionAttentionBucket(sub: {
   last_error_message?: string | null;
 }): string | null {
   if (sub.source_status === "deleted") return null;
-  if (sub.source_status === "unavailable") return "Unavailable";
+  if (sub.source_status === "unavailable") return "Source is gone";
   if (sub.consecutive_failures <= 0) return null;
-  const state = classifyFailure(sub.last_error_message);
+  const state = classifyFailure(sub.last_error_message, { consecutiveFailures: sub.consecutive_failures });
   return state.kind === "ok" ? "Unclassified" : state.label;
 }
 
-// WP: the chip to show for a failing subscription. Classifies the stored error into a plain
-// state + required fix. A failing sub with NO stored error (older data / never persisted) still
-// gets an actionable "Unclassified" chip instead of rendering nothing, so the operator can always
-// see WHICH subs need attention and HOW to fix them. Returns null for healthy subscriptions.
+// WP-0322: the failure state to show for a failing subscription. Classifies the stored error
+// into a plain state + required fix + wired actions. A failing sub with NO stored error (older
+// data / never persisted) still gets an actionable "Unclassified" state instead of rendering
+// nothing, so the operator can always see WHICH subs need attention and HOW to fix them.
+// Returns null for healthy subscriptions.
 function subscriptionAttentionChip(sub: {
   source_status: YoutubeSubscriptionSourceStatus;
   consecutive_failures: number;
@@ -576,21 +599,30 @@ function subscriptionAttentionChip(sub: {
   if (sub.source_status === "deleted") return null;
   if (sub.source_status === "unavailable") {
     return {
-      kind: "channel_not_found",
-      label: "Unavailable",
+      kind: "source_gone",
+      label: "Source is gone",
+      whatHappened:
+        "This subscription URL returned HTTP 404. This does not prove its hosting channel was deleted; the URL may be renamed, private, restricted, temporarily unavailable, or undisclosed.",
+      whoActs: "you",
+      yourFix: "Decide whether to keep it as an archive (stop checking) or mark it deleted. Downloaded videos are kept either way.",
+      actions: ["keep_as_archive", "mark_deleted"],
+      tone: "warn",
       requirement:
         "This subscription URL returned HTTP 404. This does not prove its hosting channel was deleted; the URL may be renamed, private, restricted, temporarily unavailable, or undisclosed.",
-      tone: "warn",
     };
   }
   if (sub.consecutive_failures <= 0) return null;
-  const state = classifyFailure(sub.last_error_message);
+  const state = classifyFailure(sub.last_error_message, { consecutiveFailures: sub.consecutive_failures });
   if (state.kind === "ok") {
     return {
       kind: "unknown",
       label: "Unclassified",
-      requirement: "No error detail stored yet — click Queue now to re-check this subscription.",
+      whatHappened: "No error detail was stored for the last failure.",
+      whoActs: "you",
+      yourFix: "Click Retry now to re-check this subscription.",
+      actions: ["retry_now"],
       tone: "error",
+      requirement: "No error detail stored yet — click Retry now to re-check this subscription.",
     };
   }
   return state;
@@ -598,19 +630,30 @@ function subscriptionAttentionChip(sub: {
 
 // WP: inline styling for the clickable "need attention" filter controls in the status strip.
 // App.css is owned by another agent this run, so the active/inactive chip styling lives inline.
-function attentionFilterButtonStyle(active: boolean, primary: boolean): CSSProperties {
+// WP-0322: red only for things the operator must act on; calm slate for what the app handles.
+function attentionFilterButtonStyle(active: boolean, primary: boolean, tone: "you" | "app" = "you"): CSSProperties {
+  const strong = tone === "you" ? "#b91c1c" : "#475569";
+  const soft = tone === "you" ? "#fca5a5" : "#cbd5e1";
+  const tint = tone === "you" ? "#fef2f2" : "#f1f5f9";
   return {
     cursor: "pointer",
     borderRadius: 999,
-    border: `1px solid ${active ? "#b91c1c" : "#fca5a5"}`,
-    background: active ? "#b91c1c" : primary ? "#fef2f2" : "#ffffff",
-    color: active ? "#ffffff" : "#b91c1c",
+    border: `1px solid ${active ? strong : soft}`,
+    background: active ? strong : primary ? tint : "#ffffff",
+    color: active ? "#ffffff" : strong,
     fontSize: primary ? 13 : 11,
     fontWeight: 600,
     lineHeight: 1.4,
     padding: primary ? "1px 10px" : "1px 8px",
     whiteSpace: "nowrap",
   };
+}
+
+// WP-0322: a failing subscription says who acts instead of a generic "Needs attention".
+function whoActsPillPresentation(whoActs: "you" | "app" | null | undefined): { label: string; pillStyle: CSSProperties } {
+  return whoActs === "app"
+    ? { label: "App retrying", pillStyle: { background: "rgba(71, 85, 105, 0.14)", color: "#334155" } }
+    : { label: "Your action needed", pillStyle: { background: "rgba(185, 28, 28, 0.12)", color: "#991b1b" } };
 }
 
 function relativeContainerParts(mediaPath: string, downloadRoot: string): string[] {
@@ -747,6 +790,9 @@ type YoutubeSubscriptionRow = {
   // failure state without a per-poll job join. Cleared (NULL) on a successful refresh.
   // Declared optional so tsc is happy before the engine (schema v21) ships the field.
   last_error_message?: string | null;
+  // WP-0322: next scheduled refresh/backoff time, for "Next automatic try HH:MM".
+  // Optional — may be absent on older builds; falls back to next_allowed_refresh_at_ms.
+  next_check_at_ms?: number | null;
 };
 
 type YoutubeSubscriptionStatusChangeReceipt = {
@@ -992,7 +1038,7 @@ const DEFAULT_PRESET_YT_DLP_FRAGMENT_RETRIES = 3;
 const DEFAULT_PRESET_YT_DLP_SLEEP_INTERVAL = 0;
 const DEFAULT_PRESET_YT_DLP_SLEEP_REQUESTS = 0;
 
-export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) {
+export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: LibraryPageProps) {
   const maxBatchUrls = 1500;
   const maxInstagramBatchUrls = 1500;
   const maxImageBatchUrls = 1500;
@@ -1041,11 +1087,21 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   const previousYoutubeSingleActiveTotal = useRef<number | null>(null);
   const [, setYoutubeLineageBackfillBusy] = useState(false);
   const [youtubeLineageBackfillError, setYoutubeLineageBackfillError] = useState<string | null>(null);
+  // WP-0320: shared YouTube start-gate snapshot for the Video Archiver activity strip.
+  const [youtubeGate, setYoutubeGate] = useState<YoutubeGateSnapshot | null>(null);
+  const [youtubeGateBusy, setYoutubeGateBusy] = useState(false);
+  const [youtubeGateMessage, setYoutubeGateMessage] = useState<string | null>(null);
   const [videoLibraries, setVideoLibraries] = useState<VideoLibraryRow[]>([]);
   const [videoLibraryName, setVideoLibraryName] = useState("");
   const [videoLibraryRoot, setVideoLibraryRoot] = useState("");
   const [videoLibraryTransferTargetId, setVideoLibraryTransferTargetId] = useState("");
   const [subscriptions, setSubscriptions] = useState<YoutubeSubscriptionRow[]>([]);
+  // WP-0321: a failed list read (database busy at startup) must never render as "0
+  // subscriptions"; keep the last good list, say so, and retry a few times.
+  const [subscriptionsListState, setSubscriptionsListState] = useState<"loading" | "ready" | "failed">("loading");
+  const subscriptionsListRetries = useRef(0);
+  // Points at the latest `refresh` so the retry timer never calls a stale closure.
+  const refreshRef = useRef<(() => Promise<void>) | null>(null);
   const [instagramSubscriptions, setInstagramSubscriptions] = useState<InstagramSubscriptionRow[]>(
     [],
   );
@@ -1530,11 +1586,14 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
   const subscriptionOverview = useMemo(() => {
     let updating = 0;
     let errored = 0;
+    let needsYourAction = 0;
+    let appIsRetrying = 0;
     let lastSync: number | null = null;
-    // WP-0264: per-kind breakdown of the failing subs, so the status strip reads
-    // "3 sign-in · 16 handle not found · 24 busy" instead of a bare "45 need attention".
-    // Classify each failing sub's last_error_message and count by the plain label.
+    // WP-0264/WP-0322: per-kind breakdown of the failing subs, so the status strip reads
+    // "3 sign-in · 16 handle not found · 24 busy" instead of a bare "45 need attention", and
+    // splits into "Needs your action" (whoActs=you) vs "App is retrying" (whoActs=app).
     const kindCounts = new Map<string, number>();
+    const kindWhoActs = new Map<string, "you" | "app">();
     for (const sub of visibleSubscriptions) {
       if (activeRefreshSubIds.has(sub.id)) updating += 1;
       // WP: bucket via the shared helper so the strip counts, the clickable categories, and the
@@ -1543,14 +1602,18 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       if (bucket) {
         errored += 1;
         kindCounts.set(bucket, (kindCounts.get(bucket) ?? 0) + 1);
+        const chip = subscriptionAttentionChip(sub);
+        kindWhoActs.set(bucket, chip?.whoActs === "app" ? "app" : "you");
+        if (chip?.whoActs === "app") appIsRetrying += 1;
+        else needsYourAction += 1;
       }
       const checked = sub.last_checked_at_ms ?? null;
       if (checked != null && (lastSync == null || checked > lastSync)) lastSync = checked;
     }
     const breakdown = Array.from(kindCounts.entries())
       .sort((a, b) => b[1] - a[1])
-      .map(([label, count]) => ({ label, count }));
-    return { total: visibleSubscriptions.length, updating, errored, lastSync, breakdown };
+      .map(([label, count]) => ({ label, count, whoActs: kindWhoActs.get(label) ?? "you" }));
+    return { total: visibleSubscriptions.length, updating, errored, needsYourAction, appIsRetrying, lastSync, breakdown };
   }, [visibleSubscriptions, activeRefreshSubIds]);
   // WP: the subscription list actually rendered. When an attention filter is active it narrows to
   // just the failing subs (optionally one failure bucket); otherwise it is the full group-filtered
@@ -1560,7 +1623,13 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     return visibleSubscriptions.filter((sub) => {
       const bucket = subscriptionAttentionBucket(sub);
       if (!bucket) return false;
-      return attentionFilter === "__all__" || bucket === attentionFilter;
+      if (attentionFilter === "__all__") return true;
+      // WP-0322: "__you__" / "__app__" filter by who-acts instead of one failure kind.
+      if (attentionFilter === "__you__" || attentionFilter === "__app__") {
+        const chip = subscriptionAttentionChip(sub);
+        return attentionFilter === "__you__" ? chip?.whoActs !== "app" : chip?.whoActs === "app";
+      }
+      return bucket === attentionFilter;
     });
   }, [attentionFilter, visibleSubscriptions]);
   const [subscriptionListRenderLimit, setSubscriptionListRenderLimit] = useState(
@@ -2076,8 +2145,20 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     );
     setItemsLoadingMore(false);
     if (nextRules) setBatchRules(nextRules);
-    if (nextSubscriptions) setSubscriptions(nextSubscriptions);
-    else if (wantsSubscriptions) markSubscriptionProjectionFailure("activity");
+    if (nextSubscriptions) {
+      setSubscriptions(nextSubscriptions);
+      setSubscriptionsListState("ready");
+      subscriptionsListRetries.current = 0;
+    } else if (wantsSubscriptions) {
+      markSubscriptionProjectionFailure("activity");
+      setSubscriptionsListState("failed");
+      if (subscriptionsListRetries.current < 5) {
+        subscriptionsListRetries.current += 1;
+        window.setTimeout(() => {
+          void refreshRef.current?.();
+        }, 3_000);
+      }
+    }
     if (nextGroups) setSubscriptionGroups(nextGroups);
     if (nextVideoLibraries) setVideoLibraries(nextVideoLibraries);
     if (nextInstagramSubscriptions) setInstagramSubscriptions(nextInstagramSubscriptions);
@@ -2113,6 +2194,9 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     youtubeSingleHistoryAppliedSearch,
     youtubeSingleHistoryDirection,
   ]);
+  useEffect(() => {
+    refreshRef.current = refresh;
+  }, [refresh]);
 
   const loadMoreItems = useCallback(async () => {
     if (itemsLoadingMore || !itemsHasMore) return;
@@ -2550,13 +2634,60 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     };
   }, [refresh, showMediaLibrary, showVideoIngest, videoArchiverTab, visible]);
 
+  const refreshYoutubeGate = useCallback(async () => {
+    try {
+      const snapshot = await invoke<{ youtube_gate: YoutubeGateSnapshot }>("jobs_track_runtime_get");
+      setYoutubeGate(snapshot.youtube_gate);
+    } catch {
+      // Keep the last known gate state on a transient read failure.
+    }
+  }, []);
+
+  async function retryYoutubeGateNow() {
+    setYoutubeGateBusy(true);
+    setYoutubeGateMessage(null);
+    try {
+      const result = await invoke<{ next_eligible_probe_at_ms: number }>("youtube_controlled_probe");
+      setYoutubeGateMessage(
+        `One-video retry eligible at ${new Date(result.next_eligible_probe_at_ms).toLocaleString()}.`,
+      );
+      await refreshYoutubeGate();
+    } catch (e) {
+      setYoutubeGateMessage(`Error: ${String(e)}`);
+    } finally {
+      setYoutubeGateBusy(false);
+    }
+  }
+
+  async function returnYoutubeGateToBaseline() {
+    setYoutubeGateBusy(true);
+    setYoutubeGateMessage(null);
+    try {
+      await Promise.all([
+        invoke("youtube_protection_return_to_baseline", { operation: "download" }),
+        invoke("youtube_protection_return_to_baseline", { operation: "enumeration" }),
+      ]);
+      setYoutubeGateMessage("Automatic protection returned to the saved baseline.");
+      await refreshYoutubeGate();
+    } catch (e) {
+      setYoutubeGateMessage(`Error: ${String(e)}`);
+    } finally {
+      setYoutubeGateBusy(false);
+    }
+  }
+
+  usePollingLoop(refreshYoutubeGate, {
+    enabled: visible && showVideoIngest,
+    intervalMs: 30_000,
+  });
+
   usePollingLoop(
     async () => {
       await refreshYoutubeSingleActivity();
     },
     {
       enabled: visible && showVideoIngest && videoArchiverTab === "youtube_single",
-      intervalMs: (youtubeSingleActivityPage?.active_total ?? 0) > 0 ? 750 : 2_500,
+      intervalMs: 5_000,
     },
   );
 
@@ -3805,6 +3936,40 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     }
   }
 
+  // WP-0322: builds the FailureExplainer action-handler map for one YouTube subscription,
+  // wired only to existing commands/flows (queueSubscription, editSubscription,
+  // setSubscriptionManualStatus, openYoutubeSubscriptionFolder, returnYoutubeGateToBaseline,
+  // tools_ytdlp_install). Any action id with no safe existing command is left unset, so
+  // FailureExplainer omits its button rather than inventing a backend call.
+  function subscriptionFailureActionHandlers(sub: YoutubeSubscriptionRow): FailureActionHandlers {
+    return {
+      retry_now: () => void queueSubscription(sub.id),
+      check_again: () => void queueSubscription(sub.id),
+      edit_link: () => editSubscription(sub),
+      keep_as_archive: () => {
+        editSubscription(sub);
+        setNotice("Uncheck Active, then save to keep this subscription as a read-only archive.");
+      },
+      mark_deleted: () => void setSubscriptionManualStatus(sub, "deleted"),
+      connect_signin: () => onOpenOptions?.(),
+      reconnect_signin: () => onOpenOptions?.(),
+      slower_pacing: () => onOpenOptions?.(),
+      return_to_normal: () => void returnYoutubeGateToBaseline(),
+      open_on_youtube: () => window.open(sub.source_url, "_blank", "noopener,noreferrer"),
+      open_folder: () => void openYoutubeSubscriptionFolder(sub.id),
+      change_folder: () => editSubscription(sub),
+      repair_helper: () => {
+        setBusy(true);
+        setNotice(null);
+        setError(null);
+        invoke("tools_ytdlp_install")
+          .then(() => setNotice("Repaired the YouTube download helper."))
+          .catch((e) => setError(String(e)))
+          .finally(() => setBusy(false));
+      },
+    };
+  }
+
   function resetInstagramSubscriptionEditor() {
     setInstagramSubscriptionEditId(null);
     setInstagramSubscriptionTitle("");
@@ -3919,6 +4084,22 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
     } finally {
       setBusy(false);
     }
+  }
+
+  // WP-0322: FailureExplainer action-handler map for an Instagram/TikTok subscription. Only
+  // wired to existing commands; destructive delete is intentionally NOT mapped to mark_deleted
+  // (no soft "archive, keep videos" status exists for these providers yet).
+  function socialFailureActionHandlers(
+    sub: { id: string; source_url: string },
+    provider: "instagram" | "tiktok",
+  ): FailureActionHandlers {
+    const queue = provider === "instagram" ? queueInstagramSubscription : queueTiktokSubscription;
+    return {
+      retry_now: () => void queue(sub.id),
+      check_again: () => void queue(sub.id),
+      open_instagram: () => window.open(sub.source_url, "_blank", "noopener,noreferrer"),
+      retry_later: () => window.open(sub.source_url, "_blank", "noopener,noreferrer"),
+    };
   }
 
   async function queueAllActiveInstagramSubscriptions() {
@@ -4434,15 +4615,40 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       ? "Other website videos"
       : "Single videos";
 
+  // WP-0320: shared YouTube start-gate plain text, shown on the Video Archiver
+  // page only (the only place a held/waiting gate blocks a visible queue).
+  const youtubeGateStripText = mode === "video_ingest" ? youtubeGateText(youtubeGate) : null;
+
   return (
-    <section>
+    <section className={mode !== "media_library" && mode !== "all" ? "archiver-operator" : undefined}>
       <h1>{title}</h1>
+      {mode !== "media_library" && mode !== "all" && <DownloadActivity visible={visible} compact source={mode === "video_ingest" ? (videoArchiverTab === "website" ? "other" : "youtube") : mode === "instagram_archive" ? "instagram" : mode === "tiktok_archive" ? "tiktok" : "images"} gateText={youtubeGateStripText} />}
+      {youtubeGateStripText ? (
+        <div className="jobs-youtube-gate" role="status" data-testid="video-archiver-youtube-gate">
+          <strong>YouTube start gate</strong>
+          <span>{youtubeGateStripText}</span>
+          {youtubeGateMessage ? <small>{youtubeGateMessage}</small> : null}
+          <div className="row" style={{ marginTop: 4 }}>
+            <button type="button" disabled={youtubeGateBusy} onClick={() => void retryYoutubeGateNow()}>
+              Retry now
+            </button>
+            <button type="button" disabled={youtubeGateBusy} onClick={() => void returnYoutubeGateToBaseline()}>
+              Return to baseline
+            </button>
+            {onOpenOptions ? (
+              <button type="button" onClick={onOpenOptions}>
+                Open protection settings
+              </button>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
 
       {error ? <div className="error">{error}</div> : null}
       {notice ? <div className="card">{notice}</div> : null}
 
       {showVideoIngest ? (
-        <div
+        <details
           style={{
             display: "grid",
             gap: 10,
@@ -4450,6 +4656,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             borderBottom: "1px solid rgba(126, 145, 167, 0.24)",
           }}
         >
+          <summary>Library and storage</summary>
           <div className="row" style={{ alignItems: "center" }}>
             <label style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 280 }}>
               <span>Active library</span>
@@ -4563,7 +4770,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             Export/import and copy/move operate on VoxVulgi metadata. Media files stay in place.
           </div>
           </details>
-        </div>
+        </details>
       ) : null}
 
       {showImportControls ? (
@@ -4644,15 +4851,14 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           </button>
         </div>
       ) : showInstagramArchive || showImageArchive ? (
-        <div className="card segmented" style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <strong>View mode:</strong>
+        <div className="segmented" role="tablist" aria-label="Image Archive workflow" style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <button
             type="button"
             className={advancedMode ? undefined : "seg-on"}
             aria-pressed={!advancedMode}
             onClick={() => setAdvancedMode(false)}
           >
-            Quick
+            Web pages
           </button>
           <button
             type="button"
@@ -4660,12 +4866,10 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             aria-pressed={advancedMode}
             onClick={() => setAdvancedMode(true)}
           >
-            Advanced
+            Pinterest boards
           </button>
           <span style={{ color: "#4b5563", fontSize: 13 }}>
-            {advancedMode
-              ? "Showing all controls including subscriptions, presets, and advanced options."
-              : "Simple mode. Switch to Advanced for subscriptions and extra options."}
+            One-time crawls. Recurring image subscriptions are not available yet.
           </span>
         </div>
       ) : null}
@@ -4727,9 +4931,10 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           {mode === "video_ingest" && videoArchiverTab === "website"
             ? `Paste one or more supported website video links, up to ${maxBatchUrls} at a time.`
             : `Paste one or more direct YouTube video or Shorts links, up to ${maxBatchUrls} at a time.`}{" "}
-          Videos are saved as MKV with selected audio and subtitle tracks embedded to <code>{defaultVideoDownloadsDir || "video"}</code> unless you pick another folder below. Existing MP4 files remain supported.
+          Audio and available subtitles are included in the saved MKV.
         </div>
         <textarea
+          aria-label="Video URLs" data-agent-action-id="downloads.urlbatchtext" data-agent-effect-class="reversible_state_change" data-agent-input-kind="text"
           value={urlBatchText}
           onChange={(e) => setUrlBatchText(e.currentTarget.value)}
           disabled={busy}
@@ -4741,15 +4946,19 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           rows={4}
           style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
         />
+        <div className="row">
+          <button type="button" disabled={busy || parsedUrlCount === 0} data-agent-action-id="downloads.enqueue" data-agent-effect-class="reversible_state_change" onClick={enqueueUrlBatch}>Download videos ({parsedUrlCount})</button>
+        </div>
+        <details className="download-options"><summary>Folder and quality options</summary>
         <div style={{ color: "#4b5563", marginTop: 8 }}>
-          Videos are saved to <code>{defaultVideoDownloadsDir || "-"}</code>. You can change the
-          default in <strong>Options</strong>, or pick a folder just for this batch below.
+          Save to: <code>{urlBatchOutputDir || defaultVideoDownloadsDir || "Default video folder"}</code>
         </div>
         <div className="row">
           <label style={{ display: "flex", alignItems: "center", gap: 8, flex: 1 }}>
             <span>Save to folder (optional)</span>
             <input
-              value={urlBatchOutputDir}
+              aria-label="Download folder" data-agent-action-id="downloads.urlbatchoutputdir" data-agent-effect-class="reversible_state_change" data-agent-input-kind="text"
+          value={urlBatchOutputDir}
               disabled={busy}
               onChange={(e) => setUrlBatchOutputDir(e.currentTarget.value)}
               placeholder="Optional absolute folder path (overrides the video root)"
@@ -4765,7 +4974,8 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span>Preset</span>
             <select
-              value={urlBatchPresetId}
+              aria-label="Download preset" data-agent-action-id="downloads.urlbatchpresetid" data-agent-effect-class="reversible_state_change" data-agent-input-kind="select"
+          value={urlBatchPresetId}
               disabled={busy || !downloadPresets}
               onChange={(e) => setUrlBatchPresetId(e.currentTarget.value)}
               title="A saved set of quality, subtitle, and folder choices applied to this batch."
@@ -4782,14 +4992,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             Sets the quality, subtitles, and folder for this batch.
           </div>
         </div>
-        <div style={{ color: "#4b5563", marginTop: 8 }}>
-          Parsed URLs: {parsedUrlCount}
-        </div>
-        <div className="row">
-          <button type="button" disabled={busy || parsedUrlCount === 0} onClick={enqueueUrlBatch}>
-            Queue URL batch ({parsedUrlCount})
-          </button>
-        </div>
+        </details>
         {downloadPreflightRows.length ? (
           <div
             id="youtube-single-download-preflight"
@@ -4900,13 +5103,14 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             </div>
           </div>
         ) : null}
+        <details className="download-options"><summary>Technical queue state</summary>
         <div
           id="youtube-single-live-queue"
           data-testid="youtube-single-live-queue"
           style={{ borderTop: "1px solid #e5e7eb", marginTop: 16, paddingTop: 12 }}
         >
           <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
-            <h3 style={{ margin: 0 }}>Queued and downloading</h3>
+            <h3 style={{ margin: 0 }}>Technical queue state</h3>
             <span style={{ color: "#4b5563" }}>
               {youtubeSingleActivityPage
                 ? `${youtubeSingleActivityPage.running} downloading · ${youtubeSingleActivityPage.queued} queued`
@@ -4932,7 +5136,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                       return (
                         <tr key={job.id} data-testid={`youtube-single-live-job-${job.id}`}>
                           <td>
-                            <strong>{job.status === "running" ? "Downloading" : "Queued"}</strong>
+                            <strong>{job.status === "running" ? ((job.progress || 0) <= 0.05001 ? "Preparing / provider pacing" : "Downloading") : "Queued"}</strong>
                             <div style={{ color: "#4b5563", fontSize: 12 }}>
                               Job <code>{job.id.slice(0, 8)}</code>
                             </div>
@@ -4960,7 +5164,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                                 style={job.status === "running" ? { width: `${pct}%` } : undefined}
                               />
                             </div>
-                            <strong>{job.status === "running" ? `${pct}%` : "Waiting for its track slot"}</strong>
+                            <strong>{job.status === "running" ? `Job stage ${pct}% (not transfer progress)` : "Waiting for its track slot"}</strong>
                           </td>
                         </tr>
                       );
@@ -4997,6 +5201,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             </div>
           )}
         </div>
+        </details>
         <div style={{ borderTop: "1px solid #e5e7eb", marginTop: 16, paddingTop: 12 }}>
           <div className="row" style={{ justifyContent: "space-between", alignItems: "center" }}>
             <h3 style={{ margin: 0 }}>Downloaded single videos</h3>
@@ -5157,45 +5362,14 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             />
           </label>
         </div>
-        <div className="row">
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Source format selector</span>
-            <input
-              value={presetFormatPreference}
-              disabled={busy}
-              onChange={(e) => setPresetFormatPreference(e.currentTarget.value)}
-              placeholder="bv*+ba/b"
-            />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Quality</span>
-            <input
-              value={presetQualityPreference}
-              disabled={busy}
-              onChange={(e) => setPresetQualityPreference(e.currentTarget.value)}
-              placeholder="best or 1080p"
-            />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span>Subtitles</span>
-            <select
-              value={presetSubtitleMode}
-              disabled={busy}
-              onChange={(e) => setPresetSubtitleMode(e.currentTarget.value)}
-            >
-              <option value="auto">auto</option>
-              <option value="embed">embed</option>
-              <option value="">off</option>
-            </select>
-          </label>
-        </div>
+        <p>Best available video and original audio · MKV · Original-language and English subtitles when available.</p>
         <p className="muted">
           Download speed, retries, throttling, and request pacing are owned by Options → Video Archiver.
           Changing a preset here preserves those Options-managed runtime values.
         </p>
         <p className="muted">
-          Source format chooses which video and audio streams to request. Quality limits resolution
-          when needed, while Subtitles controls whether available captions are embedded in the MKV.
+          Archived videos have no resolution cap. Authored captions are preferred; automatic captions and
+          source-provided English translations are used when needed. Missing captions are reported.
           Path and filename templates decide the folders and names created for this preset.
         </p>
         <div className="row">
@@ -5268,8 +5442,8 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
       ) : null}
 
       {showYoutubeRecurringPanel && (mode === "video_ingest" || advancedMode) ? (
-        <div className="card">
-        <h2>Subscription groups (optional)</h2>
+        <details>
+        <summary>Organize subscription groups</summary>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Groups are optional <strong>labels</strong> for organizing your subscriptions — like
           folders you can drop channels/playlists into. A subscription can be in several groups at
@@ -5360,7 +5534,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             </tbody>
           </table>
         </div>
-        </div>
+        </details>
       ) : null}
 
       {showYoutubeRecurringPanel ? (
@@ -5371,7 +5545,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         >
         <h2>Subscriptions</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Manage continuous channel and profile archiving across YouTube, Instagram, and TikTok with automated interval checking and deduplicated downloads.
+          Automatically check your saved channels and playlists for new videos.
         </div>
 
         {/* WP-0302: Unified toolbar for cross-provider filtering, status selection, sorting, search, and primary actions */}
@@ -5681,7 +5855,13 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         </details>
 
         <div style={{ color: "#4b5563", marginTop: 4 }}>
-          Saved subscriptions: {subscriptions.length}
+          {subscriptionsListState === "failed"
+            ? subscriptions.length
+              ? `Saved subscriptions: ${subscriptions.length} (could not refresh — database busy; retrying)`
+              : "Could not load your subscriptions (database busy) — retrying automatically; use Reload list if this persists."
+            : subscriptionsListState === "loading" && !subscriptions.length
+              ? "Loading your subscriptions…"
+              : `Saved subscriptions: ${subscriptions.length}`}
           {subscriptionGroupFilterId ? ` (filtered: ${groupNameById.get(subscriptionGroupFilterId) ?? "group"})` : ""}
         </div>
 
@@ -5701,19 +5881,31 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
               className="sub-status-metric sub-status-error"
               style={{ display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}
             >
-              <button
-                type="button"
-                style={attentionFilterButtonStyle(attentionFilter === "__all__", true)}
-                onClick={() => setAttentionFilter(attentionFilter === "__all__" ? null : "__all__")}
-                title="Show only the subscriptions that need attention"
-              >
-                {subscriptionOverview.errored} need attention
-              </button>
+              {subscriptionOverview.needsYourAction ? (
+                <button
+                  type="button"
+                  style={attentionFilterButtonStyle(attentionFilter === "__you__", true)}
+                  onClick={() => setAttentionFilter(attentionFilter === "__you__" ? null : "__you__")}
+                  title="Show only subscriptions that need something from you"
+                >
+                  Needs your action: {subscriptionOverview.needsYourAction}
+                </button>
+              ) : null}
+              {subscriptionOverview.appIsRetrying ? (
+                <button
+                  type="button"
+                  style={attentionFilterButtonStyle(attentionFilter === "__app__", true, "app")}
+                  onClick={() => setAttentionFilter(attentionFilter === "__app__" ? null : "__app__")}
+                  title="Show only subscriptions the app is automatically retrying"
+                >
+                  App is retrying: {subscriptionOverview.appIsRetrying}
+                </button>
+              ) : null}
               {subscriptionOverview.breakdown.map((b) => (
                 <button
                   key={b.label}
                   type="button"
-                  style={attentionFilterButtonStyle(attentionFilter === b.label, false)}
+                  style={attentionFilterButtonStyle(attentionFilter === b.label, false, b.whoActs)}
                   onClick={() => setAttentionFilter(attentionFilter === b.label ? null : b.label)}
                   title={`Show only: ${compactFailureLabel(b.label)}`}
                 >
@@ -5833,11 +6025,12 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                   const pct =
                     total && total > 0 ? Math.min(100, Math.round((downloaded / total) * 100)) : null;
                   const selected = sub.id === selectedSubscriptionId;
-                  const stateLabel = pres.label;
+                  const failure = subscriptionAttentionChip(sub);
+                  const errorPres = runState === "error" ? whoActsPillPresentation(failure?.whoActs) : null;
+                  const stateLabel = errorPres?.label ?? pres.label;
                   const act = subActivity[sub.id];
                   const liveActive =
                     activity.checking || activity.running > 0 || activity.queued > 0;
-                  const failure = subscriptionAttentionChip(sub);
                   const showFailureChip = failure != null;
                   return (
                     <button
@@ -5861,7 +6054,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                           })()}
                           {sub.title}
                         </span>
-                        <span className={`sub-pill ${pres.pillClassName}`} style={pres.pillStyle}>{stateLabel}</span>
+                        <span className={`sub-pill ${pres.pillClassName}`} style={errorPres?.pillStyle ?? pres.pillStyle}>{stateLabel}</span>
                       </div>
                       <div className="sub-list-sub">
                         <span className="sub-list-type">{inferSubscriptionType(sub.source_url)}</span>
@@ -5894,13 +6087,14 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                         </div>
                       ) : null}
                       {showFailureChip && failure ? (
-                        <div
-                          className="sub-list-sub"
-                          style={{ alignItems: "center", gap: 6 }}
-                          title={sub.last_error_message ?? ""}
-                        >
-                          <span style={toneStyle(failure.tone)}>{failure.label}</span>
+                        <div className="sub-list-sub" style={{ alignItems: "center", gap: 6 }} title={sub.last_error_message ?? ""}>
+                          <FailureExplainer failure={failure} variant="compact" />
                           <span className="sub-list-count">{failure.requirement}</span>
+                        </div>
+                      ) : null}
+                      {showFailureChip && failure && sub.last_error_message ? (
+                        <div className="sub-list-sub" title={sub.last_error_message}>
+                          <span className="sub-list-count">{truncateErrorText(sub.last_error_message)}</span>
                         </div>
                       ) : null}
                       <div className="sub-bar">
@@ -5975,18 +6169,19 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
               );
               const runState = subscriptionRunState(sub, activity);
               const pres = subscriptionRunPresentation(runState);
-              const stateLabel = pres.label;
+              const detailFailure = subscriptionAttentionChip(sub);
+              const detailErrorPres = runState === "error" ? whoActsPillPresentation(detailFailure?.whoActs) : null;
+              const stateLabel = detailErrorPres?.label ?? pres.label;
               const act = subActivity[sub.id];
               const liveActive =
                 activity.checking || activity.running > 0 || activity.queued > 0;
-              const detailFailure = subscriptionAttentionChip(sub);
               const showDetailFailure = detailFailure != null;
 
               return (
                 <>
                   <div className="sub-detail-head">
                     <span className="sub-detail-title">{sub.title}</span>
-                    <span className={`sub-pill ${pres.pillClassName}`} style={pres.pillStyle}>{stateLabel}</span>
+                    <span className={`sub-pill ${pres.pillClassName}`} style={detailErrorPres?.pillStyle ?? pres.pillStyle}>{stateLabel}</span>
                   </div>
 
                   {/* 4 Detail Tabs: Overview, Media, Activity, Settings */}
@@ -6037,21 +6232,15 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                   {subscriptionDetailTab === "overview" ? (
                     <div>
                       {showDetailFailure && detailFailure ? (
-                        <div
-                          className="sub-detail-progress"
-                          style={{ display: "flex", flexDirection: "column", gap: 4 }}
-                        >
-                          <span>
-                            <span style={toneStyle(detailFailure.tone)}>{detailFailure.label}</span>
-                          </span>
-                          <span>{detailFailure.requirement}</span>
-                          {detailFailure.tone === "action" ? (
-                            <span style={{ color: "#4b5563", fontSize: 12 }}>
-                              {detailFailure.kind === "auth_required"
-                                ? "Open Options to refresh your YouTube sign-in."
-                                : "Open the Edit form above to update this subscription’s URL."}
-                            </span>
-                          ) : null}
+                        <div className="sub-detail-progress">
+                          <FailureExplainer
+                            failure={detailFailure}
+                            rawMessage={sub.last_error_message}
+                            lastErrorAtMs={sub.last_error_at_ms}
+                            nextCheckAtMs={sub.next_check_at_ms ?? sub.next_allowed_refresh_at_ms}
+                            actionHandlers={subscriptionFailureActionHandlers(sub)}
+                            disabled={busy}
+                          />
                         </div>
                       ) : null}
                       <div className="sub-detail-progress">
@@ -6601,13 +6790,15 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           use your connected browser sign-in. To keep a complete profile updated over time, add it in the <strong>Subscriptions</strong> tab.
         </div>
         <textarea
-          value={instagramBatchText}
+          aria-label="instagram source links" data-agent-action-id="archiver.instagram.links" data-agent-effect-class="reversible_state_change" data-agent-input-kind="text" value={instagramBatchText}
           onChange={(e) => setInstagramBatchText(e.currentTarget.value)}
           disabled={busy}
           placeholder={"https://www.instagram.com/p/abc123\nhttps://www.instagram.com/yourdad/"}
           rows={4}
           style={{ width: "100%", boxSizing: "border-box", resize: "vertical" }}
         />
+        <div className="row"><button type="button" disabled={busy || parsedInstagramUrlCount === 0} data-agent-action-id="archiver.instagram.enqueue" data-agent-effect-class="reversible_state_change" onClick={enqueueInstagramBatch}>Download posts ({parsedInstagramUrlCount})</button></div>
+        <details className="download-options"><summary>Sign-in and folder options</summary>
         <div style={{ color: "#4b5563", marginTop: 8 }}>
           Posts are saved to <code>{defaultInstagramDownloadsDir || "-"}</code>. You can change the
           default in <strong>Options</strong>, or pick a folder just for this batch below.
@@ -6680,18 +6871,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
             Choose folder
           </button>
         </div>
-        <div style={{ color: "#4b5563", marginTop: 8 }}>
-          Parsed Instagram URLs: {parsedInstagramUrlCount}
-        </div>
-        <div className="row">
-          <button
-            type="button"
-            disabled={busy || parsedInstagramUrlCount === 0}
-            onClick={enqueueInstagramBatch}
-          >
-            Queue Instagram batch ({parsedInstagramUrlCount})
-          </button>
-        </div>
+        </details>
         </div>
 
         <div className="card">
@@ -7059,8 +7239,8 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                             </span>
                           ) : null}
                           {sub.hold_reason ? (
-                            <span className="sub-status-badge" style={{ background: "rgba(185, 28, 28, 0.12)", color: "#991b1b" }}>
-                              Needs attention
+                            <span className="sub-status-badge" style={whoActsPillPresentation(classifyFailure(sub.hold_reason ?? sub.last_error ?? null)?.whoActs).pillStyle}>
+                              {whoActsPillPresentation(classifyFailure(sub.hold_reason ?? sub.last_error ?? null)?.whoActs).label}
                             </span>
                           ) : null}
                           {sub.auth_session_configured ? (
@@ -7116,10 +7296,17 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                       {sub.hold_reason ? (
                         <div className="error-inline" role="alert">
                           <strong>{sub.last_failure_class || "provider failure"}:</strong> {sub.hold_reason}
-                          {sub.last_error ? <div>{sub.last_error}</div> : null}
                         </div>
-                      ) : sub.last_error ? (
-                        <div className="error-inline"><strong>{sub.last_failure_class || "last refresh error"}:</strong> {sub.last_error}</div>
+                      ) : null}
+                      {sub.last_error ? (
+                        <FailureExplainer
+                          failure={classifyFailure(sub.last_error, { consecutiveFailures: sub.consecutive_failures })}
+                          rawMessage={sub.last_error}
+                          lastErrorAtMs={sub.last_error_at_ms}
+                          nextCheckAtMs={sub.next_allowed_refresh_at_ms}
+                          actionHandlers={socialFailureActionHandlers(sub, "instagram")}
+                          disabled={busy}
+                        />
                       ) : null}
                       <div className="row sub-detail-actions">
                         <button type="button" disabled={busy} onClick={() => queueInstagramSubscription(sub.id)}>
@@ -7301,26 +7488,26 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         <div className="archiver-workspace" data-testid="tiktok-archiver-workspace">
           <div className="segmented archiver-workflow-tabs" role="tablist" aria-label="TikTok Archiver workflow">
             <button type="button" role="tab" className={tiktokArchiverTab === "single" ? "seg-on" : undefined} aria-selected={tiktokArchiverTab === "single"} onClick={() => setTiktokArchiverTab("single")}>Single videos</button>
-            <button type="button" role="tab" className={tiktokArchiverTab === "subscriptions" ? "seg-on" : undefined} aria-selected={tiktokArchiverTab === "subscriptions"} onClick={() => setTiktokArchiverTab("subscriptions")}>Profile subscriptions</button>
+            <button type="button" role="tab" className={tiktokArchiverTab === "subscriptions" ? "seg-on" : undefined} aria-selected={tiktokArchiverTab === "subscriptions"} onClick={() => setTiktokArchiverTab("subscriptions")}>Subscriptions</button>
           </div>
 
           {tiktokArchiverTab === "single" ? (
             <div role="tabpanel" style={{ marginTop: 16 }}>
               <h2>TikTok single videos</h2>
-              <p>Paste one or more TikTok video links. These run in the independent TikTok single lane.</p>
-              <textarea value={tiktokBatchText} onChange={(event) => setTiktokBatchText(event.currentTarget.value)} rows={5} disabled={busy} placeholder={"https://www.tiktok.com/@creator/video/1234567890"} style={{ width: "100%", boxSizing: "border-box" }} />
+              <p>Paste TikTok video links to download them once.</p>
+              <textarea aria-label="tiktok source links" data-agent-action-id="archiver.tiktok.links" data-agent-effect-class="reversible_state_change" data-agent-input-kind="text" value={tiktokBatchText} onChange={(event) => setTiktokBatchText(event.currentTarget.value)} rows={5} disabled={busy} placeholder={"https://www.tiktok.com/@creator/video/1234567890"} style={{ width: "100%", boxSizing: "border-box" }} />
               <div className="row">
                 <label style={{ flex: 1 }}>Save to folder (optional)<input value={tiktokBatchOutputDir} onChange={(event) => setTiktokBatchOutputDir(event.currentTarget.value)} disabled={busy} style={{ width: "100%" }} /></label>
                 <label style={{ display: "flex", alignItems: "center", gap: 8 }}><input type="checkbox" checked={tiktokBatchUseBrowserCookies} onChange={(event) => setTiktokBatchUseBrowserCookies(event.currentTarget.checked)} disabled={busy} />Use browser sign-in</label>
                 {tiktokBatchUseBrowserCookies ? <select value={tiktokBatchBrowserCookieSource} onChange={(event) => setTiktokBatchBrowserCookieSource(event.currentTarget.value)}><option value="firefox">Firefox</option><option value="chrome">Chrome</option><option value="edge">Edge</option><option value="opera">Opera</option></select> : null}
-                <button type="button" disabled={busy || !tiktokBatchText.trim()} onClick={enqueueTiktokBatch}>Queue TikTok videos</button>
+                <button type="button" disabled={busy || !tiktokBatchText.trim()} data-agent-action-id="archiver.tiktok.enqueue" data-agent-effect-class="reversible_state_change" onClick={enqueueTiktokBatch}>Queue TikTok videos</button>
               </div>
             </div>
           ) : (
             <div role="tabpanel" style={{ marginTop: 16 }}>
               <div className="row" style={{ justifyContent: "space-between" }}>
-                <div><h2>TikTok profile subscriptions</h2><p>Saved profiles refresh in the independent TikTok background lane.</p></div>
-                <button type="button" disabled={busy} onClick={queueAllTiktokSubscriptions}>Queue due profiles</button>
+                <div><h2>TikTok profile subscriptions</h2><p>Automatically check these profiles for new videos.</p></div>
+                <button type="button" disabled={busy} onClick={queueAllTiktokSubscriptions}>Check for new videos</button>
               </div>
               <div className="row">
                 <label style={{ flex: 1 }}>Name<input value={tiktokSubscriptionTitle} onChange={(event) => setTiktokSubscriptionTitle(event.currentTarget.value)} style={{ width: "100%" }} /></label>
@@ -7346,7 +7533,16 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
                       <strong>{sub.title}</strong>
                       <div style={{ color: "#4b5563", overflow: "hidden", textOverflow: "ellipsis" }}>{sub.source_url}</div>
                       <small>{sub.active ? "Active" : "Paused"} · every {sub.refresh_interval_minutes} min · cap {sub.max_items_per_refresh} · {sub.provider_name}{sub.provider_version ? ` ${sub.provider_version}` : ""} · last discovery {sub.last_canonical_discovery_count} · checkpoint {sub.cursor_json ? "saved" : "not established"}</small>
-                      {sub.hold_reason ? <div className="error-inline" role="alert"><strong>{sub.last_failure_class || "provider failure"}:</strong> {sub.hold_reason}</div> : sub.last_error ? <div className="error-inline"><strong>{sub.last_failure_class || "last refresh error"}:</strong> {sub.last_error}</div> : null}
+                      {sub.hold_reason ? <div className="error-inline" role="alert"><strong>{sub.last_failure_class || "provider failure"}:</strong> {sub.hold_reason}</div> : null}
+                      {sub.last_error ? (
+                        <FailureExplainer
+                          failure={classifyFailure(sub.last_error, { consecutiveFailures: sub.consecutive_failures })}
+                          rawMessage={sub.last_error}
+                          nextCheckAtMs={sub.next_allowed_refresh_at_ms}
+                          actionHandlers={socialFailureActionHandlers(sub, "tiktok")}
+                          disabled={busy}
+                        />
+                      ) : null}
                     </div>
                     <button type="button" disabled={busy} onClick={() => queueTiktokSubscription(sub.id)}>Queue now</button>
                     <button type="button" disabled={busy} onClick={() => editTiktokSubscription(sub)}>Edit</button>
@@ -7367,7 +7563,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           you do not have to add pins one at a time.
         </div>
         <textarea
-          value={pinterestBatchText}
+          aria-label="pinterest source links" data-agent-action-id="archiver.pinterest.links" data-agent-effect-class="reversible_state_change" data-agent-input-kind="text" value={pinterestBatchText}
           onChange={(e) => setPinterestBatchText(e.currentTarget.value)}
           disabled={busy}
           placeholder={"https://www.pinterest.com/example/board-name/\nhttps://www.pinterest.com/example/another-board/"}
@@ -7401,7 +7597,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           <button
             type="button"
             disabled={busy || parsedPinterestUrlCount === 0}
-            onClick={enqueuePinterestBatch}
+            data-agent-action-id="archiver.pinterest.enqueue" data-agent-effect-class="reversible_state_change" onClick={enqueuePinterestBatch}
           >
             Queue Pinterest crawl ({parsedPinterestUrlCount})
           </button>
@@ -7409,19 +7605,18 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
         </div>
       ) : null}
 
-      {showImageArchive ? (
+      {showImageArchive && !advancedMode ? (
         <div className="card">
-        <h2>Image archive (batch)</h2>
+        <h2>Collect images</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Paste a web page link (a blog or forum) and VoxVulgi collects the full-size images from it.
-          Watch progress in <strong>Jobs</strong>. If the site needs a login, paste your sign-in below.
+          Paste web page links to collect their full-size images.
         </div>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Images are saved to <code>{defaultImageDownloadsDir || "-"}</code>. You can change the
           default in <strong>Options</strong>, or pick a folder just for this batch below.
         </div>
         <textarea
-          value={imageBatchUrlsText}
+          aria-label="images source links" data-agent-action-id="archiver.images.links" data-agent-effect-class="reversible_state_change" data-agent-input-kind="text" value={imageBatchUrlsText}
           onChange={(e) => setImageBatchUrlsText(e.currentTarget.value)}
           disabled={busy}
           placeholder={"https://example.com/blog\nhttps://example.com/forum"}
@@ -7541,7 +7736,7 @@ export function LibraryPage({ mode = "all", visible = true }: LibraryPageProps) 
           <button
             type="button"
             disabled={busy || parsedImageUrlCount === 0}
-            onClick={enqueueImageBatch}
+            data-agent-action-id="archiver.images.enqueue" data-agent-effect-class="reversible_state_change" onClick={enqueueImageBatch}
           >
             Queue image batch ({parsedImageUrlCount})
           </button>

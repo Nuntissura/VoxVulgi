@@ -1,0 +1,38 @@
+.download-activity, .archiver-operator {font-family:Arial,sans-serif;font-size:14px;line-height:1.45;color:#172b3b}
+.download-activity h2,.download-activity h3,.archiver-operator h1,.archiver-operator h2,.archiver-operator h3 {font-family:inherit;text-transform:none;letter-spacing:normal;line-height:1.3}
+.download-activity h2 {font-size:19px;margin:0}
+.activity-toolbar {display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:10px 0;border-bottom:1px solid #a5b1bd}
+.activity-toolbar nav {display:flex;gap:4px;flex-wrap:wrap}
+.activity-toolbar button[aria-pressed=true] {background:#224c70;color:white}
+.activity-toolbar button,.activity-actions button,.activity-pagination button {font-family:Arial,sans-serif;font-size:14px;line-height:20px;padding:6px 10px;min-height:34px;display:inline-flex;align-items:center}
+.activity-row {display:grid;grid-template-columns:minmax(180px,2fr) minmax(160px,1fr) auto;gap:12px;padding:12px 0;border-bottom:1px solid #bcc5cd}
+.activity-description,.activity-progress {display:flex;flex-direction:column;gap:4px;min-width:0;overflow-wrap:anywhere}
+.activity-description strong {font-size:14px}
+.activity-description small,.activity-progress small {font-size:12px;color:#415469}
+.activity-actions {display:flex;gap:5px;align-items:start}
+.activity-bar {width:100%;height:7px;background:#b7c4ce;border-radius:3px;overflow:hidden;margin:5px 0}
+.activity-bar span {display:block;height:100%;background:#21639a}
+.activity-bar.is-indeterminate span {background:repeating-linear-gradient(45deg,#7897b0,#7897b0 7px,#afc2d1 7px,#afc2d1 14px)}
+.activity-error {color:#952e17}
+.activity-detail {grid-column:1/-1}
+.activity-detail pre {max-height:180px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.5 ui-monospace,monospace;background:#e6ebef;padding:8px}
+.activity-pagination {display:flex;gap:8px;align-items:center;padding:8px 0;font-size:12px}
+.activity-pagination span {margin-right:auto}
+.activity-empty {color:#415469;margin:10px 0}
+.archiver-operator > .card {border:0;box-shadow:none;background:none;border-radius:0;padding:12px 0;border-top:1px solid #a5b1bd}
+.archiver-operator .row {gap:8px}
+.archiver-operator textarea {font:inherit;max-height:115px}
+.archiver-operator button,.archiver-operator input,.archiver-operator select {font-family:Arial,sans-serif;font-size:14px;line-height:20px}
+.archiver-operator button {padding:6px 10px;min-height:34px}
+.archiver-operator .segmented {flex-wrap:wrap}
+.archiver-operator .segmented button {min-width:0;white-space:nowrap}
+.archiver-operator p {font-size:14px}
+.archiver-operator h1 {font-size:23px;margin:10px 0}
+.archiver-operator h2 {font-size:18px}
+.archiver-operator .download-activity {margin-bottom:10px}
+.activity-compact .activity-toolbar {padding:4px 0}
+.activity-compact .activity-row {padding:8px 0}
+.archiver-operator > details {padding:0!important;margin:4px 0}
+.archiver-operator .download-options {margin:8px 0}
+.archiver-operator .download-options summary {cursor:pointer}
+@media(max-width:650px){.activity-row{grid-template-columns:minmax(0,1fr) auto}.activity-progress{grid-column:1}.activity-actions{grid-column:2;grid-row:1}.activity-pagination{flex-wrap:wrap}}

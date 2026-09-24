@@ -1,0 +1,73 @@
+{
+  "id": "WP-0317",
+  "version": "v1",
+  "status": "DONE",
+  "owner": "Codex",
+  "board": "../TASK_BOARD.md",
+  "refinement": "WP-0317_QUIET_AGENT_CONTROL_AND_DOWNLOAD_RECOVERY_v1_REFINEMENT.md",
+  "operator_request": [
+    "Inspect available app tools and build missing tools for frontend and backend navigation, visual inspection and interaction.",
+    "Add an in-app user manual as an Options subtab; Codex instructions point to the manual.",
+    "Update download behavior, then stop active downloads and ensure every stopped download continues before completion.",
+    "Do not steal focus, pop foreground windows or take mouse/keyboard input; Computer Use is a last resort and is not authorized for this task."
+  ],
+  "requirements": [
+    {
+      "id": "VV-0317-001",
+      "text": "Publish versioned runtime capability discovery with precise availability and reasons, input schemas, effects, limits and manual location."
+    },
+    {
+      "id": "VV-0317-002",
+      "text": "Expose bounded token-authenticated backend job inspection, enqueue, retry, cancellation and restart-with-current-settings using existing product engine behavior; preserve originals, media, library and subscription data."
+    },
+    {
+      "id": "VV-0317-003",
+      "text": "Use explicit exact-job confirmation, attributed receipts and resumable replacement lineage for interruption/recovery; report partial failure truthfully and never lose stopped jobs."
+    },
+    {
+      "id": "VV-0317-004",
+      "text": "Expose frontend navigation, structural controls and declared non-secret product inputs/actions without arbitrary selectors, scripts, native input or foreground activation."
+    },
+    {
+      "id": "VV-0317-005",
+      "text": "Render a searchable Options manual from the same product-owned tool catalog delivered by the bridge, including startup, input/output, examples, limits, failures, recovery and parallel-agent coordination."
+    },
+    {
+      "id": "VV-0317-006",
+      "text": "Retry/restart with current download pacing must not silently inherit obsolete 600-second request sleeps; preserve auth, identity, destination, templates, subtitles and adaptive protection."
+    },
+    {
+      "id": "VV-0317-007",
+      "text": "Distinguish pre-transfer preparation/pacing from byte progress in operator and agent projections."
+    },
+    {
+      "id": "VV-0317-008",
+      "text": "Update project Codex and mirrored agent instructions to discover capabilities and read the built-in manual before concluding an action is unavailable."
+    },
+    {
+      "id": "VV-0317-009",
+      "text": "Retain version 0.1.204 and changelog bytes; use governed core-only build, isolated packaged headless functional and visual proofs, and exact live-job replacement proof."
+    }
+  ],
+  "validation": [
+    "Focused engine recovery/pacing/idempotency tests",
+    "Backend authorization/discovery/receipt tests",
+    "Frontend manual/navigation/semantic-action contracts and build",
+    "Governed core-only build and hidden disposable-root app-boundary tests with inspected snapshots",
+    "Exact stopped-job to replacement reconciliation and fresh live progress"
+  ],
+  "non_goals": [
+    "Offline payload rebuild",
+    "Unrelated UI redesign",
+    "Direct production SQLite rewrites",
+    "Credential export",
+    "Changing or deleting historical media"
+  ],
+  "proof": "../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0317/quiet_agent/summary.md",
+  "runtime_result": {
+    "original_jobs": "both succeeded before any interruption; canonical files verified",
+    "stopped_user_jobs": [],
+    "restart_proof": "isolated exact replacements, independent canonical reads, focused ownership tests",
+    "installed_version": "0.1.204"
+  }
+}

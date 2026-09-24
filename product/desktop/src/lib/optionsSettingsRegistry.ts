@@ -7,7 +7,8 @@ export type OptionsModuleId =
   | "image_archive"
   | "media_library"
   | "jobs"
-  | "diagnostics";
+  | "diagnostics"
+  | "manual";
 
 export type OptionsSettingValueType =
   | "boolean"
@@ -32,8 +33,10 @@ export type OptionsPersistenceAdapterId =
   | "antibot_pacing"
   | "youtube_protection_tuning"
   | "jobs_track_runtime"
+  | "jobs_terminal_retention"
   | "batch_on_import"
   | "diagnostics_trace_root"
+  | "subscription_export"
   | "transient";
 export type OptionsSecretClass = "none" | "credential";
 export type OptionsRestartRequirement = "none" | "app_restart";
@@ -56,13 +59,16 @@ export const OPTIONS_PERSISTENCE_ADAPTER_CONTRACTS: Readonly<Record<OptionsPersi
   youtube_auth: { canonicalReaderRoute: "config_youtube_auth_get", writerRoutes: ["config_youtube_auth_set"], structuredReceipt: "status", capabilityRoute: "config_youtube_auth_preflight" },
   instagram_auth: { canonicalReaderRoute: "config_instagram_auth_get", writerRoutes: ["config_instagram_auth_set"], structuredReceipt: "status", capabilityRoute: "config_instagram_auth_preflight" },
   download_preset: { canonicalReaderRoute: "download_presets_get", writerRoutes: ["download_presets_default_safety_patch"], structuredReceipt: "canonical_value" },
-  download_preset_profile: { canonicalReaderRoute: "download_presets_get", writerRoutes: [], structuredReceipt: "canonical_value" },
+  download_preset_profile: { canonicalReaderRoute: "provider_transfer_settings_get", writerRoutes: [], structuredReceipt: "canonical_value" },
   provider_transfer: { canonicalReaderRoute: "provider_transfer_settings_get", writerRoutes: ["provider_transfer_settings_set"], structuredReceipt: "canonical_value" },
   antibot_pacing: { canonicalReaderRoute: "antibot_pacing_get", writerRoutes: ["antibot_pacing_set"], structuredReceipt: "canonical_value" },
   youtube_protection_tuning: { canonicalReaderRoute: "youtube_protection_tuning_get", writerRoutes: ["youtube_protection_tuning_set", "youtube_protection_tuning_reset"], structuredReceipt: "canonical_value", capabilityRoute: "youtube_protection_status_get" },
   jobs_track_runtime: { canonicalReaderRoute: "jobs_track_runtime_get", writerRoutes: ["jobs_track_runtime_set"], structuredReceipt: "status" },
+  jobs_terminal_retention: { canonicalReaderRoute: "jobs_terminal_retention_get", writerRoutes: ["jobs_terminal_retention_set"], structuredReceipt: "canonical_value" },
   batch_on_import: { canonicalReaderRoute: "config_batch_on_import_get", writerRoutes: ["config_batch_on_import_set"], structuredReceipt: "canonical_value" },
   diagnostics_trace_root: { canonicalReaderRoute: "diagnostics_trace_dir_status", writerRoutes: ["diagnostics_trace_dir_set", "diagnostics_trace_dir_use_default"], structuredReceipt: "status" },
+  // WP-0322: daily subscription-export backup folder + on-demand export.
+  subscription_export: { canonicalReaderRoute: "subscriptions_export_settings_get", writerRoutes: ["subscriptions_export_settings_set"], structuredReceipt: "status", capabilityRoute: "subscriptions_export_now" },
   transient: { canonicalReaderRoute: null, writerRoutes: [], structuredReceipt: null },
 };
 
@@ -77,6 +83,7 @@ export type OptionsModuleDescriptor = {
   label: string;
   description: string;
   available: boolean;
+  contentKind?: "settings" | "manual";
   productId: string;
   testId: string;
 };
@@ -177,6 +184,7 @@ export type OptionsCapabilityStatus = "running" | "success" | "failure" | "stale
 export const OPTIONS_ACTIVE_MODULE_STORAGE_KEY = "voxvulgi.v1.options.active_module";
 
 export const OPTIONS_MODULES: readonly OptionsModuleDescriptor[] = [
+  { id: "manual", contentKind: "manual", label: "User manual", description: "Using VoxVulgi and its quiet agent tools", available: true, productId: "options-manual", testId: "options-manual" },
   {
     id: "general",
     label: "General",
@@ -278,19 +286,25 @@ export const OPTIONS_SETTINGS_REGISTRY: readonly OptionsSettingDescriptor[] = [
   setting({ id: "video-archiver.youtube-browser-session", module: "video_archiver", section: "YouTube sign-in", label: "Connected YouTube browser", help: "Browser-cookie source used by the download engine.", keywords: ["youtube", "login", "cookies", "browser", "session"], valueType: "select", persistence: { source: "tauri_command", adapter: "youtube_auth", key: "config_youtube_auth_set:browser_cookie_source" }, defaultValue: null, validation: { options: ["firefox", "chrome", "edge", "opera"] }, resetBehavior: "explicit_command" }),
   setting({ id: "video-archiver.youtube-manual-cookies", module: "video_archiver", section: "YouTube sign-in", label: "Manual YouTube cookies", help: "Advanced YouTube-only cookie export or file path.", keywords: ["youtube", "login", "cookies", "netscape", "cookie editor"], valueType: "secret", persistence: { source: "tauri_command", adapter: "youtube_auth", key: "config_youtube_auth_set:netscape_cookie_json" }, defaultValue: null, secretClass: "credential", advanced: true, resetBehavior: "explicit_command" }),
   setting({ id: "video-archiver.youtube-test-url", module: "video_archiver", section: "YouTube sign-in", label: "YouTube sign-in test link", help: "Transient URL used to test the saved YouTube session.", keywords: ["youtube", "test", "preflight", "link"], valueType: "text", persistence: { source: "runtime_projection", adapter: "transient", key: "config_youtube_auth_preflight:url" }, defaultValue: "https://youtu.be/wbpLhh3M6L4?si=8QuFih5T__tP1W8b", advanced: true, resetBehavior: "none" }),
+  // WP-0322: automatic + on-demand subscription export (YouTube, plus Instagram/TikTok when their export functions exist).
+  setting({ id: "video-archiver.subscription-export-dir", module: "video_archiver", section: "Subscription backups", label: "Subscription backup folder", help: "Daily automatic export of your subscriptions, kept as the newest 30 copies. Defaults to the app data folder.", keywords: ["export", "backup", "subscriptions", "folder"], valueType: "path", persistence: { source: "tauri_command", adapter: "subscription_export", key: "subscriptions_export_settings_set:dir" }, defaultValue: null, resetBehavior: "explicit_command" }),
   setting({ id: "instagram-archiver.browser-session", module: "instagram_archiver", section: "Instagram sign-in", label: "Connected Instagram browser", help: "Browser-cookie source used by the Instagram download engine.", keywords: ["instagram", "login", "cookies", "browser", "session"], valueType: "select", persistence: { source: "tauri_command", adapter: "instagram_auth", key: "config_instagram_auth_set:browser_cookie_source" }, defaultValue: null, validation: { options: ["firefox", "chrome", "edge", "opera"] }, resetBehavior: "explicit_command" }),
   setting({ id: "instagram-archiver.manual-cookies", module: "instagram_archiver", section: "Instagram sign-in", label: "Manual Instagram cookies", help: "Global Instagram cookie used for single and subscription operations.", keywords: ["instagram", "login", "cookie", "session"], valueType: "secret", persistence: { source: "tauri_command", adapter: "instagram_auth", key: "config_instagram_auth_set:cookie" }, defaultValue: null, secretClass: "credential", advanced: true, resetBehavior: "explicit_command" }),
   setting({ id: "instagram-archiver.test-url", module: "instagram_archiver", section: "Instagram sign-in", label: "Instagram sign-in test link", help: "Transient profile or post URL used to test the saved Instagram session.", keywords: ["instagram", "test", "preflight", "profile", "link"], valueType: "text", persistence: { source: "runtime_projection", adapter: "transient", key: "config_instagram_auth_preflight:url" }, defaultValue: "https://www.instagram.com/instagram/", advanced: true, resetBehavior: "none" }),
-  ...(["instagram", "tiktok"] as const).flatMap((provider) =>
+  ...(["instagram", "tiktok", "youtube"] as const).flatMap((provider) =>
     (["single", "recurring"] as const).flatMap((lane) => {
-      const module = provider === "instagram" ? "instagram_archiver" : "tiktok_archiver";
+      const module = provider === "instagram" ? "instagram_archiver" : provider === "tiktok" ? "tiktok_archiver" : "video_archiver";
       const prefix = `${provider}-archiver.transfer-${lane}`;
-      const laneLabel = lane === "single" ? "single downloads" : "profile subscriptions";
+      const laneLabel = lane === "single" ? "single downloads" : provider === "youtube" ? "subscriptions" : "profile subscriptions";
       return [
-        setting({ id: `${prefix}-fragments`, module, section: "Download throughput", label: `${laneLabel}: pieces at once`, help: "Parallel media fragments used inside each download. This is independent from the queue worker budget.", keywords: [provider, lane, "throughput", "fragments", "speed"], valueType: "integer", persistence: { source: "tauri_command", adapter: "provider_transfer", key: `provider_transfer_settings_set:${provider}_${lane}.concurrent_fragments` }, defaultValue: lane === "single" ? 2 : 1, validation: { min: 1, max: 32 } }),
-        setting({ id: `${prefix}-limit-rate`, module, section: "Download throughput", label: `${laneLabel}: maximum bandwidth`, help: "Optional real yt-dlp bandwidth cap such as 750K, 4M, or 1.5G. Blank means no cap.", keywords: [provider, lane, "throttle", "bandwidth", "limit-rate"], valueType: "text", persistence: { source: "tauri_command", adapter: "provider_transfer", key: `provider_transfer_settings_set:${provider}_${lane}.limit_rate` }, defaultValue: lane === "recurring" ? (provider === "instagram" ? "4M" : "6M") : null }),
-        setting({ id: `${prefix}-sleep-interval`, module, section: "Download throughput", label: `${laneLabel}: delay between items`, help: "Seconds to wait before each provider download. Recurring work can be kept gentler than foreground singles.", keywords: [provider, lane, "pacing", "wait", "items"], valueType: "integer", persistence: { source: "tauri_command", adapter: "provider_transfer", key: `provider_transfer_settings_set:${provider}_${lane}.sleep_interval_secs` }, defaultValue: lane === "recurring" ? (provider === "instagram" ? 3 : 2) : provider === "instagram" ? 1 : 0, validation: { min: 0, max: 86400 } }),
-        setting({ id: `${prefix}-sleep-requests`, module, section: "Download throughput", label: `${laneLabel}: request delay`, help: "Seconds to wait between provider requests. Higher values reduce request pressure.", keywords: [provider, lane, "pacing", "wait", "requests"], valueType: "integer", persistence: { source: "tauri_command", adapter: "provider_transfer", key: `provider_transfer_settings_set:${provider}_${lane}.sleep_requests_secs` }, defaultValue: lane === "recurring" ? 1 : provider === "instagram" ? 1 : 0, validation: { min: 0, max: 10000 } }),
+        // WP-0320: youtube_single/youtube_recurring lane floors, {concurrent_fragments:1, limit_rate:null,
+        // sleep_interval_secs:5, sleep_requests_secs:2} single / {1, null, 10, 3} recurring.
+        setting({ id: `${prefix}-fragments`, module, section: "Download throughput", label: `${laneLabel}: pieces at once`, help: "Parallel media fragments used inside each download. This is independent from the queue worker budget.", keywords: [provider, lane, "throughput", "fragments", "speed"], valueType: "integer", persistence: { source: "tauri_command", adapter: "provider_transfer", key: `provider_transfer_settings_set:${provider}_${lane}.concurrent_fragments` }, defaultValue: provider === "youtube" ? 1 : lane === "single" ? 2 : 1, validation: { min: 1, max: 32 } }),
+        setting({ id: `${prefix}-limit-rate`, module, section: "Download throughput", label: `${laneLabel}: maximum bandwidth`, help: "Optional real yt-dlp bandwidth cap such as 750K, 4M, or 1.5G. Blank means no cap.", keywords: [provider, lane, "throttle", "bandwidth", "limit-rate"], valueType: "text", persistence: { source: "tauri_command", adapter: "provider_transfer", key: `provider_transfer_settings_set:${provider}_${lane}.limit_rate` }, defaultValue: provider === "youtube" ? null : lane === "recurring" ? (provider === "instagram" ? "4M" : "6M") : null }),
+        setting({ id: `${prefix}-sleep-interval`, module, section: "Download throughput", label: `${laneLabel}: delay between items`, help: "Seconds to wait before each provider download. Recurring work can be kept gentler than foreground singles.", keywords: [provider, lane, "pacing", "wait", "items"], valueType: "integer", persistence: { source: "tauri_command", adapter: "provider_transfer", key: `provider_transfer_settings_set:${provider}_${lane}.sleep_interval_secs` }, defaultValue: provider === "youtube" ? (lane === "recurring" ? 10 : 5) : lane === "recurring" ? (provider === "instagram" ? 3 : 2) : provider === "instagram" ? 1 : 0, validation: { min: 0, max: 86400 } }),
+        setting({ id: `${prefix}-sleep-requests`, module, section: "Download throughput", label: `${laneLabel}: request delay`, help: "Seconds to wait between provider requests. Higher values reduce request pressure.", keywords: [provider, lane, "pacing", "wait", "requests"], valueType: "integer", persistence: { source: "tauri_command", adapter: "provider_transfer", key: `provider_transfer_settings_set:${provider}_${lane}.sleep_requests_secs` }, defaultValue: provider === "youtube" ? (lane === "recurring" ? 3 : 2) : lane === "recurring" ? 1 : provider === "instagram" ? 1 : 0, validation: { min: 0, max: 10000 } }),
+        // WP-0321 S4: random extra wait added to sleep_interval_secs before each download; jitter defaults to 0 outside YouTube.
+        setting({ id: `${prefix}-sleep-jitter`, module, section: "Download throughput", label: `${laneLabel}: random extra wait`, help: "Extra random seconds (0..value) added on top of the delay between items so requests do not land on a rigid schedule.", keywords: [provider, lane, "pacing", "jitter", "wait"], valueType: "integer", persistence: { source: "tauri_command", adapter: "provider_transfer", key: `provider_transfer_settings_set:${provider}_${lane}.sleep_jitter_secs` }, defaultValue: provider === "youtube" ? (lane === "single" ? 10 : 5) : 0, validation: { min: 0, max: 86400 } }),
       ];
     }),
   ),
@@ -298,75 +312,42 @@ export const OPTIONS_SETTINGS_REGISTRY: readonly OptionsSettingDescriptor[] = [
   setting({ id: "tiktok-archiver.api-hostname", module: "tiktok_archiver", section: "Session and provider API", label: "TikTok API hostname", help: "Advanced yt-dlp TikTok API hostname override. Blank keeps the pinned provider default.", keywords: ["tiktok", "api", "hostname", "advanced"], valueType: "text", persistence: { source: "tauri_command", adapter: "provider_transfer", key: "provider_transfer_settings_set:tiktok_api_hostname" }, defaultValue: null, advanced: true }),
   setting({ id: "tiktok-archiver.app-info", module: "tiktok_archiver", section: "Session and provider API", label: "TikTok app info", help: "Advanced stable app-info override passed to the TikTok extractor. Blank keeps the pinned provider default.", keywords: ["tiktok", "app", "extractor", "advanced"], valueType: "text", persistence: { source: "tauri_command", adapter: "provider_transfer", key: "provider_transfer_settings_set:tiktok_app_info" }, defaultValue: null, advanced: true }),
   setting({ id: "tiktok-archiver.device-id", module: "tiktok_archiver", section: "Session and provider API", label: "TikTok device ID", help: "Advanced stable device identifier passed to the TikTok extractor. Blank keeps the pinned provider default.", keywords: ["tiktok", "device", "id", "extractor", "advanced"], valueType: "text", persistence: { source: "tauri_command", adapter: "provider_transfer", key: "provider_transfer_settings_set:tiktok_device_id" }, defaultValue: null, advanced: true }),
-  setting({ id: "video-archiver.downloader-profile", module: "video_archiver", section: "Download speed vs. safety", label: "Download safety profile", help: "Derived from the real fields of the current default download preset; choosing a profile writes those fields.", keywords: ["youtube", "download", "fastest", "balanced", "gentle", "safest", "profile"], valueType: "select", persistence: { source: "runtime_projection", adapter: "download_preset_profile", key: "derived:download_presets.default_preset" }, defaultValue: "aggressive", validation: { options: ["aggressive", "balanced", "gentle", "conservative", "custom"] }, resetBehavior: "none" }),
+  // WP-0321 S4: profile id is derived from both YouTube lanes' provider_transfer settings (not the preset).
+  setting({ id: "video-archiver.downloader-profile", module: "video_archiver", section: "YouTube download pacing", label: "Download safety profile", help: "Derived from the current youtube_single and youtube_recurring pacing lanes; choosing a profile writes both lanes.", keywords: ["youtube", "download", "fastest", "balanced", "gentle", "safest", "profile"], valueType: "select", persistence: { source: "runtime_projection", adapter: "download_preset_profile", key: "derived:provider_transfer_settings.youtube_single+youtube_recurring" }, defaultValue: "balanced", validation: { options: ["fastest", "balanced", "gentle", "safest", "custom"] }, resetBehavior: "none" }),
   ...[
-    ["concurrent-fragments", "Pieces at once", "yt_dlp_concurrent_fragments", 4, 1, 32, ["pieces", "fragments", "speed"]],
     ["file-access-retries", "Retries when saving", "yt_dlp_file_access_retries", 10, 1, 1000, ["save", "retry", "disk"]],
     ["retries", "Retries per video", "yt_dlp_retries", 3, 0, 1000, ["video", "retry"]],
     ["fragment-retries", "Retries per piece", "yt_dlp_fragment_retries", 3, 0, 1000, ["piece", "fragment", "retry"]],
-    ["sleep-interval", "Wait between videos", "yt_dlp_sleep_interval", 0, 0, 86400, ["wait", "video", "pacing"]],
-    ["sleep-requests", "Wait between requests", "yt_dlp_sleep_requests", 0, 0, 10000, ["wait", "request", "pacing"]],
   ].map(([id, label, key, defaultValue, min, max, keywords]) => setting({
     id: `video-archiver.downloader-${String(id)}`,
     module: "video_archiver",
-    section: "Download speed vs. safety",
+    section: "Download reliability (all sites)",
     label: String(label),
-    help: "Saved in the current default download preset and applied to new downloads.",
-    keywords: ["youtube", "download", ...(keywords as string[])],
+    help: "Saved in the current default download preset and applied to new downloads on every site.",
+    keywords: ["download", ...(keywords as string[])],
     valueType: "integer",
     persistence: { source: "tauri_command", adapter: "download_preset", key: `download_presets_default_safety_patch:${String(key)}` },
     defaultValue: Number(defaultValue),
     validation: { min: Number(min), max: Number(max) },
     advanced: true,
   })),
-  setting({ id: "video-archiver.downloader-throttled-rate", module: "video_archiver", section: "Download speed vs. safety", label: "Slow-down speed", help: "Fallback transfer-rate threshold in the current default download preset.", keywords: ["youtube", "download", "speed", "throttle", "rate"], valueType: "text", persistence: { source: "tauri_command", adapter: "download_preset", key: "download_presets_default_safety_patch:yt_dlp_throttled_rate" }, defaultValue: "100K", advanced: true }),
-  setting({ id: "video-archiver.downloader-limit-rate", module: "video_archiver", section: "Download speed vs. safety", label: "Maximum transfer bandwidth", help: "Optional yt-dlp --limit-rate cap. This is distinct from the slow-transfer detection threshold.", keywords: ["youtube", "download", "maximum", "bandwidth", "limit-rate"], valueType: "text", persistence: { source: "tauri_command", adapter: "download_preset", key: "download_presets_default_safety_patch:yt_dlp_limit_rate" }, defaultValue: null, advanced: true }),
-  setting({ id: "video-archiver.automatic-protection", module: "video_archiver", section: "Subscription pacing", label: "Automatic YouTube protection", help: "Uses classified, corroborated outcomes to apply a temporary bounded pacing overlay without changing saved downloader settings.", keywords: ["youtube", "adaptive", "automatic", "anti-bot", "protection", "rate limit"], valueType: "boolean", persistence: { source: "tauri_command", adapter: "antibot_pacing", key: "antibot_pacing_set:adaptive_protection_enabled" }, defaultValue: true }),
+  setting({ id: "video-archiver.downloader-throttled-rate", module: "video_archiver", section: "Download reliability (all sites)", label: "Slow-down speed", help: "Fallback transfer-rate threshold in the current default download preset, applied on every site.", keywords: ["download", "speed", "throttle", "rate"], valueType: "text", persistence: { source: "tauri_command", adapter: "download_preset", key: "download_presets_default_safety_patch:yt_dlp_throttled_rate" }, defaultValue: "100K", advanced: true }),
+  // WP-0321 S4: two protection modes only (normal, cooldown); base_wait_secs/max_wait_secs replace the deleted 16-row tuning ladder.
+  setting({ id: "video-archiver.protection-base-wait", module: "video_archiver", section: "When YouTube blocks downloads", label: "First wait", help: "How long to wait before the first automatic test download after YouTube blocks downloads. Doubles after each failed test, up to the longest wait.", keywords: ["youtube", "cooldown", "protection", "wait", "block"], valueType: "integer", persistence: { source: "tauri_command", adapter: "youtube_protection_tuning", key: "youtube_protection_tuning_set:base_wait_secs" }, defaultValue: 3600, validation: { min: 600, max: 86400 }, advanced: true }),
+  setting({ id: "video-archiver.protection-max-wait", module: "video_archiver", section: "When YouTube blocks downloads", label: "Longest wait", help: "The cap the doubling first wait can reach while YouTube keeps blocking downloads.", keywords: ["youtube", "cooldown", "protection", "wait", "cap"], valueType: "integer", persistence: { source: "tauri_command", adapter: "youtube_protection_tuning", key: "youtube_protection_tuning_set:max_wait_secs" }, defaultValue: 21600, validation: { min: 600, max: 1209600 }, advanced: true }),
   ...[
     ["recurring-interval", "Wait between subscriptions", "recurring_min_interval_secs", 60, 0, 3600],
     ["recurring-jitter", "Extra random wait", "recurring_jitter_secs", 60, 0, 3600],
-    ["enumeration-sleep", "Pause while reading a channel", "enumeration_sleep_requests", 2, 0, 60],
-    ["download-min-sleep", "Download wait minimum", "recurring_download_min_sleep_secs", 5, 0, 300],
-    ["download-max-sleep", "Download wait maximum", "recurring_download_max_sleep_secs", 10, 0, 300],
     ["update-all-batch", "Subscriptions per Update all", "update_all_batch_size", 25, 1, 5000],
   ].map(([id, label, key, defaultValue, min, max]) => setting({
     id: `video-archiver.pacing-${String(id)}`,
     module: "video_archiver",
     section: "Subscription pacing",
     label: String(label),
-    help: "Controls bounded pacing for recurring YouTube checks and downloads.",
-    keywords: ["youtube", "subscription", "pacing", "anti-bot", "wait"],
+    help: "Controls bounded pacing for how often subscriptions are checked for new videos.",
+    keywords: ["youtube", "subscription", "pacing", "wait"],
     valueType: "integer",
     persistence: { source: "tauri_command", adapter: "antibot_pacing", key: `antibot_pacing_set:${String(key)}` },
-    defaultValue: Number(defaultValue),
-    validation: { min: Number(min), max: Number(max) },
-    advanced: true,
-  })),
-  ...[
-    ["corroboration-separation", "Minimum separation between matching blocks", "corroboration_min_separation_secs", 60, 10, 3600],
-    ["corroboration-window", "Corroboration window", "corroboration_window_secs", 86400, 10, 604800],
-    ["cautious-dwell", "Cautious minimum dwell", "cautious_dwell_secs", 900, 60, 86400],
-    ["conservative-dwell", "Conservative minimum dwell", "conservative_dwell_secs", 3600, 60, 604800],
-    ["cooldown-dwell", "Cooldown and canary wait", "cooldown_dwell_secs", 21600, 300, 1209600],
-    ["recovery-successes", "Sustained successes before recovery", "recovery_success_threshold", 3, 1, 20],
-    ["raw-retention", "Raw outcome retention days", "raw_retention_days", 90, 7, 365],
-    ["cautious-fragments", "Cautious maximum fragments", "cautious_max_fragments", 2, 1, 8],
-    ["cautious-sleep", "Cautious minimum download sleep", "cautious_min_sleep_secs", 10, 5, 300],
-    ["conservative-sleep", "Conservative minimum download sleep", "conservative_min_sleep_secs", 20, 5, 600],
-    ["cooldown-sleep", "Canary minimum download sleep", "cooldown_min_sleep_secs", 30, 5, 900],
-    ["cautious-start", "Cautious aggregate start interval", "cautious_start_interval_secs", 10, 5, 300],
-    ["conservative-start", "Conservative aggregate start interval", "conservative_start_interval_secs", 20, 5, 600],
-    ["cooldown-start", "Canary aggregate start interval", "cooldown_start_interval_secs", 30, 5, 900],
-    ["canary-items", "Controlled canary item count", "canary_tranche_size", 1, 1, 3],
-  ].map(([id, label, key, defaultValue, min, max]) => setting({
-    id: `video-archiver.protection-${String(id)}`,
-    module: "video_archiver",
-    section: "Automatic protection rules",
-    label: String(label),
-    help: "A bounded advanced rule used by the automatic YouTube protection state machine.",
-    keywords: ["youtube", "adaptive", "automatic", "protection", "threshold", "dwell", "canary", String(key)],
-    valueType: "integer",
-    persistence: { source: "tauri_command", adapter: "youtube_protection_tuning", key: `youtube_protection_tuning_set:${String(key)}` },
     defaultValue: Number(defaultValue),
     validation: { min: Number(min), max: Number(max) },
     advanced: true,
@@ -400,6 +381,7 @@ export const OPTIONS_SETTINGS_REGISTRY: readonly OptionsSettingDescriptor[] = [
     defaultValue: Number(defaultValue),
     validation: { min: 1, max: 16 },
   })),
+  setting({ id: "jobs.terminal-retention-days", module: "jobs", section: "Job history retention", label: "Delete finished job history after (days, 0 = keep forever)", help: "Applied by the scheduler's idle tick to succeeded, failed, and canceled rows; queued and running jobs are never touched.", keywords: ["jobs", "queue", "retention", "history", "purge", "cleanup"], valueType: "integer", persistence: { source: "tauri_command", adapter: "jobs_terminal_retention", key: "jobs_terminal_retention_set:days" }, defaultValue: 30, validation: { min: 0, max: 3650 } }),
   setting({ id: "diagnostics.trace-root", module: "diagnostics", section: "Diagnostics trace", label: "Diagnostics trace folder", help: "Folder used for structured traces and freeze reports.", keywords: ["diagnostics", "trace", "freeze", "folder", "logs"], valueType: "path", persistence: { source: "tauri_command", adapter: "diagnostics_trace_root", key: "diagnostics_trace_dir_status", aliases: ["diagnostics_trace_dir_set", "diagnostics_trace_dir_use_default"] }, defaultValue: null, resetBehavior: "explicit_command" }),
   ...[
     ["auto-asr", "Run captions after import", "auto_asr"],
@@ -658,7 +640,7 @@ export function validateOptionsSettingsRegistry(
   const productIds = new Set<string>();
   const persistenceRoutes = new Map<string, string>();
   for (const module of modules) {
-    if (module.available && !settings.some((descriptor) => descriptor.module === module.id)) {
+    if (module.available && module.contentKind !== "manual" && !settings.some((descriptor) => descriptor.module === module.id)) {
       errors.push(`available module has no registered settings: ${module.id}`);
     }
   }

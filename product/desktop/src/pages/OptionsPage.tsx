@@ -1,3 +1,4 @@
+import { AgentManual } from "../components/AgentManual";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -9,7 +10,7 @@ import {
   getDesktopFontScaleBaseline,
   getStoredDesktopFontScalePct,
 } from "../lib/fontScale";
-import { openPathBestEffort } from "../lib/pathOpener";
+import { openPathBestEffort, openParentDirBestEffort } from "../lib/pathOpener";
 import { safeLocalStorageGet, safeLocalStorageSet } from "../lib/persist";
 import {
   DemandSupersededError,
@@ -43,7 +44,6 @@ import {
   OPTIONS_ACTIVE_MODULE_STORAGE_KEY,
   OPTIONS_MODULES,
   OPTIONS_SETTINGS_REGISTRY,
-  effectiveRecurringPacingInterval,
   executeOptionsModuleReset,
   isOptionsModuleId,
   optionsModuleById,
@@ -110,20 +110,18 @@ type DownloadPresetsConfig = {
   presets: DownloadPreset[];
 };
 
+// WP-0321 S4: AntiBotPacingSettings keeps 3 fields (subscription-check cadence only).
 type AntiBotPacing = {
-  adaptive_protection_enabled: boolean;
   recurring_min_interval_secs: number;
   recurring_jitter_secs: number;
-  enumeration_sleep_requests: number;
   update_all_batch_size: number;
-  recurring_download_min_sleep_secs: number;
-  recurring_download_max_sleep_secs: number;
 };
 
-type YoutubeProtectionMode = "normal" | "cautious" | "conservative" | "cooldown" | "hold";
+type YoutubeProtectionMode = "normal" | "cooldown";
 
+// WP-0321 S4: two protection modes only; the automatic-protection toggle and the per-field
+// baseline/effective overlay are gone (replaced by the engine's effective_policy(lane, state, now)).
 type YoutubeProtectionStatus = {
-  automatic_protection_enabled: boolean;
   runtime_capabilities: {
     epoch: string;
     yt_dlp_available: boolean;
@@ -148,51 +146,17 @@ type YoutubeProtectionStatus = {
   state: {
     mode: YoutubeProtectionMode;
     runtime_epoch: string;
-    last_evidence_at_ms: number | null;
+    cooldown_attempt: number;
+    entered_at_ms: number | null;
     next_eligible_probe_at_ms: number | null;
-    corroboration_count: number;
-    success_streak: number;
     version: number;
-  };
-  baseline: {
-    concurrent_fragments: number;
-    sleep_interval_secs: number;
-    sleep_requests_secs: number;
-    update_tranche_size: number;
-    limit_rate: string | null;
-    throttled_rate: string | null;
-  };
-  effective: {
-    mode: YoutubeProtectionMode;
-    concurrent_fragments: number;
-    sleep_interval_secs: number;
-    max_sleep_interval_secs: number;
-    sleep_requests_secs: number;
-    aggregate_start_interval_secs: number;
-    update_tranche_size: number;
-    limit_rate: string | null;
-    throttled_rate: string | null;
-    eligible: boolean;
-    canary_only: boolean;
   };
 };
 
+// WP-0321 S4: base_wait_secs/max_wait_secs replace the deleted cautious/conservative/hold ladder.
 type YoutubeProtectionTuning = {
-  corroboration_min_separation_secs: number;
-  corroboration_window_secs: number;
-  cautious_dwell_secs: number;
-  conservative_dwell_secs: number;
-  cooldown_dwell_secs: number;
-  recovery_success_threshold: number;
-  raw_retention_days: number;
-  cautious_max_fragments: number;
-  cautious_min_sleep_secs: number;
-  conservative_min_sleep_secs: number;
-  cooldown_min_sleep_secs: number;
-  cautious_start_interval_secs: number;
-  conservative_start_interval_secs: number;
-  cooldown_start_interval_secs: number;
-  canary_tranche_size: number;
+  base_wait_secs: number;
+  max_wait_secs: number;
 };
 
 type YoutubeProtectionHistoryExportReceipt = {
@@ -213,46 +177,35 @@ type YoutubeProtectionHistoryResetReceipt = {
   leases_deleted: number;
 };
 
-const YOUTUBE_TUNING_FIELDS: Array<{
+// WP-0321 S4: base_wait_secs is shown in minutes, max_wait_secs in hours; both persist as seconds.
+const YOUTUBE_COOLDOWN_TUNING_FIELDS: Array<{
   key: keyof YoutubeProtectionTuning;
+  settingId: string;
   label: string;
+  unitSecs: number;
   min: number;
   max: number;
+  help: string;
 }> = [
-  { key: "corroboration_min_separation_secs", label: "Minimum separation between matching blocks (sec)", min: 10, max: 3600 },
-  { key: "corroboration_window_secs", label: "Corroboration window (sec)", min: 10, max: 604800 },
-  { key: "cautious_dwell_secs", label: "Cautious minimum dwell (sec)", min: 60, max: 86400 },
-  { key: "conservative_dwell_secs", label: "Conservative minimum dwell (sec)", min: 60, max: 604800 },
-  { key: "cooldown_dwell_secs", label: "Cooldown / canary wait (sec)", min: 300, max: 1209600 },
-  { key: "recovery_success_threshold", label: "Sustained successes before recovery step", min: 1, max: 20 },
-  { key: "raw_retention_days", label: "Raw outcome retention (days)", min: 7, max: 365 },
-  { key: "cautious_max_fragments", label: "Cautious maximum fragments", min: 1, max: 8 },
-  { key: "cautious_min_sleep_secs", label: "Cautious minimum download sleep (sec)", min: 5, max: 300 },
-  { key: "conservative_min_sleep_secs", label: "Conservative minimum download sleep (sec)", min: 5, max: 600 },
-  { key: "cooldown_min_sleep_secs", label: "Canary minimum download sleep (sec)", min: 5, max: 900 },
-  { key: "cautious_start_interval_secs", label: "Cautious aggregate start interval (sec)", min: 5, max: 300 },
-  { key: "conservative_start_interval_secs", label: "Conservative aggregate start interval (sec)", min: 5, max: 600 },
-  { key: "cooldown_start_interval_secs", label: "Canary aggregate start interval (sec)", min: 5, max: 900 },
-  { key: "canary_tranche_size", label: "Controlled canary item count", min: 1, max: 1 },
+  {
+    key: "base_wait_secs",
+    settingId: "video-archiver.protection-base-wait",
+    label: "First wait (minutes)",
+    unitSecs: 60,
+    min: 10,
+    max: 1440,
+    help: "How long to wait before the first automatic test download after YouTube blocks downloads. Doubles after each failed test, up to the longest wait.",
+  },
+  {
+    key: "max_wait_secs",
+    settingId: "video-archiver.protection-max-wait",
+    label: "Longest wait (hours)",
+    unitSecs: 3600,
+    min: 1,
+    max: 336,
+    help: "The cap the doubling first wait can reach while YouTube keeps blocking downloads.",
+  },
 ];
-
-const YOUTUBE_TUNING_SETTING_ID_BY_KEY: Record<keyof YoutubeProtectionTuning, string> = {
-  corroboration_min_separation_secs: "video-archiver.protection-corroboration-separation",
-  corroboration_window_secs: "video-archiver.protection-corroboration-window",
-  cautious_dwell_secs: "video-archiver.protection-cautious-dwell",
-  conservative_dwell_secs: "video-archiver.protection-conservative-dwell",
-  cooldown_dwell_secs: "video-archiver.protection-cooldown-dwell",
-  recovery_success_threshold: "video-archiver.protection-recovery-successes",
-  raw_retention_days: "video-archiver.protection-raw-retention",
-  cautious_max_fragments: "video-archiver.protection-cautious-fragments",
-  cautious_min_sleep_secs: "video-archiver.protection-cautious-sleep",
-  conservative_min_sleep_secs: "video-archiver.protection-conservative-sleep",
-  cooldown_min_sleep_secs: "video-archiver.protection-cooldown-sleep",
-  cautious_start_interval_secs: "video-archiver.protection-cautious-start",
-  conservative_start_interval_secs: "video-archiver.protection-conservative-start",
-  cooldown_start_interval_secs: "video-archiver.protection-cooldown-start",
-  canary_tranche_size: "video-archiver.protection-canary-items",
-};
 
 type YoutubeProtectionHistory = {
   outcomes: Array<{ id: string; occurred_at_ms: number; outcome_class: string; incident_id: string | null }>;
@@ -318,11 +271,14 @@ type ProviderTransferPolicy = {
   concurrent_fragments: number;
   limit_rate: string | null;
   sleep_interval_secs: number;
+  sleep_jitter_secs: number;
   sleep_requests_secs: number;
 };
 
 type ProviderTransferSettings = {
   schema_version: number;
+  youtube_single: ProviderTransferPolicy;
+  youtube_recurring: ProviderTransferPolicy;
   instagram_single: ProviderTransferPolicy;
   instagram_recurring: ProviderTransferPolicy;
   tiktok_single: ProviderTransferPolicy;
@@ -346,6 +302,40 @@ type YtDlpToolsStatus = {
   ytdlp_version: string | null;
 };
 
+type DownloadEngineStatus = {
+  selected_engine_id: string;
+  kind: "packaged_yt_dlp" | "managed_yt_dlp" | "custom_executable";
+  protocol: string;
+  path: string;
+  version: string | null;
+  sha256_hex: string | null;
+  file_bytes: number | null;
+  verified: boolean;
+  error: string | null;
+  update_state: string;
+};
+
+type DownloadEngineUpdateResult = {
+  checked: boolean;
+  updated: boolean;
+  latest_version: string | null;
+  error: string | null;
+  status: DownloadEngineStatus;
+};
+
+type DownloadEngineCompatibilityReceipt = {
+  passed: boolean;
+  selected_engine_id: string;
+  kind: "packaged_yt_dlp" | "managed_yt_dlp" | "custom_executable";
+  protocol: string;
+  path: string;
+  version: string;
+  sha256_hex: string;
+  file_bytes: number;
+  version_probe_passed: boolean;
+  local_fixture_parse_passed: boolean;
+};
+
 type BatchOnImportRules = {
   auto_asr: boolean;
   auto_translate: boolean;
@@ -359,6 +349,18 @@ type DiagnosticsTraceDirStatus = {
   default_dir: string;
   exists: boolean;
   using_default: boolean;
+};
+
+// WP-0322: `subscriptions_export_settings_get` / `subscriptions_export_settings_set` contract.
+type SubscriptionExportSettings = {
+  dir: string;
+  default_dir: string;
+  is_default: boolean;
+  keep: number;
+  last_export_at_ms: number | null;
+  last_export_path: string | null;
+  last_export_count: number | null;
+  last_error: string | null;
 };
 
 type MediaCleanupRun = {
@@ -461,7 +463,7 @@ type YoutubeQueueIdentityReconcilePage = {
   } | null;
 };
 
-type DownloaderProfileId = "aggressive" | "balanced" | "gentle" | "conservative";
+type DownloaderProfileId = "fastest" | "balanced" | "gentle" | "safest";
 
 const DEFAULT_YOUTUBE_AUTH_PREFLIGHT_URL = "https://youtu.be/wbpLhh3M6L4?si=8QuFih5T__tP1W8b";
 // WP-0263: Instagram global sign-in preflight uses a public profile URL by default.
@@ -481,16 +483,31 @@ const DEFAULT_JOB_RUNTIME_SETTINGS: JobRuntimeSettings = {
 const DEFAULT_JOB_RUNTIME_DRAFT = Object.fromEntries(
   Object.entries(DEFAULT_JOB_RUNTIME_SETTINGS).map(([key, value]) => [key, String(value)]),
 ) as JobRuntimeDraft;
+// WP-0321 S4: schema_version 2. YouTube lane defaults equal the "Balanced" profile; jitter is 0
+// outside YouTube unless the operator sets it.
 const DEFAULT_PROVIDER_TRANSFER_SETTINGS: ProviderTransferSettings = {
-  schema_version: 1,
-  instagram_single: { concurrent_fragments: 2, limit_rate: null, sleep_interval_secs: 1, sleep_requests_secs: 1 },
-  instagram_recurring: { concurrent_fragments: 1, limit_rate: "4M", sleep_interval_secs: 3, sleep_requests_secs: 1 },
-  tiktok_single: { concurrent_fragments: 2, limit_rate: null, sleep_interval_secs: 0, sleep_requests_secs: 0 },
-  tiktok_recurring: { concurrent_fragments: 1, limit_rate: "6M", sleep_interval_secs: 2, sleep_requests_secs: 1 },
+  schema_version: 2,
+  youtube_single: { concurrent_fragments: 1, limit_rate: null, sleep_interval_secs: 5, sleep_jitter_secs: 10, sleep_requests_secs: 2 },
+  youtube_recurring: { concurrent_fragments: 1, limit_rate: null, sleep_interval_secs: 10, sleep_jitter_secs: 5, sleep_requests_secs: 3 },
+  instagram_single: { concurrent_fragments: 2, limit_rate: null, sleep_interval_secs: 1, sleep_jitter_secs: 0, sleep_requests_secs: 1 },
+  instagram_recurring: { concurrent_fragments: 1, limit_rate: "4M", sleep_interval_secs: 3, sleep_jitter_secs: 0, sleep_requests_secs: 1 },
+  tiktok_single: { concurrent_fragments: 2, limit_rate: null, sleep_interval_secs: 0, sleep_jitter_secs: 0, sleep_requests_secs: 0 },
+  tiktok_recurring: { concurrent_fragments: 1, limit_rate: "6M", sleep_interval_secs: 2, sleep_jitter_secs: 0, sleep_requests_secs: 1 },
   tiktok_browser_cookie_source: null,
   tiktok_api_hostname: null,
   tiktok_app_info: null,
   tiktok_device_id: null,
+};
+// WP-0321 S4: profiles write both YouTube lanes (fragments fixed at 1; limit_rate preserved) plus
+// the preset's throttled rate/retries — never preset sleep/fragments/cap.
+const DOWNLOADER_PROFILE_LANES: Record<DownloaderProfileId, {
+  single: { sleep_interval_secs: number; sleep_jitter_secs: number; sleep_requests_secs: number };
+  recurring: { sleep_interval_secs: number; sleep_jitter_secs: number; sleep_requests_secs: number };
+}> = {
+  fastest: { single: { sleep_interval_secs: 5, sleep_jitter_secs: 5, sleep_requests_secs: 1 }, recurring: { sleep_interval_secs: 5, sleep_jitter_secs: 5, sleep_requests_secs: 2 } },
+  balanced: { single: { sleep_interval_secs: 5, sleep_jitter_secs: 10, sleep_requests_secs: 2 }, recurring: { sleep_interval_secs: 10, sleep_jitter_secs: 5, sleep_requests_secs: 3 } },
+  gentle: { single: { sleep_interval_secs: 8, sleep_jitter_secs: 5, sleep_requests_secs: 4 }, recurring: { sleep_interval_secs: 15, sleep_jitter_secs: 10, sleep_requests_secs: 4 } },
+  safest: { single: { sleep_interval_secs: 8, sleep_jitter_secs: 5, sleep_requests_secs: 6 }, recurring: { sleep_interval_secs: 20, sleep_jitter_secs: 10, sleep_requests_secs: 6 } },
 };
 const DEFAULT_BATCH_ON_IMPORT_RULES: BatchOnImportRules = {
   auto_asr: false,
@@ -563,66 +580,53 @@ const ALWAYS_SURFACED_SETTING_PROJECTION_IDS = new Set([
   "video-archiver.youtube-manual-cookies",
 ]);
 
+// WP-0321 S4: profile pacing lives in DOWNLOADER_PROFILE_LANES (both YouTube lanes). This table
+// only carries the reliability fields a profile writes to the default download preset.
 const DOWNLOADER_PROFILES: Array<{
   id: DownloaderProfileId;
   label: string;
   description: string;
-  concurrent_fragments: number;
   throttled_rate: string;
   retries: number;
   fragment_retries: number;
   file_access_retries: number;
-  sleep_interval: number;
-  sleep_requests: number;
 }> = [
   {
-    id: "aggressive",
+    id: "fastest",
     label: "Fastest",
     description: "Downloads as fast as possible. Best when YouTube isn't blocking you.",
-    concurrent_fragments: 4,
     throttled_rate: "100K",
     retries: 3,
     fragment_retries: 3,
     file_access_retries: 10,
-    sleep_interval: 0,
-    sleep_requests: 0,
   },
   {
     id: "balanced",
     label: "Balanced",
     description: "A good mix of speed and reliability. A safe everyday choice.",
-    concurrent_fragments: 2,
     throttled_rate: "80K",
     retries: 4,
     fragment_retries: 4,
     file_access_retries: 12,
-    sleep_interval: 2,
-    sleep_requests: 0,
   },
   {
     id: "gentle",
     label: "Gentle",
     description: "Slower and more careful. Use this if downloads sometimes fail.",
-    concurrent_fragments: 1,
     throttled_rate: "40K",
     retries: 5,
     fragment_retries: 5,
     file_access_retries: 16,
-    sleep_interval: 4,
-    sleep_requests: 3,
   },
   {
-    id: "conservative",
+    id: "safest",
     label: "Safest",
     description:
       "The slowest and gentlest option. Best when YouTube keeps blocking your downloads.",
-    concurrent_fragments: 1,
     throttled_rate: "20K",
     retries: 8,
     fragment_retries: 8,
     file_access_retries: 22,
-    sleep_interval: 8,
-    sleep_requests: 6,
   },
 ];
 
@@ -678,6 +682,11 @@ export function OptionsPage() {
   const [activeModule, setActiveModule] = useState<OptionsModuleId>(() =>
     isOptionsModuleId(initialModule) ? initialModule : "general",
   );
+  useEffect(() => {
+    const showManual = () => setActiveModule("manual");
+    window.addEventListener("voxvulgi-open-manual", showManual);
+    return () => window.removeEventListener("voxvulgi-open-manual", showManual);
+  }, []);
   const [settingsSearch, setSettingsSearch] = useState("");
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const [resetPreview, setResetPreview] = useState<OptionsResetPreviewReceipt | null>(null);
@@ -743,28 +752,19 @@ export function OptionsPage() {
   const [downloadPresets, setDownloadPresets] = useState<DownloadPresetsConfig | null>(null);
   const [downloaderBusy, setDownloaderBusy] = useState(false);
   const [downloaderMessage, setDownloaderMessage] = useState("");
-  const [downloaderConcurrentFragments, setDownloaderConcurrentFragments] = useState("4");
-  const [downloaderLimitRate, setDownloaderLimitRate] = useState("");
   const [downloaderThrottledRate, setDownloaderThrottledRate] = useState("100K");
   const [downloaderFileAccessRetries, setDownloaderFileAccessRetries] = useState("10");
   const [downloaderRetries, setDownloaderRetries] = useState("3");
   const [downloaderFragmentRetries, setDownloaderFragmentRetries] = useState("3");
-  const [downloaderSleepInterval, setDownloaderSleepInterval] = useState("0");
-  const [downloaderSleepRequests, setDownloaderSleepRequests] = useState("0");
-  // WP-0257 (#3/#4): anti-bot pacing controls.
+  // WP-0257 (#3/#4), trimmed by WP-0321 S4 to the 3 fields AntiBotPacingSettings keeps.
   const [pacingRecurringSecs, setPacingRecurringSecs] = useState("60");
   const [pacingJitterSecs, setPacingJitterSecs] = useState("60");
-  const [pacingSleepRequests, setPacingSleepRequests] = useState("2");
   const [pacingUpdateAllBatch, setPacingUpdateAllBatch] = useState("25");
-  const [pacingDownloadMinSleep, setPacingDownloadMinSleep] = useState("5");
-  const [pacingDownloadMaxSleep, setPacingDownloadMaxSleep] = useState("10");
-  const [pacingAdaptiveEnabled, setPacingAdaptiveEnabled] = useState(true);
   const [pacingBusy, setPacingBusy] = useState(false);
   const [pacingMessage, setPacingMessage] = useState("");
   const [pacingBaseline, setPacingBaseline] = useState<AntiBotPacing | null>(null);
   const [pacingHydrationState, setPacingHydrationState] = useState<"loading" | "ready" | "unavailable">("loading");
   const [youtubeProtectionStatus, setYoutubeProtectionStatus] = useState<YoutubeProtectionStatus | null>(null);
-  const [youtubeEnumerationProtectionStatus, setYoutubeEnumerationProtectionStatus] = useState<YoutubeProtectionStatus | null>(null);
   const [youtubeProtectionHistory, setYoutubeProtectionHistory] = useState<YoutubeProtectionHistory | null>(null);
   const [youtubeProtectionTuning, setYoutubeProtectionTuning] = useState<YoutubeProtectionTuning | null>(null);
   const [youtubeProtectionTuningBaseline, setYoutubeProtectionTuningBaseline] = useState<YoutubeProtectionTuning | null>(null);
@@ -777,17 +777,29 @@ export function OptionsPage() {
   const [jobsRuntimeRows, setJobsRuntimeRows] = useState<Partial<Record<keyof JobRuntimeSettings, JobTrackRuntimeRow>> | null>(null);
   const [jobsBusy, setJobsBusy] = useState(false);
   const [jobsMessage, setJobsMessage] = useState("");
+  // WP-0320: finished job-history retention (days, 0 = keep forever).
+  const [jobsTerminalRetentionDraft, setJobsTerminalRetentionDraft] = useState("30");
+  const [jobsTerminalRetentionBaseline, setJobsTerminalRetentionBaseline] = useState<number | null>(null);
+  const [jobsTerminalRetentionBusy, setJobsTerminalRetentionBusy] = useState(false);
+  const [jobsTerminalRetentionMessage, setJobsTerminalRetentionMessage] = useState("");
   const [providerTransferSettings, setProviderTransferSettings] = useState<ProviderTransferSettings | null>(null);
   const [providerTransferBaseline, setProviderTransferBaseline] = useState<ProviderTransferSettings | null>(null);
   const [providerTransferBusy, setProviderTransferBusy] = useState(false);
   const [providerTransferMessage, setProviderTransferMessage] = useState("");
   const [instagramProviderStatus, setInstagramProviderStatus] = useState<InstagramProfileProviderStatus | null>(null);
   const [providerYtDlpStatus, setProviderYtDlpStatus] = useState<YtDlpToolsStatus | null>(null);
+  const [downloadEngineStatus, setDownloadEngineStatus] = useState<DownloadEngineStatus | null>(null);
+  const [downloadEngineBusy, setDownloadEngineBusy] = useState(false);
+  const [downloadEngineMessage, setDownloadEngineMessage] = useState("");
   const [batchRules, setBatchRules] = useState<BatchOnImportRules>(DEFAULT_BATCH_ON_IMPORT_RULES);
   const [batchBaseline, setBatchBaseline] = useState<BatchOnImportRules | null>(null);
   const [diagnosticsTraceDir, setDiagnosticsTraceDir] = useState<DiagnosticsTraceDirStatus | null>(null);
   const [diagnosticsBusy, setDiagnosticsBusy] = useState(false);
   const [diagnosticsMessage, setDiagnosticsMessage] = useState("");
+  // WP-0322: automatic + on-demand subscription export.
+  const [subscriptionExport, setSubscriptionExport] = useState<SubscriptionExportSettings | null>(null);
+  const [subscriptionExportBusy, setSubscriptionExportBusy] = useState(false);
+  const [subscriptionExportMessage, setSubscriptionExportMessage] = useState("");
   useEffect(() => {
     const generation = videoModuleLoadGenerationRef.current + 1;
     videoModuleLoadGenerationRef.current = generation;
@@ -819,13 +831,9 @@ export function OptionsPage() {
       if (value.pacing) {
         const p = value.pacing;
         setPacingBaseline(p);
-        setPacingAdaptiveEnabled(p.adaptive_protection_enabled);
         setPacingRecurringSecs(String(p.recurring_min_interval_secs));
         setPacingJitterSecs(String(p.recurring_jitter_secs));
-        setPacingSleepRequests(String(p.enumeration_sleep_requests));
         setPacingUpdateAllBatch(String(p.update_all_batch_size));
-        setPacingDownloadMinSleep(String(p.recurring_download_min_sleep_secs));
-        setPacingDownloadMaxSleep(String(p.recurring_download_max_sleep_secs));
         setPacingHydrationState("ready");
       } else {
         setPacingBaseline(null);
@@ -852,7 +860,6 @@ export function OptionsPage() {
       .catch((error) => {
         if (!(error instanceof DemandSupersededError) && !canceled && videoModuleLoadGenerationRef.current === generation) {
           setYoutubeProtectionStatus(null);
-          setYoutubeEnumerationProtectionStatus(null);
           setYoutubeProtectionMessage(`Protection status unavailable: ${String(error)}`);
         }
       });
@@ -885,9 +892,10 @@ export function OptionsPage() {
       () => loadYoutubeProtectionSnapshot<YoutubeProtectionStatus, YoutubeProtectionHistory>("options", 100),
       { force, onState: setYoutubeProtectionDemand },
     );
+    // WP-0321 S4: one shared cooldown per sign-in identity (stored under operation="download");
+    // the enumeration snapshot is no longer read into separate Options state.
     if (youtubeProtectionStatusRequestRef.current === generation && !requestedGeneration.canceled) {
       setYoutubeProtectionStatus(result.value.download);
-      setYoutubeEnumerationProtectionStatus(result.value.enumeration);
       setYoutubeProtectionHistory(result.value.downloadHistory);
     }
     return { download: result.value.download, enumeration: result.value.enumeration };
@@ -906,7 +914,6 @@ export function OptionsPage() {
     try {
       const saved = await invoke<AntiBotPacing>("antibot_pacing_set", {
         settings: {
-          adaptive_protection_enabled: pacingAdaptiveEnabled,
           recurring_min_interval_secs: Math.max(
             0,
             Math.min(3600, Math.round(Number(pacingRecurringSecs) || 0)),
@@ -915,33 +922,17 @@ export function OptionsPage() {
             0,
             Math.min(3600, Math.round(Number(pacingJitterSecs) || 0)),
           ),
-          enumeration_sleep_requests: Math.max(
-            0,
-            Math.min(60, Math.round(Number(pacingSleepRequests) || 0)),
-          ),
           update_all_batch_size: Math.max(
             1,
             Math.min(5000, Math.round(Number(pacingUpdateAllBatch) || 1)),
-          ),
-          recurring_download_min_sleep_secs: Math.max(
-            0,
-            Math.min(300, Math.round(Number(pacingDownloadMinSleep) || 0)),
-          ),
-          recurring_download_max_sleep_secs: Math.max(
-            0,
-            Math.min(300, Math.round(Number(pacingDownloadMaxSleep) || 0)),
           ),
         },
         mutationGeneration,
       });
       if (videoModuleLoadGenerationRef.current !== moduleGeneration || pacingMutationGenerationRef.current !== mutationGeneration) return;
       setPacingRecurringSecs(String(saved.recurring_min_interval_secs));
-      setPacingAdaptiveEnabled(saved.adaptive_protection_enabled);
       setPacingJitterSecs(String(saved.recurring_jitter_secs));
-      setPacingSleepRequests(String(saved.enumeration_sleep_requests));
       setPacingUpdateAllBatch(String(saved.update_all_batch_size));
-      setPacingDownloadMinSleep(String(saved.recurring_download_min_sleep_secs));
-      setPacingDownloadMaxSleep(String(saved.recurring_download_max_sleep_secs));
       setPacingMessage("Saved.");
       setPacingBaseline(saved);
       await refreshYoutubeProtectionStatuses();
@@ -952,21 +943,28 @@ export function OptionsPage() {
     }
   }
 
+  async function requestControlledYoutubeProbe() {
+    setYoutubeProtectionBusy(true);
+    try {
+      const result = await invoke<{ next_eligible_probe_at_ms: number }>("youtube_controlled_probe");
+      setYoutubeProtectionMessage(`One-video test eligible at ${new Date(result.next_eligible_probe_at_ms).toLocaleString()}.`);
+      await refreshYoutubeProtectionStatuses(true);
+    } catch (error) { setYoutubeProtectionMessage(`Error: ${String(error)}`); }
+    finally { setYoutubeProtectionBusy(false); }
+  }
+
   async function returnYoutubeProtectionToBaseline() {
     const moduleGeneration = videoModuleLoadGenerationRef.current;
     setYoutubeProtectionBusy(true);
     setYoutubeProtectionMessage("");
     try {
-      const [status, enumerationStatus] = await Promise.all([
-        invoke<YoutubeProtectionStatus>("youtube_protection_return_to_baseline", { operation: "download" }),
-        invoke<YoutubeProtectionStatus>("youtube_protection_return_to_baseline", { operation: "enumeration" }),
-      ]);
+      // WP-0321 S4: one shared cooldown per sign-in identity, stored under operation="download".
+      const status = await invoke<YoutubeProtectionStatus>("youtube_protection_return_to_baseline", { operation: "download" });
       if (videoModuleLoadGenerationRef.current !== moduleGeneration) return;
       setYoutubeProtectionStatus(status);
-      setYoutubeEnumerationProtectionStatus(enumerationStatus);
       await refreshYoutubeProtectionStatuses(true);
       if (videoModuleLoadGenerationRef.current !== moduleGeneration) return;
-      setYoutubeProtectionMessage("Automatic protection returned to the saved baseline.");
+      setYoutubeProtectionMessage("Returned to normal.");
     } catch (error) {
       if (videoModuleLoadGenerationRef.current === moduleGeneration) setYoutubeProtectionMessage(`Error: ${String(error)}`);
     } finally {
@@ -1127,7 +1125,40 @@ export function OptionsPage() {
   }, [activeModule]);
 
   useEffect(() => {
-    if (!["instagram_archiver", "tiktok_archiver"].includes(activeModule)) return;
+    if (activeModule !== "jobs") return;
+    let canceled = false;
+    invoke<{ days: number }>("jobs_terminal_retention_get")
+      .then((value) => {
+        if (canceled) return;
+        setJobsTerminalRetentionBaseline(value.days);
+        setJobsTerminalRetentionDraft(String(value.days));
+      })
+      .catch((error) => {
+        if (canceled) return;
+        setJobsTerminalRetentionBaseline(null);
+        setJobsTerminalRetentionMessage(`Error loading job history retention: ${String(error)}`);
+      });
+    return () => { canceled = true; };
+  }, [activeModule]);
+
+  async function saveJobsTerminalRetention() {
+    const days = Math.max(0, Math.min(3650, Math.round(Number(jobsTerminalRetentionDraft) || 0)));
+    setJobsTerminalRetentionBusy(true);
+    setJobsTerminalRetentionMessage("");
+    try {
+      const saved = await invoke<{ days: number }>("jobs_terminal_retention_set", { days });
+      setJobsTerminalRetentionBaseline(saved.days);
+      setJobsTerminalRetentionDraft(String(saved.days));
+      setJobsTerminalRetentionMessage("Saved.");
+    } catch (error) {
+      setJobsTerminalRetentionMessage(`Error: ${String(error)}`);
+    } finally {
+      setJobsTerminalRetentionBusy(false);
+    }
+  }
+
+  useEffect(() => {
+    if (!["video_archiver", "instagram_archiver", "tiktok_archiver"].includes(activeModule)) return;
     let canceled = false;
     setProviderTransferBusy(true);
     setProviderTransferMessage("");
@@ -1158,7 +1189,13 @@ export function OptionsPage() {
   }, [activeModule]);
 
   function updateProviderTransferPolicy(
-    key: "instagram_single" | "instagram_recurring" | "tiktok_single" | "tiktok_recurring",
+    key:
+      | "youtube_single"
+      | "youtube_recurring"
+      | "instagram_single"
+      | "instagram_recurring"
+      | "tiktok_single"
+      | "tiktok_recurring",
     patch: Partial<ProviderTransferPolicy>,
   ) {
     setProviderTransferSettings((current) => current ? {
@@ -1185,7 +1222,7 @@ export function OptionsPage() {
     }
   }
 
-  function resetProviderTransferDraft(provider: "instagram" | "tiktok") {
+  function resetProviderTransferDraft(provider: "youtube" | "instagram" | "tiktok") {
     setProviderTransferSettings((current) => current ? {
       ...current,
       [`${provider}_single`]: { ...DEFAULT_PROVIDER_TRANSFER_SETTINGS[`${provider}_single`] },
@@ -1304,6 +1341,66 @@ export function OptionsPage() {
       setDiagnosticsBusy(false);
     }
   }
+
+  // WP-0322: load subscription-export settings when the Video Archiver module is open.
+  useEffect(() => {
+    if (activeModule !== "video_archiver") return;
+    let canceled = false;
+    invoke<SubscriptionExportSettings>("subscriptions_export_settings_get")
+      .then((settings) => {
+        if (!canceled) setSubscriptionExport(settings);
+      })
+      .catch((error) => {
+        if (!canceled) setSubscriptionExportMessage(`Error loading subscription backup settings: ${String(error)}`);
+      });
+    return () => { canceled = true; };
+  }, [activeModule]);
+
+  async function chooseSubscriptionExportDir() {
+    const selected = await chooseFolder("Select subscription backup folder");
+    if (!selected) return;
+    setSubscriptionExportBusy(true);
+    setSubscriptionExportMessage("");
+    try {
+      const settings = await invoke<SubscriptionExportSettings>("subscriptions_export_settings_set", { dir: selected });
+      setSubscriptionExport(settings);
+      setSubscriptionExportMessage(`Subscription backup folder set to ${settings.dir}`);
+    } catch (error) {
+      setSubscriptionExportMessage(`Error changing the subscription backup folder: ${String(error)}`);
+    } finally {
+      setSubscriptionExportBusy(false);
+    }
+  }
+
+  async function resetSubscriptionExportDir() {
+    setSubscriptionExportBusy(true);
+    setSubscriptionExportMessage("");
+    try {
+      const settings = await invoke<SubscriptionExportSettings>("subscriptions_export_settings_set", { dir: null });
+      setSubscriptionExport(settings);
+      setSubscriptionExportMessage(`Using the default subscription backup folder: ${settings.dir}`);
+    } catch (error) {
+      setSubscriptionExportMessage(`Error resetting the subscription backup folder: ${String(error)}`);
+    } finally {
+      setSubscriptionExportBusy(false);
+    }
+  }
+
+  async function exportSubscriptionsNow() {
+    setSubscriptionExportBusy(true);
+    setSubscriptionExportMessage("");
+    try {
+      const result = await invoke<{ path: string; count: number }>("subscriptions_export_now");
+      setSubscriptionExportMessage(`Exported ${result.count} subscription${result.count === 1 ? "" : "s"} to ${result.path}`);
+      const settings = await invoke<SubscriptionExportSettings>("subscriptions_export_settings_get");
+      setSubscriptionExport(settings);
+    } catch (error) {
+      setSubscriptionExportMessage(`Error exporting subscriptions: ${String(error)}`);
+    } finally {
+      setSubscriptionExportBusy(false);
+    }
+  }
+
   const [localPreferenceBaselines, setLocalPreferenceBaselines] = useState(
     loadOptionsLocalPreferenceBaselines,
   );
@@ -1543,6 +1640,19 @@ export function OptionsPage() {
     return () => { canceled = true; };
   }, [activeModule]);
 
+  useEffect(() => {
+    if (activeModule !== "video_archiver") return;
+    let canceled = false;
+    invoke<DownloadEngineStatus>("download_engine_status")
+      .then((status) => {
+        if (!canceled) setDownloadEngineStatus(status);
+      })
+      .catch((error) => {
+        if (!canceled) setDownloadEngineMessage(`Downloader engine status unavailable: ${String(error)}`);
+      });
+    return () => { canceled = true; };
+  }, [activeModule]);
+
   const defaultDownloaderPreset = useMemo(() => {
     if (!downloadPresets) return null;
     const byDefault = downloadPresets.presets.find(
@@ -1552,35 +1662,33 @@ export function OptionsPage() {
     return downloadPresets.presets[0] ?? null;
   }, [downloadPresets]);
 
+  // WP-0321 S4: the profile is derived from both YouTube provider_transfer lanes (not the preset).
   const inferredDownloaderProfile = useMemo(() => {
-    if (!defaultDownloaderPreset) return "custom";
-    for (const profile of DOWNLOADER_PROFILES) {
+    const single = providerTransferSettings?.youtube_single;
+    const recurring = providerTransferSettings?.youtube_recurring;
+    if (!single || !recurring) return "custom";
+    for (const [id, lanes] of Object.entries(DOWNLOADER_PROFILE_LANES) as Array<[DownloaderProfileId, typeof DOWNLOADER_PROFILE_LANES[DownloaderProfileId]]>) {
       if (
-        defaultDownloaderPreset.yt_dlp_concurrent_fragments === profile.concurrent_fragments &&
-        defaultDownloaderPreset.yt_dlp_file_access_retries === profile.file_access_retries &&
-        defaultDownloaderPreset.yt_dlp_retries === profile.retries &&
-        defaultDownloaderPreset.yt_dlp_fragment_retries === profile.fragment_retries &&
-        (defaultDownloaderPreset.yt_dlp_throttled_rate ?? "") === profile.throttled_rate &&
-        defaultDownloaderPreset.yt_dlp_sleep_interval === profile.sleep_interval &&
-        defaultDownloaderPreset.yt_dlp_sleep_requests === profile.sleep_requests
+        single.sleep_interval_secs === lanes.single.sleep_interval_secs &&
+        single.sleep_jitter_secs === lanes.single.sleep_jitter_secs &&
+        single.sleep_requests_secs === lanes.single.sleep_requests_secs &&
+        recurring.sleep_interval_secs === lanes.recurring.sleep_interval_secs &&
+        recurring.sleep_jitter_secs === lanes.recurring.sleep_jitter_secs &&
+        recurring.sleep_requests_secs === lanes.recurring.sleep_requests_secs
       ) {
-        return profile.id;
+        return id;
       }
     }
     return "custom";
-  }, [defaultDownloaderPreset]);
+  }, [providerTransferSettings]);
 
   useEffect(() => {
     const preset = defaultDownloaderPreset;
     if (!preset) return;
-    setDownloaderConcurrentFragments(String(preset.yt_dlp_concurrent_fragments));
-    setDownloaderLimitRate(preset.yt_dlp_limit_rate ?? "");
     setDownloaderThrottledRate(preset.yt_dlp_throttled_rate ?? "");
     setDownloaderFileAccessRetries(String(preset.yt_dlp_file_access_retries));
     setDownloaderRetries(String(preset.yt_dlp_retries));
     setDownloaderFragmentRetries(String(preset.yt_dlp_fragment_retries));
-    setDownloaderSleepInterval(String(preset.yt_dlp_sleep_interval));
-    setDownloaderSleepRequests(String(preset.yt_dlp_sleep_requests));
   }, [defaultDownloaderPreset]);
 
   function clampPositiveInteger(value: string, min: number, max: number) {
@@ -1593,25 +1701,29 @@ export function OptionsPage() {
 
   async function applyDownloaderProfile(profileId: DownloaderProfileId) {
     const preset = defaultDownloaderPreset;
-    if (!preset) return;
     const profile = DOWNLOADER_PROFILES.find((candidate) => candidate.id === profileId);
-    if (!profile) return;
-
-    const patch = {
-      yt_dlp_concurrent_fragments: profile.concurrent_fragments,
-      // A pacing profile must not silently remove the operator's independent bandwidth cap.
-      yt_dlp_limit_rate: preset.yt_dlp_limit_rate,
-      yt_dlp_throttled_rate: profile.throttled_rate,
-      yt_dlp_file_access_retries: profile.file_access_retries,
-      yt_dlp_retries: profile.retries,
-      yt_dlp_fragment_retries: profile.fragment_retries,
-      yt_dlp_sleep_interval: profile.sleep_interval,
-      yt_dlp_sleep_requests: profile.sleep_requests,
-    };
+    const lanes = DOWNLOADER_PROFILE_LANES[profileId];
+    if (!preset || !profile || !providerTransferSettings) return;
 
     try {
       setDownloaderBusy(true);
       setDownloaderMessage("");
+      // A pacing profile writes both YouTube lanes (fragments fixed at 1; bandwidth cap preserved)
+      // and the preset's throttled rate/retries only — never preset sleep/fragments/cap.
+      const nextTransfer: ProviderTransferSettings = {
+        ...providerTransferSettings,
+        youtube_single: { ...providerTransferSettings.youtube_single, concurrent_fragments: 1, ...lanes.single },
+        youtube_recurring: { ...providerTransferSettings.youtube_recurring, concurrent_fragments: 1, ...lanes.recurring },
+      };
+      const savedTransfer = await invoke<ProviderTransferSettings>("provider_transfer_settings_set", { settings: nextTransfer });
+      setProviderTransferSettings(savedTransfer);
+      setProviderTransferBaseline(savedTransfer);
+      const patch = {
+        yt_dlp_throttled_rate: profile.throttled_rate,
+        yt_dlp_file_access_retries: profile.file_access_retries,
+        yt_dlp_retries: profile.retries,
+        yt_dlp_fragment_retries: profile.fragment_retries,
+      };
       const saved = await invoke<DownloadPresetsConfig>("download_presets_default_safety_patch", {
         expectedDefaultPresetId: preset.id,
         patch,
@@ -1622,6 +1734,7 @@ export function OptionsPage() {
     } catch (e) {
       setDownloaderMessage(`Error applying profile: ${String(e)}`);
       invoke<DownloadPresetsConfig>("download_presets_get").then(setDownloadPresets).catch(() => undefined);
+      invoke<ProviderTransferSettings>("provider_transfer_settings_get").then(setProviderTransferSettings).catch(() => undefined);
     } finally {
       setDownloaderBusy(false);
     }
@@ -1630,11 +1743,7 @@ export function OptionsPage() {
   async function applyCustomDownloaderSettings() {
     const preset = defaultDownloaderPreset;
     if (!preset) return;
-    const concurrentFragments = clampPositiveInteger(downloaderConcurrentFragments, 1, 32);
     const throttledRate = downloaderThrottledRate.trim();
-    const limitRate = downloaderLimitRate.trim();
-    const sleepInterval = clampPositiveInteger(downloaderSleepInterval, 0, 86400);
-    const sleepRequests = clampPositiveInteger(downloaderSleepRequests, 0, 10000);
     const fileAccessRetries = clampPositiveInteger(downloaderFileAccessRetries, 1, 1000);
     const retries = clampPositiveInteger(downloaderRetries, 0, 1000);
     const fragmentRetries = clampPositiveInteger(downloaderFragmentRetries, 0, 1000);
@@ -1644,14 +1753,10 @@ export function OptionsPage() {
     }
 
     const patch = {
-      yt_dlp_concurrent_fragments: concurrentFragments,
-      yt_dlp_limit_rate: limitRate || null,
       yt_dlp_throttled_rate: throttledRate,
       yt_dlp_file_access_retries: fileAccessRetries,
       yt_dlp_retries: retries,
       yt_dlp_fragment_retries: fragmentRetries,
-      yt_dlp_sleep_interval: sleepInterval,
-      yt_dlp_sleep_requests: sleepRequests,
     };
 
     try {
@@ -1727,6 +1832,37 @@ export function OptionsPage() {
         result.message ||
         (result.ok ? "YouTube accepted this session." : "YouTube did not accept this session."),
     });
+  }
+
+  async function testCurrentYoutubeAuth() {
+    const capabilityEpoch = beginYoutubeCapabilityEpoch(youtubeCapabilityEpochRef);
+    const target = authPreflightUrl.trim() || DEFAULT_YOUTUBE_AUTH_PREFLIGHT_URL;
+    setAuthPreflightBusy(true);
+    setAuthMessage("");
+    setCapabilityReceipt({
+      provider: "youtube",
+      status: "running",
+      checkedAtMs: Date.now(),
+      target,
+      message: "Testing the currently saved YouTube session…",
+    });
+    try {
+      const result = await invoke<YoutubeAuthPreflightResult>("config_youtube_auth_preflight", {
+        url: authPreflightUrl.trim() || null,
+      });
+      if (!isCurrentYoutubeCapabilityEpoch(youtubeCapabilityEpochRef, capabilityEpoch)) return;
+      applyYoutubeAuthPreflightResult(result, target);
+    } catch (error) {
+      if (!isCurrentYoutubeCapabilityEpoch(youtubeCapabilityEpochRef, capabilityEpoch)) return;
+      const message = `Could not test the saved YouTube session: ${String(error)}`;
+      setAuthMessage(message);
+      setAuthResultState("failure");
+      setCapabilityReceipt({ provider: "youtube", status: "failure", checkedAtMs: Date.now(), target, message });
+    } finally {
+      if (isCurrentYoutubeCapabilityEpoch(youtubeCapabilityEpochRef, capabilityEpoch)) {
+        setAuthPreflightBusy(false);
+      }
+    }
   }
 
   async function openYoutubeSignIn() {
@@ -2605,6 +2741,80 @@ export function OptionsPage() {
       setProjection(`${provider}-archiver.transfer-${lane}-sleep-requests`, draft?.sleep_requests_secs ?? null, baseline?.sleep_requests_secs ?? null, draft?.sleep_requests_secs ?? null, null, providerTransferMessage || null, providerTransferBaseline != null, providerTransferSettings != null);
     }
   }
+
+  async function runDownloadEngineAction(
+    command: string,
+    args: Record<string, unknown> | undefined,
+    successMessage: string,
+  ) {
+    setDownloadEngineBusy(true);
+    setDownloadEngineMessage("");
+    try {
+      const status = await invoke<DownloadEngineStatus>(command, args);
+      setDownloadEngineStatus(status);
+      setDownloadEngineMessage(successMessage);
+    } catch (error) {
+      setDownloadEngineMessage(`Error: ${String(error)}`);
+      try {
+        setDownloadEngineStatus(await invoke<DownloadEngineStatus>("download_engine_status"));
+      } catch {
+        // Keep the last independently verified status visible when a refresh also fails.
+      }
+    } finally {
+      setDownloadEngineBusy(false);
+    }
+  }
+
+  async function chooseCustomDownloadEngine() {
+    const selected = await open({
+      multiple: false,
+      directory: false,
+      title: "Select a yt-dlp-compatible download engine",
+      filters: [{ name: "Download engine", extensions: ["exe"] }],
+    });
+    if (!selected || typeof selected !== "string") return;
+    await runDownloadEngineAction(
+      "download_engine_set_custom",
+      { executablePath: selected },
+      "Custom download engine verified, copied into managed storage, and selected for new jobs.",
+    );
+  }
+
+  async function updateDownloadEngineNow() {
+    setDownloadEngineBusy(true);
+    setDownloadEngineMessage("");
+    try {
+      const receipt = await invoke<DownloadEngineUpdateResult>("download_engine_update_now");
+      setDownloadEngineStatus(receipt.status);
+      if (receipt.error) {
+        setDownloadEngineMessage(`Error: ${receipt.error}`);
+      } else if (receipt.updated) {
+        setDownloadEngineMessage(`yt-dlp ${receipt.latest_version ?? "update"} verified and activated for new jobs.`);
+      } else {
+        setDownloadEngineMessage(`yt-dlp is current${receipt.latest_version ? ` (${receipt.latest_version})` : ""}.`);
+      }
+    } catch (error) {
+      setDownloadEngineMessage(`Error: ${String(error)}`);
+    } finally {
+      setDownloadEngineBusy(false);
+    }
+  }
+
+  async function probeSelectedDownloadEngine() {
+    setDownloadEngineBusy(true);
+    setDownloadEngineMessage("");
+    try {
+      const receipt = await invoke<DownloadEngineCompatibilityReceipt>("download_engine_probe_selected");
+      setDownloadEngineMessage(
+        `Selected engine passed: ${receipt.version} · ${receipt.sha256_hex} · local fixture parsed.`,
+      );
+      setDownloadEngineStatus(await invoke<DownloadEngineStatus>("download_engine_status"));
+    } catch (error) {
+      setDownloadEngineMessage(`Error: ${String(error)}`);
+    } finally {
+      setDownloadEngineBusy(false);
+    }
+  }
   for (const [id, key] of [
     ["tiktok-archiver.browser-cookie-source", "tiktok_browser_cookie_source"],
     ["tiktok-archiver.api-hostname", "tiktok_api_hostname"],
@@ -2622,99 +2832,29 @@ export function OptionsPage() {
       providerTransferSettings != null,
     );
   }
+  // WP-0321 S4: the per-field adaptive baseline/effective overlay is gone; YouTube lane values are
+  // authoritative and the preset only carries throttled rate + retries.
   setProjection("video-archiver.downloader-profile", inferredDownloaderProfile, inferredDownloaderProfile);
   const downloaderInputs: Array<[string, string, unknown]> = [
-    ["video-archiver.downloader-concurrent-fragments", downloaderConcurrentFragments, defaultDownloaderPreset?.yt_dlp_concurrent_fragments],
-    ["video-archiver.downloader-limit-rate", downloaderLimitRate, defaultDownloaderPreset?.yt_dlp_limit_rate],
     ["video-archiver.downloader-throttled-rate", downloaderThrottledRate, defaultDownloaderPreset?.yt_dlp_throttled_rate],
     ["video-archiver.downloader-file-access-retries", downloaderFileAccessRetries, defaultDownloaderPreset?.yt_dlp_file_access_retries],
     ["video-archiver.downloader-retries", downloaderRetries, defaultDownloaderPreset?.yt_dlp_retries],
     ["video-archiver.downloader-fragment-retries", downloaderFragmentRetries, defaultDownloaderPreset?.yt_dlp_fragment_retries],
-    ["video-archiver.downloader-sleep-interval", downloaderSleepInterval, defaultDownloaderPreset?.yt_dlp_sleep_interval],
-    ["video-archiver.downloader-sleep-requests", downloaderSleepRequests, defaultDownloaderPreset?.yt_dlp_sleep_requests],
   ];
-  const downloaderEffectiveById = new Map<string, unknown>([
-    ["video-archiver.downloader-concurrent-fragments", youtubeProtectionStatus?.effective.concurrent_fragments],
-    ["video-archiver.downloader-limit-rate", youtubeProtectionStatus?.effective.limit_rate],
-    ["video-archiver.downloader-throttled-rate", youtubeProtectionStatus?.effective.throttled_rate],
-    ["video-archiver.downloader-sleep-interval", youtubeProtectionStatus?.effective.sleep_interval_secs],
-    ["video-archiver.downloader-sleep-requests", youtubeProtectionStatus?.effective.sleep_requests_secs],
-  ]);
   downloaderInputs.forEach(([id, draft, saved]) => {
-    const hasAdaptiveRuntime = downloaderEffectiveById.has(id)
-      && youtubeProtectionStatus?.automatic_protection_enabled === true;
-    const effective = hasAdaptiveRuntime ? downloaderEffectiveById.get(id) : saved;
-    const overlayActive = hasAdaptiveRuntime && youtubeProtectionStatus?.state.mode !== "normal" && effective !== saved;
-    setProjection(
-      id,
-      draft,
-      saved ?? null,
-      effective ?? null,
-      overlayActive ? `adaptive ${youtubeProtectionStatus?.state.mode}` : null,
-      overlayActive ? "Automatic YouTube protection temporarily applies a stricter effective value without rewriting this saved setting." : null,
-      defaultDownloaderPreset != null,
-      hasAdaptiveRuntime || defaultDownloaderPreset != null,
-    );
+    setProjection(id, draft, saved ?? null, saved ?? null, null, null, defaultDownloaderPreset != null, defaultDownloaderPreset != null);
   });
   const pacingInputs: Array<[string, string, number]> = [
     ["video-archiver.pacing-recurring-interval", pacingRecurringSecs, pacingBaseline?.recurring_min_interval_secs ?? 60],
     ["video-archiver.pacing-recurring-jitter", pacingJitterSecs, pacingBaseline?.recurring_jitter_secs ?? 60],
-    ["video-archiver.pacing-enumeration-sleep", pacingSleepRequests, pacingBaseline?.enumeration_sleep_requests ?? 2],
     ["video-archiver.pacing-update-all-batch", pacingUpdateAllBatch, pacingBaseline?.update_all_batch_size ?? 25],
-    ["video-archiver.pacing-download-min-sleep", pacingDownloadMinSleep, pacingBaseline?.recurring_download_min_sleep_secs ?? 5],
-    ["video-archiver.pacing-download-max-sleep", pacingDownloadMaxSleep, pacingBaseline?.recurring_download_max_sleep_secs ?? 10],
   ];
-  setProjection(
-    "video-archiver.automatic-protection",
-    pacingAdaptiveEnabled,
-    pacingBaseline?.adaptive_protection_enabled ?? null,
-    youtubeProtectionStatus?.automatic_protection_enabled ?? null,
-    youtubeProtectionStatus?.automatic_protection_enabled === true && youtubeProtectionStatus.state.mode !== "normal" ? `adaptive ${youtubeProtectionStatus.state.mode}` : null,
-    youtubeProtectionStatus?.automatic_protection_enabled === true && youtubeProtectionStatus.state.mode !== "normal" ? "Temporary effective pacing is stricter than the saved baseline." : null,
-    pacingBaseline != null,
-    youtubeProtectionStatus != null,
-  );
-  const enumerationAdaptiveEnabled = youtubeEnumerationProtectionStatus?.automatic_protection_enabled === true;
-  const pacingEffectiveById = new Map<string, unknown>([
-    ["video-archiver.pacing-recurring-interval", enumerationAdaptiveEnabled
-      ? effectiveRecurringPacingInterval(
-          pacingBaseline?.recurring_min_interval_secs ?? 60,
-          true,
-          youtubeEnumerationProtectionStatus?.effective.aggregate_start_interval_secs,
-        )
-      : pacingBaseline?.recurring_min_interval_secs],
-    ["video-archiver.pacing-enumeration-sleep", enumerationAdaptiveEnabled
-      ? youtubeEnumerationProtectionStatus?.effective.sleep_requests_secs
-      : pacingBaseline?.enumeration_sleep_requests],
-    ["video-archiver.pacing-update-all-batch", enumerationAdaptiveEnabled
-      ? youtubeEnumerationProtectionStatus?.effective.update_tranche_size
-      : pacingBaseline?.update_all_batch_size],
-  ]);
   pacingInputs.forEach(([id, draft, saved]) => {
-    const perJobSleepProjection = id === "video-archiver.pacing-download-min-sleep"
-      || id === "video-archiver.pacing-download-max-sleep";
-    const hasAdaptiveRuntime = pacingEffectiveById.has(id) && youtubeEnumerationProtectionStatus != null;
-    const effective = perJobSleepProjection
-      ? null
-      : hasAdaptiveRuntime ? pacingEffectiveById.get(id) : saved;
-    const overlayActive = hasAdaptiveRuntime && enumerationAdaptiveEnabled && effective !== saved;
-    setProjection(
-      id,
-      draft,
-      pacingBaseline ? saved : null,
-      pacingBaseline ? effective ?? null : null,
-      overlayActive ? `adaptive ${youtubeEnumerationProtectionStatus?.state.mode}` : null,
-      perJobSleepProjection
-        ? "Effective sleep is resolved per job from the saved range and is unavailable until that job starts."
-        : overlayActive ? "Automatic YouTube protection temporarily applies a stricter subscription-check value." : null,
-      pacingBaseline != null,
-      perJobSleepProjection ? false : hasAdaptiveRuntime || pacingBaseline != null,
-    );
+    setProjection(id, draft, pacingBaseline ? saved : null, pacingBaseline ? saved : null, null, null, pacingBaseline != null, pacingBaseline != null);
   });
-  YOUTUBE_TUNING_FIELDS.forEach(({ key }) => {
-    const id = YOUTUBE_TUNING_SETTING_ID_BY_KEY[key];
+  YOUTUBE_COOLDOWN_TUNING_FIELDS.forEach(({ key, settingId }) => {
     setProjection(
-      id,
+      settingId,
       youtubeProtectionTuning?.[key] ?? null,
       youtubeProtectionTuningBaseline?.[key] ?? null,
       youtubeProtectionTuningBaseline?.[key] ?? null,
@@ -2918,17 +3058,13 @@ export function OptionsPage() {
     }
     if (adapter === "download_preset") {
       const preset = defaultDownloaderPreset;
-      const profile = DOWNLOADER_PROFILES[0];
+      const profile = DOWNLOADER_PROFILES[1]; // "balanced" is the registry default profile
       if (!preset || !profile) throw new Error("The current default download preset is unavailable.");
       const patch = {
-        yt_dlp_concurrent_fragments: profile.concurrent_fragments,
-        yt_dlp_limit_rate: null,
         yt_dlp_throttled_rate: profile.throttled_rate,
         yt_dlp_file_access_retries: profile.file_access_retries,
         yt_dlp_retries: profile.retries,
         yt_dlp_fragment_retries: profile.fragment_retries,
-        yt_dlp_sleep_interval: profile.sleep_interval,
-        yt_dlp_sleep_requests: profile.sleep_requests,
       };
       const saved = await invoke<DownloadPresetsConfig>("download_presets_default_safety_patch", {
         expectedDefaultPresetId: preset.id,
@@ -2940,26 +3076,18 @@ export function OptionsPage() {
     }
     if (adapter === "antibot_pacing") {
       const defaults: AntiBotPacing = {
-        adaptive_protection_enabled: true,
         recurring_min_interval_secs: 60,
         recurring_jitter_secs: 60,
-        enumeration_sleep_requests: 2,
         update_all_batch_size: 25,
-        recurring_download_min_sleep_secs: 5,
-        recurring_download_max_sleep_secs: 10,
       };
       const mutationGeneration = nextYoutubeProtectionMutationGeneration();
       pacingMutationGenerationRef.current = mutationGeneration;
       const saved = await invoke<AntiBotPacing>("antibot_pacing_set", { settings: defaults, mutationGeneration });
       if (pacingMutationGenerationRef.current !== mutationGeneration) throw new Error("Pacing reset was superseded by a newer intent.");
       setPacingBaseline(saved);
-      setPacingAdaptiveEnabled(saved.adaptive_protection_enabled);
       setPacingRecurringSecs(String(saved.recurring_min_interval_secs));
       setPacingJitterSecs(String(saved.recurring_jitter_secs));
-      setPacingSleepRequests(String(saved.enumeration_sleep_requests));
       setPacingUpdateAllBatch(String(saved.update_all_batch_size));
-      setPacingDownloadMinSleep(String(saved.recurring_download_min_sleep_secs));
-      setPacingDownloadMaxSleep(String(saved.recurring_download_max_sleep_secs));
       await refreshYoutubeProtectionStatuses();
       return "Subscription pacing restored.";
     }
@@ -3157,14 +3285,10 @@ export function OptionsPage() {
           const saved = await invoke<DownloadPresetsConfig>("download_presets_default_safety_patch", {
             expectedDefaultPresetId: previousPreset.id,
             patch: {
-              yt_dlp_concurrent_fragments: previousPreset.yt_dlp_concurrent_fragments,
-              yt_dlp_limit_rate: previousPreset.yt_dlp_limit_rate,
               yt_dlp_throttled_rate: previousPreset.yt_dlp_throttled_rate,
               yt_dlp_file_access_retries: previousPreset.yt_dlp_file_access_retries,
               yt_dlp_retries: previousPreset.yt_dlp_retries,
               yt_dlp_fragment_retries: previousPreset.yt_dlp_fragment_retries,
-              yt_dlp_sleep_interval: previousPreset.yt_dlp_sleep_interval,
-              yt_dlp_sleep_requests: previousPreset.yt_dlp_sleep_requests,
             },
           });
           setDownloadPresets(saved);
@@ -3277,20 +3401,117 @@ export function OptionsPage() {
             Open folder
           </button>
         </div>
+        {feature.key === "video" ? (
+          <div data-setting-id="video-archiver.subscription-export-dir" style={{ marginTop: 16, paddingTop: 12, borderTop: "1px solid rgba(126,145,167,.3)" }}>
+            <h3 style={{ margin: "0 0 4px" }}>Subscription backups</h3>
+            <p>
+              A daily automatic export of your YouTube subscriptions (plus Instagram/TikTok when supported), kept as
+              the newest 30 copies. Runs off-thread, never at startup.
+            </p>
+            <div className="kv">
+              <div className="k">Backup folder</div>
+              <div className="v options-path-value">{subscriptionExport?.dir || "-"}</div>
+            </div>
+            <div className="kv">
+              <div className="k">Status</div>
+              <div className="v">
+                {subscriptionExport ? (subscriptionExport.is_default ? "Using the default folder" : "Custom folder") : "Loading…"}
+                {" · keeps the newest "}
+                {subscriptionExport?.keep ?? 30}
+                {" copies"}
+              </div>
+            </div>
+            <div className="kv">
+              <div className="k">Last export</div>
+              <div className="v">
+                {subscriptionExport?.last_export_at_ms
+                  ? `${new Date(subscriptionExport.last_export_at_ms).toLocaleString()} · ${subscriptionExport.last_export_count ?? 0} subscriptions`
+                  : "Never exported yet"}
+                {subscriptionExport?.last_error ? ` · Last error: ${subscriptionExport.last_error}` : ""}
+              </div>
+            </div>
+            <div className="row">
+              <button type="button" disabled={subscriptionExportBusy} onClick={() => chooseSubscriptionExportDir().catch(() => undefined)}>
+                Browse…
+              </button>
+              <button type="button" disabled={subscriptionExportBusy || subscriptionExport?.is_default} onClick={() => resetSubscriptionExportDir().catch(() => undefined)}>
+                Reset to default
+              </button>
+              <button
+                type="button"
+                disabled={subscriptionExportBusy || !subscriptionExport?.last_export_path}
+                onClick={() => subscriptionExport?.last_export_path && openParentDirBestEffort(subscriptionExport.last_export_path).catch(() => undefined)}
+              >
+                Open folder
+              </button>
+              <button type="button" disabled={subscriptionExportBusy} onClick={() => exportSubscriptionsNow().catch(() => undefined)}>
+                Export now
+              </button>
+            </div>
+            {subscriptionExportMessage ? <p role="status">{subscriptionExportMessage}</p> : null}
+          </div>
+        ) : null}
       </section>
     );
   }
 
-  function renderProviderTransferControls(provider: "instagram" | "tiktok") {
-    const label = provider === "instagram" ? "Instagram" : "TikTok";
+  function renderProviderTransferControls(provider: "youtube" | "instagram" | "tiktok") {
+    const label = provider === "instagram" ? "Instagram" : provider === "tiktok" ? "TikTok" : "YouTube";
     const laneRows = (["single", "recurring"] as const).map((lane) => {
       const key = `${provider}_${lane}` as const;
       const policy = providerTransferSettings?.[key];
-      const laneLabel = lane === "single" ? "Single posts / videos" : "Profile subscriptions";
+      const laneLabel =
+        provider === "youtube"
+          ? lane === "single"
+            ? "YouTube — single videos"
+            : "YouTube — subscriptions (recurring)"
+          : lane === "single"
+            ? "Single posts / videos"
+            : "Profile subscriptions";
       const idPrefix = `${provider}-archiver.transfer-${lane}`;
       return (
         <tr key={key}>
           <th scope="row">{laneLabel}</th>
+          <td>
+            <input
+              data-setting-id={`${idPrefix}-sleep-interval`}
+              data-testid={`options-setting-${idPrefix}-sleep-interval`}
+              aria-label={`${laneLabel} delay between items`}
+              type="number"
+              min={0}
+              max={86400}
+              value={policy?.sleep_interval_secs ?? ""}
+              disabled={providerTransferBusy || !policy}
+              onChange={(event) => updateProviderTransferPolicy(key, { sleep_interval_secs: Number(event.currentTarget.value) })}
+            />
+          </td>
+          <td>
+            {/* WP-0321 S4: random extra wait added on top of the delay above before each download. */}
+            <input
+              data-setting-id={`${idPrefix}-sleep-jitter`}
+              data-testid={`options-setting-${idPrefix}-sleep-jitter`}
+              aria-label={`${laneLabel} random extra wait`}
+              type="number"
+              min={0}
+              max={86400}
+              value={policy?.sleep_jitter_secs ?? ""}
+              disabled={providerTransferBusy || !policy}
+              onChange={(event) => updateProviderTransferPolicy(key, { sleep_jitter_secs: Number(event.currentTarget.value) })}
+            />
+          </td>
+          <td>
+            <input
+              data-setting-id={`${idPrefix}-sleep-requests`}
+              data-testid={`options-setting-${idPrefix}-sleep-requests`}
+              aria-label={`${laneLabel} request delay`}
+              type="number"
+              min={0}
+              max={10000}
+              value={policy?.sleep_requests_secs ?? ""}
+              disabled={providerTransferBusy || !policy}
+              onChange={(event) => updateProviderTransferPolicy(key, { sleep_requests_secs: Number(event.currentTarget.value) })}
+            />
+          </td>
           <td>
             <input
               data-setting-id={`${idPrefix}-fragments`}
@@ -3316,32 +3537,6 @@ export function OptionsPage() {
               onChange={(event) => updateProviderTransferPolicy(key, { limit_rate: event.currentTarget.value || null })}
             />
           </td>
-          <td>
-            <input
-              data-setting-id={`${idPrefix}-sleep-interval`}
-              data-testid={`options-setting-${idPrefix}-sleep-interval`}
-              aria-label={`${laneLabel} delay between items`}
-              type="number"
-              min={0}
-              max={86400}
-              value={policy?.sleep_interval_secs ?? ""}
-              disabled={providerTransferBusy || !policy}
-              onChange={(event) => updateProviderTransferPolicy(key, { sleep_interval_secs: Number(event.currentTarget.value) })}
-            />
-          </td>
-          <td>
-            <input
-              data-setting-id={`${idPrefix}-sleep-requests`}
-              data-testid={`options-setting-${idPrefix}-sleep-requests`}
-              aria-label={`${laneLabel} request delay`}
-              type="number"
-              min={0}
-              max={10000}
-              value={policy?.sleep_requests_secs ?? ""}
-              disabled={providerTransferBusy || !policy}
-              onChange={(event) => updateProviderTransferPolicy(key, { sleep_requests_secs: Number(event.currentTarget.value) })}
-            />
-          </td>
         </tr>
       );
     });
@@ -3358,9 +3553,14 @@ export function OptionsPage() {
                 : instagramProviderStatus?.readiness_error ?? "Status unavailable"
               : providerYtDlpStatus?.available
                 ? `yt-dlp ${providerYtDlpStatus.ytdlp_version ?? "version unknown"}`
-                : "TikTok downloader unavailable"}
+                : `${label} downloader unavailable`}
           </div>
         </div>
+        {provider === "youtube" ? (
+          <p style={{ color: "#4b5563", fontSize: 12 }}>
+            Lane values are floors: the higher of the lane value and the download preset applies.
+          </p>
+        ) : null}
         {provider === "tiktok" && providerTransferSettings ? (
           <fieldset>
             <legend>TikTok session and provider API</legend>
@@ -3420,7 +3620,7 @@ export function OptionsPage() {
         ) : null}
         <div className="table-wrap">
           <table>
-            <thead><tr><th>Lane</th><th>Pieces at once</th><th>Maximum bandwidth</th><th>Delay between items (sec)</th><th>Request delay (sec)</th></tr></thead>
+            <thead><tr><th>Lane</th><th>Wait between downloads (sec)</th><th>Random extra wait (sec)</th><th>Wait between requests (sec)</th><th>Pieces at once</th><th>Maximum bandwidth</th></tr></thead>
             <tbody>{laneRows}</tbody>
           </table>
         </div>
@@ -3544,7 +3744,7 @@ export function OptionsPage() {
               <h2>{activeModuleDescriptor.label}</h2>
               <p>{activeModuleDescriptor.description}</p>
             </div>
-            <div className="options-module-state" role="status">
+            <div className="options-module-state" role="status" style={activeModule === "manual" ? { display: "none" } : undefined}>
                {activeModuleInvalidCount
                  ? `${activeModuleInvalidCount} invalid ${activeModuleInvalidCount === 1 ? "value" : "values"}`
                  : activeModuleDirtyCount
@@ -3557,7 +3757,7 @@ export function OptionsPage() {
             </div>
           </div>
 
-          <div className="options-module-tools">
+          <div className="options-module-tools" style={activeModule === "manual" ? { display: "none" } : undefined}>
             <button
               type="button"
               disabled={!activeModuleSettings.length}
@@ -3643,7 +3843,7 @@ export function OptionsPage() {
               <span>{capabilityReceipt.message}</span>
             </div>
           ) : null}
-          <details className="options-manual" data-testid="options-built-in-manual">
+          <details className="options-manual" style={activeModule === "manual" ? { display: "none" } : undefined} data-testid="options-built-in-manual">
             <summary>How to use these settings</summary>
             <ol>
               <li>Choose a module in the left rail, or use the module selector in a narrow window.</li>
@@ -3659,6 +3859,7 @@ export function OptionsPage() {
             </p>
           </details>
 
+      {activeModule === "manual" ? <AgentManual /> : null}
       {activeModule === "general" ? (
       <section className="options-setting-section" aria-labelledby="options-readability-heading" data-setting-id="general.font-scale">
         <h2 id="options-readability-heading">Readability</h2>
@@ -3761,6 +3962,9 @@ export function OptionsPage() {
             <select
               id="options-setting-video-youtube-browser-session"
               data-testid="options-setting-video-archiver.youtube-browser-session"
+              data-agent-action-id="youtube.browser-source"
+              data-agent-effect-class="reversible_state_change"
+              data-agent-input-kind="select"
               aria-label="Browser used for YouTube"
               aria-invalid={isSettingInvalid("video-archiver.youtube-browser-session") || undefined}
               value={authBrowserSource}
@@ -3796,6 +4000,8 @@ export function OptionsPage() {
             </div>
             <button
               type="button"
+              data-agent-action-id="youtube.connect-selected-browser"
+              data-agent-effect-class="reversible_state_change"
               disabled={!authRevisionHydrated || authBusy || authPreflightBusy || authOpenBusy}
               onClick={connectYoutubeBrowser}
             >
@@ -3807,6 +4013,18 @@ export function OptionsPage() {
             </button>
           </li>
         </ol>
+
+        <div className="row">
+          <button
+            type="button"
+            data-agent-action-id="youtube.test-current-session"
+            data-agent-effect-class="external_probe"
+            disabled={!authRevisionHydrated || !authHasConfiguredSession || authBusy || authPreflightBusy || authOpenBusy}
+            onClick={testCurrentYoutubeAuth}
+          >
+            {authPreflightBusy ? "Testing current sign-in…" : "Test current sign-in"}
+          </button>
+        </div>
 
         {authShowsRecovery ? (
           <div className="youtube-auth-recovery" role="alert">
@@ -3880,6 +4098,9 @@ export function OptionsPage() {
               <input
                 id="options-setting-video-youtube-test-url"
                 data-testid="options-setting-video-archiver.youtube-test-url"
+                data-agent-action-id="youtube.test-url"
+                data-agent-effect-class="reversible_state_change"
+                data-agent-input-kind="text"
                 style={{ width: "100%" }}
                 title="The app opens this YouTube link to check your saved login. Any normal YouTube link works."
                 value={authPreflightUrl}
@@ -4527,7 +4748,76 @@ export function OptionsPage() {
       <>
       {renderFeatureRootSetting("video")}
       <section className="options-setting-section" aria-labelledby="options-downloader-safety-heading">
-        <h2 id="options-downloader-safety-heading">Download speed vs. safety</h2>
+        <h2 id="options-downloader-safety-heading">YouTube download pacing</h2>
+        <div className="kv" data-testid="download-engine-status">
+          <div className="k">Download engine</div>
+          <div className="v">
+            {downloadEngineStatus
+              ? `${downloadEngineStatus.selected_engine_id} · ${downloadEngineStatus.kind.replace(/_/g, " ")}`
+              : "Checking…"}
+          </div>
+          <div className="k">Version and verification</div>
+          <div className="v">
+            {downloadEngineStatus
+              ? `${downloadEngineStatus.version ?? "unknown version"} · ${downloadEngineStatus.verified ? "verified" : "not verified"} · ${downloadEngineStatus.sha256_hex ? `SHA-256 ${downloadEngineStatus.sha256_hex.slice(0, 16)}…` : "hash unavailable"}`
+              : "Not available yet"}
+          </div>
+          <div className="k">Installed copy</div>
+          <div className="v" title={downloadEngineStatus?.path ?? undefined}>
+            {downloadEngineStatus?.path ?? "Unavailable"}
+          </div>
+          <div className="k">Update state</div>
+          <div className="v">
+            {downloadEngineStatus?.update_state.replace(/_/g, " ") ?? "unknown"}
+            {downloadEngineStatus?.error ? ` · ${downloadEngineStatus.error}` : ""}
+          </div>
+        </div>
+        <div className="row" style={{ marginTop: 8 }}>
+          <button
+            type="button"
+            disabled={downloadEngineBusy}
+            onClick={updateDownloadEngineNow}
+            data-agent-action-id="download-engine.check-update"
+            data-agent-effect-class="reversible_state_change"
+          >
+            {downloadEngineBusy ? "Working…" : "Check and update yt-dlp"}
+          </button>
+          <button
+            type="button"
+            disabled={downloadEngineBusy || !downloadEngineStatus?.verified}
+            onClick={probeSelectedDownloadEngine}
+            data-agent-action-id="download-engine.probe-selected"
+            data-agent-effect-class="external_probe"
+          >
+            Test selected engine
+          </button>
+          <button
+            type="button"
+            disabled={downloadEngineBusy}
+            onClick={() => runDownloadEngineAction("download_engine_select_packaged", undefined, "Verified managed yt-dlp selected for new jobs.")}
+            data-agent-action-id="download-engine.select-managed"
+            data-agent-effect-class="reversible_state_change"
+          >
+            Use managed yt-dlp
+          </button>
+          <button type="button" disabled={downloadEngineBusy} onClick={chooseCustomDownloadEngine}>
+            Choose custom engine…
+          </button>
+          <button
+            type="button"
+            disabled={downloadEngineBusy}
+            onClick={() => runDownloadEngineAction("download_engine_rollback", undefined, "Previous verified engine restored for new jobs.")}
+            data-agent-action-id="download-engine.rollback"
+            data-agent-effect-class="reversible_state_change"
+          >
+            Roll back engine
+          </button>
+        </div>
+        {downloadEngineMessage ? (
+          <div role="status" style={{ marginTop: 8, color: downloadEngineMessage.startsWith("Error") ? "#dc2626" : "#166534" }}>
+            {downloadEngineMessage}
+          </div>
+        ) : null}
         <div style={{ color: "#4b5563", marginTop: 6, marginBottom: 12 }}>
           Pick how fast the app downloads from YouTube. Faster is quicker but YouTube is more likely
           to block you; safer is slower but more reliable. This is the default for new downloads and
@@ -4539,13 +4829,13 @@ export function OptionsPage() {
         <div className="kv">
           <div className="k">Current setting</div>
           <div className="v">
-            {inferredDownloaderProfile === "aggressive"
+            {inferredDownloaderProfile === "fastest"
               ? "Fastest"
               : inferredDownloaderProfile === "balanced"
                 ? "Balanced"
                 : inferredDownloaderProfile === "gentle"
                   ? "Gentle"
-                  : inferredDownloaderProfile === "conservative"
+                  : inferredDownloaderProfile === "safest"
                     ? "Safest"
                   : "Custom"}
           </div>
@@ -4583,44 +4873,15 @@ export function OptionsPage() {
           style={{ marginTop: 12, marginBottom: 4, borderTop: "1px solid #e5e7eb", paddingTop: 12 }}
         >
           <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 13 }}>
-            Fine-tune the details (advanced)
+            Download reliability (all sites) (advanced)
           </summary>
           <div style={{ marginTop: 8, color: "#4b5563", marginBottom: 8 }}>
-            Most people don&rsquo;t need these. Changing them replaces the buttons above with your
-            own values.
+            Applied to the default download preset on every site (not just YouTube). Pacing lives in
+            the table below instead.
           </div>
           <div className="row" style={{ flexWrap: "wrap", gap: 8 }}>
             <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span title="How many pieces of a video to download at the same time. Higher is faster but riskier.">Pieces at once</span>
-              <input
-                id="options-setting-video-downloader-concurrent-fragments"
-                data-testid="options-setting-video-archiver.downloader-concurrent-fragments"
-                type="number"
-                min={1}
-                max={32}
-                value={downloaderConcurrentFragments}
-                aria-invalid={isSettingInvalid("video-archiver.downloader-concurrent-fragments") || undefined}
-                onChange={(e) => setDownloaderConcurrentFragments(e.currentTarget.value)}
-                title="How many pieces of a video to download at the same time. Higher is faster but riskier."
-                disabled={downloaderBusy || !downloadPresets}
-              />
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span title="Optional maximum transfer bandwidth passed to yt-dlp. Leave blank for no bandwidth cap. For example, 4M.">Maximum bandwidth</span>
-              <input
-                id="options-setting-video-downloader-limit-rate"
-                data-testid="options-setting-video-archiver.downloader-limit-rate"
-                type="text"
-                value={downloaderLimitRate}
-                aria-invalid={isSettingInvalid("video-archiver.downloader-limit-rate") || undefined}
-                onChange={(e) => setDownloaderLimitRate(e.currentTarget.value)}
-                disabled={downloaderBusy || !downloadPresets}
-                placeholder="no cap"
-                title="Optional yt-dlp --limit-rate maximum. This is not the slow-transfer detection threshold."
-              />
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span title="A slower fallback speed the app drops to when YouTube limits the download. For example, 100K.">Slow-down speed</span>
+              <span title="A slower fallback speed the app drops to when a site limits the download. For example, 100K.">Slow-down speed</span>
               <input
                 id="options-setting-video-downloader-throttled-rate"
                 data-testid="options-setting-video-archiver.downloader-throttled-rate"
@@ -4630,37 +4891,7 @@ export function OptionsPage() {
                 onChange={(e) => setDownloaderThrottledRate(e.currentTarget.value)}
                 disabled={downloaderBusy || !downloadPresets}
                 placeholder="ex: 100K"
-                title="A slower fallback speed the app drops to when YouTube limits the download. For example, 100K."
-              />
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span title="Seconds to wait between videos. A pause makes YouTube less likely to block you.">Wait between videos (sec)</span>
-              <input
-                id="options-setting-video-downloader-sleep-interval"
-                data-testid="options-setting-video-archiver.downloader-sleep-interval"
-                type="number"
-                min={0}
-                max={86400}
-                value={downloaderSleepInterval}
-                aria-invalid={isSettingInvalid("video-archiver.downloader-sleep-interval") || undefined}
-                onChange={(e) => setDownloaderSleepInterval(e.currentTarget.value)}
-                title="Seconds to wait between videos. A pause makes YouTube less likely to block you."
-                disabled={downloaderBusy || !downloadPresets}
-              />
-            </label>
-            <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span title="Seconds to wait between requests to YouTube. Higher is gentler.">Wait between requests (sec)</span>
-              <input
-                id="options-setting-video-downloader-sleep-requests"
-                data-testid="options-setting-video-archiver.downloader-sleep-requests"
-                type="number"
-                min={0}
-                max={10000}
-                value={downloaderSleepRequests}
-                aria-invalid={isSettingInvalid("video-archiver.downloader-sleep-requests") || undefined}
-                onChange={(e) => setDownloaderSleepRequests(e.currentTarget.value)}
-                title="Seconds to wait between requests to YouTube. Higher is gentler."
-                disabled={downloaderBusy || !downloadPresets}
+                title="A slower fallback speed the app drops to when a site limits the download. For example, 100K."
               />
             </label>
             <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -4717,86 +4948,95 @@ export function OptionsPage() {
         </details>
       </section>
 
-      <section className="options-setting-section" aria-labelledby="options-subscription-pacing-heading">
-        <h2 id="options-subscription-pacing-heading">How often to check subscriptions</h2>
+      {renderProviderTransferControls("youtube")}
+
+      {/* WP-0321 S4: "When YouTube blocks downloads" — two protection modes only (normal, cooldown). */}
+      <section className="options-setting-section" aria-labelledby="options-youtube-cooldown-heading">
+        <h2 id="options-youtube-cooldown-heading">When YouTube blocks downloads</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          When you check many YouTube subscriptions for new videos at once, YouTube can start
-          blocking you. To avoid that, the app spreads the checks out over time. The default
-          settings work well &mdash; you only need to change them if YouTube keeps blocking your
-          &ldquo;Update all&rdquo;. This only affects subscriptions; one-off downloads aren&rsquo;t
-          changed.
+          If YouTube blocks downloads (a 429 response, or a sign-in-to-confirm-you&rsquo;re-not-a-bot
+          page without a saved-cookie rejection), the app pauses and tests again with a single
+          download, doubling the wait after each failed test up to the longest wait below.
         </div>
-        <label className="row" style={{ alignItems: "center", gap: 10 }}>
-          <input
-            id="options-setting-video-automatic-protection"
-            data-testid="options-setting-video-archiver.automatic-protection"
-            type="checkbox"
-            checked={pacingAdaptiveEnabled}
-            onChange={(event) => setPacingAdaptiveEnabled(event.currentTarget.checked)}
-            disabled={pacingBusy || pacingHydrationState !== "ready"}
-          />
-          <span>
-            <strong>Automatic YouTube protection</strong>
-            <span style={{ display: "block", color: "#4b5563", fontSize: 13 }}>
-              Corroborated rate-limit outcomes can temporarily reduce starts and concurrency. Saved values are never rewritten.
-            </span>
-          </span>
-        </label>
-        <div className="kv" data-testid="youtube-protection-demand-state">
-          <div className="k">Protection data</div>
+        <div className="kv" data-testid="youtube-protection-status">
+          <div className="k">Status</div>
           <div className="v">
-            {youtubeProtectionDemand
-              ? `${youtubeProtectionDemand.state} · ${youtubeProtectionDemand.verified_at_ms ? `verified ${new Date(youtubeProtectionDemand.verified_at_ms).toLocaleString()} · fresh for ${Math.round(youtubeProtectionDemand.freshness_ms / 1000)}s` : "not yet verified"}${youtubeProtectionDemand.shared ? " · shared request" : ""}`
-              : "idle · not yet requested"}
+            <strong>
+              {youtubeProtectionStatus
+                ? youtubeProtectionStatus.state.mode === "cooldown"
+                  ? `Cooldown · attempt ${youtubeProtectionStatus.state.cooldown_attempt}${youtubeProtectionStatus.state.next_eligible_probe_at_ms ? ` · next test download at ${new Date(youtubeProtectionStatus.state.next_eligible_probe_at_ms).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}` : ""}`
+                  : "Normal"
+                : "Unavailable"}
+            </strong>
           </div>
         </div>
-        {youtubeProtectionStatus ? (
-          <div className="kv" data-testid="youtube-protection-status">
-            <div className="k">Current protection mode</div>
-            <div className="v">
-              <strong>{youtubeProtectionStatus.automatic_protection_enabled ? youtubeProtectionStatus.state.mode : "off — saved baseline active"}</strong>
-              {` · fragments ${youtubeProtectionStatus.baseline.concurrent_fragments} → ${youtubeProtectionStatus.effective.concurrent_fragments}`}
-              {` · download wait ${youtubeProtectionStatus.baseline.sleep_interval_secs}s → ${youtubeProtectionStatus.effective.sleep_interval_secs}s`}
-              {` · request wait ${youtubeProtectionStatus.baseline.sleep_requests_secs}s → ${youtubeProtectionStatus.effective.sleep_requests_secs}s`}
-              {youtubeProtectionStatus.automatic_protection_enabled && youtubeProtectionStatus.effective.canary_only ? " · next eligible run is a one-item canary" : ""}
-            </div>
-            <div className="k">Subscription-check protection</div>
-            <div className="v">
-              <strong>{youtubeEnumerationProtectionStatus
-                ? youtubeEnumerationProtectionStatus.automatic_protection_enabled
-                  ? youtubeEnumerationProtectionStatus.state.mode
-                  : "off — saved baseline active"
-                : "unavailable"}</strong>
-              {youtubeEnumerationProtectionStatus
-                ? ` · request wait ${youtubeEnumerationProtectionStatus.baseline.sleep_requests_secs}s → ${youtubeEnumerationProtectionStatus.effective.sleep_requests_secs}s · update tranche ${youtubeEnumerationProtectionStatus.baseline.update_tranche_size} → ${youtubeEnumerationProtectionStatus.effective.update_tranche_size}`
-                : ""}
-              {youtubeEnumerationProtectionStatus?.automatic_protection_enabled && youtubeEnumerationProtectionStatus.effective.canary_only ? " · next eligible check is a one-item canary" : ""}
-            </div>
+        {youtubeProtectionTuning ? (
+          <div className="options-settings-grid">
+            {YOUTUBE_COOLDOWN_TUNING_FIELDS.map((field) => (
+              <label key={field.key} data-setting-id={field.settingId} htmlFor={`options-setting-${field.settingId}`} title={field.help}>
+                <span>{field.label}</span>
+                <input
+                  id={`options-setting-${field.settingId}`}
+                  data-testid={`options-setting-${field.settingId}`}
+                  type="number"
+                  min={field.min}
+                  max={field.max}
+                  value={Math.round(youtubeProtectionTuning[field.key] / field.unitSecs)}
+                  disabled={youtubeProtectionBusy || youtubeProtectionTuningHydrationState !== "ready"}
+                  onChange={(event) => {
+                    const units = Math.round(Number(event.currentTarget.value) || 0);
+                    setYoutubeProtectionTuning((current) =>
+                      current ? { ...current, [field.key]: units * field.unitSecs } : current,
+                    );
+                  }}
+                />
+              </label>
+            ))}
           </div>
-        ) : null}
+        ) : (
+          <p>Cooldown wait settings are unavailable.</p>
+        )}
         <div className="row" style={{ marginTop: 8 }}>
-          <button
-            type="button"
-            data-agent-safe-action="true"
-            onClick={() => void refreshYoutubeProtectionStatuses(true)}
-            disabled={youtubeProtectionDemand?.state === "queued" || youtubeProtectionDemand?.state === "loading"}
-          >
-            Refresh protection status
+          <button type="button" disabled={youtubeProtectionBusy || youtubeProtectionTuningHydrationState !== "ready" || !youtubeProtectionTuning} onClick={saveYoutubeProtectionTuning}>
+            Save
+          </button>
+          <button type="button" disabled={youtubeProtectionBusy || youtubeProtectionTuningHydrationState !== "ready"} onClick={resetYoutubeProtectionTuning}>
+            Restore safe defaults
+          </button>
+          <button type="button" data-agent-action-id="youtube.controlled-probe" data-agent-effect-class="external_probe"
+            onClick={() => void requestControlledYoutubeProbe()}
+            disabled={youtubeProtectionBusy || youtubeProtectionStatus?.state.mode !== "cooldown"}>
+            Retry now
           </button>
           <button
             type="button"
             onClick={returnYoutubeProtectionToBaseline}
-            disabled={youtubeProtectionBusy || !youtubeProtectionStatus || !youtubeEnumerationProtectionStatus || (youtubeProtectionStatus.state.mode === "normal" && youtubeEnumerationProtectionStatus.state.mode === "normal")}
+            disabled={youtubeProtectionBusy || !youtubeProtectionStatus || youtubeProtectionStatus.state.mode === "normal"}
           >
-            {youtubeProtectionBusy ? "Returning..." : "Return to saved baseline"}
+            {youtubeProtectionBusy ? "Returning..." : "Return to normal"}
           </button>
-          {youtubeProtectionStatus?.automatic_protection_enabled && youtubeProtectionStatus.state.next_eligible_probe_at_ms ? (
-            <span>Next controlled probe: {new Date(youtubeProtectionStatus.state.next_eligible_probe_at_ms).toLocaleString()}</span>
-          ) : null}
         </div>
         {youtubeProtectionMessage ? <div role="status">{youtubeProtectionMessage}</div> : null}
         <details style={{ marginTop: 8 }}>
-          <summary>Protection evidence and history</summary>
+          <summary>Cooldown evidence and history</summary>
+          <div className="kv" data-testid="youtube-protection-demand-state">
+            <div className="k">Protection data</div>
+            <div className="v">
+              {youtubeProtectionDemand
+                ? `${youtubeProtectionDemand.state} · ${youtubeProtectionDemand.verified_at_ms ? `verified ${new Date(youtubeProtectionDemand.verified_at_ms).toLocaleString()} · fresh for ${Math.round(youtubeProtectionDemand.freshness_ms / 1000)}s` : "not yet verified"}${youtubeProtectionDemand.shared ? " · shared request" : ""}`
+                : "idle · not yet requested"}
+            </div>
+          </div>
+          <div className="row" style={{ marginTop: 4 }}>
+            <button
+              type="button"
+              data-agent-safe-action="true"
+              onClick={() => void refreshYoutubeProtectionStatuses(true)}
+              disabled={youtubeProtectionDemand?.state === "queued" || youtubeProtectionDemand?.state === "loading"}
+            >
+              Refresh protection status
+            </button>
+          </div>
           <div className="kv">
             <div className="k">Current runtime epoch</div>
             <div className="v">{youtubeProtectionStatus?.state.runtime_epoch ?? "Unavailable"}</div>
@@ -4840,58 +5080,16 @@ export function OptionsPage() {
             </button>
           </div>
         </details>
-        <details data-testid="youtube-protection-advanced-tuning">
-          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 13 }}>
-            Automatic protection rules (advanced)
-          </summary>
-          <p style={{ color: "#4b5563", fontSize: 12 }}>
-            These bounded rules control how repeated blocks are corroborated, how long stricter
-            modes remain active, and how the single controlled canary reopens a cooled-down lane.
-            Saved download preferences remain unchanged.
-          </p>
-          {youtubeProtectionTuning ? (
-            <div className="options-settings-grid">
-              {YOUTUBE_TUNING_FIELDS.map((field) => {
-                const settingId = YOUTUBE_TUNING_SETTING_ID_BY_KEY[field.key];
-                const descriptor = optionsSettingById(settingId);
-                return (
-                <label key={field.key} data-setting-id={settingId} htmlFor={descriptor.productId}>
-                  <span>{field.label}</span>
-                  <input
-                    id={descriptor.productId}
-                    data-testid={descriptor.testId}
-                    type="number"
-                    min={field.min}
-                    max={field.max}
-                    value={youtubeProtectionTuning[field.key]}
-                    disabled={youtubeProtectionBusy || youtubeProtectionTuningHydrationState !== "ready"}
-                    onChange={(event) => {
-                      const value = Math.round(Number(event.currentTarget.value) || 0);
-                      setYoutubeProtectionTuning((current) =>
-                        current ? { ...current, [field.key]: value } : current,
-                      );
-                    }}
-                  />
-                </label>
-                );
-              })}
-            </div>
-          ) : (
-            <p>Advanced protection settings are unavailable.</p>
-          )}
-          <div className="row" style={{ marginTop: 8 }}>
-            <button type="button" disabled={youtubeProtectionBusy || youtubeProtectionTuningHydrationState !== "ready" || !youtubeProtectionTuning} onClick={saveYoutubeProtectionTuning}>
-              Save protection rules
-            </button>
-            <button type="button" disabled={youtubeProtectionBusy || youtubeProtectionTuningHydrationState !== "ready"} onClick={resetYoutubeProtectionTuning}>
-              Restore safe defaults
-            </button>
-          </div>
-        </details>
-        <details>
-          <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 13 }}>
-            Adjust the pacing (advanced)
-          </summary>
+
+        {/* Same card as the cooldown block above (build_rules: new UI adds no cards). */}
+        <h2 id="options-subscription-pacing-heading" style={{ marginTop: 24 }}>How often to check subscriptions</h2>
+        <div style={{ color: "#4b5563", marginBottom: 8 }}>
+          When you check many YouTube subscriptions for new videos at once, YouTube can start
+          blocking you. To avoid that, the app spreads the checks out over time. The default
+          settings work well &mdash; you only need to change them if YouTube keeps blocking your
+          &ldquo;Update all&rdquo;. This only affects subscriptions; one-off downloads aren&rsquo;t
+          changed.
+        </div>
         <div className="row" style={{ marginTop: 8 }}>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span title="How long to wait between checking one subscription and the next. A longer wait is safer.">
@@ -4930,58 +5128,6 @@ export function OptionsPage() {
             />
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span title="A short pause while reading a channel's list of videos. A longer pause is gentler on YouTube.">
-              Pause while reading a channel (sec)
-            </span>
-            <input
-              id="options-setting-video-pacing-enumeration-sleep"
-              data-testid="options-setting-video-archiver.pacing-enumeration-sleep"
-              type="number"
-              min={0}
-              max={60}
-              value={pacingSleepRequests}
-              aria-invalid={isSettingInvalid("video-archiver.pacing-enumeration-sleep") || undefined}
-              onChange={(e) => setPacingSleepRequests(e.currentTarget.value)}
-              disabled={pacingBusy || pacingHydrationState !== "ready"}
-              title="A short pause while reading a channel's list of videos. A longer pause is gentler on YouTube."
-              style={{ width: 110 }}
-            />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span title="Minimum wait before each video downloaded by a playlist or subscription.">
-              Download wait min (sec)
-            </span>
-            <input
-              id="options-setting-video-pacing-download-min-sleep"
-              data-testid="options-setting-video-archiver.pacing-download-min-sleep"
-              type="number"
-              min={0}
-              max={300}
-              value={pacingDownloadMinSleep}
-              aria-invalid={isSettingInvalid("video-archiver.pacing-download-min-sleep") || undefined}
-              onChange={(e) => setPacingDownloadMinSleep(e.currentTarget.value)}
-              disabled={pacingBusy || pacingHydrationState !== "ready"}
-              style={{ width: 110 }}
-            />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <span title="Maximum randomized wait before each video downloaded by a playlist or subscription.">
-              Download wait max (sec)
-            </span>
-            <input
-              id="options-setting-video-pacing-download-max-sleep"
-              data-testid="options-setting-video-archiver.pacing-download-max-sleep"
-              type="number"
-              min={0}
-              max={300}
-              value={pacingDownloadMaxSleep}
-              aria-invalid={isSettingInvalid("video-archiver.pacing-download-max-sleep") || undefined}
-              onChange={(e) => setPacingDownloadMaxSleep(e.currentTarget.value)}
-              disabled={pacingBusy || pacingHydrationState !== "ready"}
-              style={{ width: 110 }}
-            />
-          </label>
-          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <span title="How many subscriptions 'Update all' checks at once (the most overdue first). Run it again to do more.">
               Subscriptions per &ldquo;Update all&rdquo;
             </span>
@@ -5000,12 +5146,6 @@ export function OptionsPage() {
             />
           </label>
         </div>
-        <div style={{ color: "#4b5563", fontSize: 12, marginTop: 6 }}>
-          The recommended profile checks one subscription at a time, varies the gap between
-          checks, downloads one recurring video at a time, and waits 5-10 seconds before each
-          recurring download. If YouTube rejects the connected session, recurring YouTube work
-          stays queued until the session is refreshed or its bounded cooldown expires.
-        </div>
         <div className="row" style={{ marginTop: 12 }}>
           <button type="button" disabled={pacingBusy || pacingHydrationState !== "ready" || pacingInputs.some(([id]) => isSettingInvalid(id))} onClick={saveAntiBotPacing}>
             Save these settings
@@ -5021,7 +5161,6 @@ export function OptionsPage() {
             {pacingMessage}
           </div>
         ) : null}
-        </details>
       </section>
       </>
       ) : null}
@@ -5146,6 +5285,28 @@ export function OptionsPage() {
             </button>
           </div>
           {jobsMessage ? <p role="status">{jobsMessage}</p> : null}
+          {/* Same card as queue budgets (build_rules: new UI adds no cards). */}
+          <h3 id="options-jobs-retention-heading" style={{ marginTop: 20 }}>Job history retention</h3>
+          <p>Finished (succeeded, failed, canceled) job rows older than this are purged by the scheduler&rsquo;s idle tick. Queued and running jobs are never touched.</p>
+          <label data-setting-id="jobs.terminal-retention-days" htmlFor="options-setting-jobs-terminal-retention-days">
+            <span>Delete finished job history after (days, 0 = keep forever)</span>
+            <input
+              id="options-setting-jobs-terminal-retention-days"
+              data-testid="options-setting-jobs.terminal-retention-days"
+              type="number"
+              min={0}
+              max={3650}
+              value={jobsTerminalRetentionDraft}
+              disabled={jobsTerminalRetentionBusy || jobsTerminalRetentionBaseline == null}
+              onChange={(event) => setJobsTerminalRetentionDraft(event.currentTarget.value)}
+            />
+          </label>
+          <div className="row">
+            <button type="button" disabled={jobsTerminalRetentionBusy || jobsTerminalRetentionBaseline == null} onClick={() => saveJobsTerminalRetention().catch(() => undefined)}>
+              {jobsTerminalRetentionBusy ? "Saving…" : "Save retention"}
+            </button>
+          </div>
+          {jobsTerminalRetentionMessage ? <p role="status">{jobsTerminalRetentionMessage}</p> : null}
         </section>
       ) : null}
 

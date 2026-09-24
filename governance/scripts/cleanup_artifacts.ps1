@@ -3,6 +3,8 @@ param(
   [switch]$BuildOnly,
   [switch]$IncludeBuildTarget,
   [switch]$PruneOldBuilds,
+  [switch]$PruneOldBuildsOnly,
+  [switch]$OfflineInstallerOnly,
   [ValidateRange(1, 32)]
   [int]$BuildThrottleLimit = 1
 )
@@ -23,10 +25,42 @@ $engineRoot = Join-Path $repoRoot 'product\engine'
 $desktopRoot = Join-Path $repoRoot 'product\desktop'
 $offlineRoot = Join-Path $desktopRoot 'src-tauri\offline'
 
-$targets.Add((Join-Path $engineRoot 'target'))
-$targets.Add((Join-Path $desktopRoot 'src-tauri\target'))
+if ($OfflineInstallerOnly -and ($BuildOnly -or $IncludeBuildTarget -or $PruneOldBuilds -or $PruneOldBuildsOnly)) {
+  throw '-OfflineInstallerOnly cannot be combined with other cleanup modes.'
+}
 
-if (-not $BuildOnly) {
+if ($PruneOldBuildsOnly -and ($BuildOnly -or $IncludeBuildTarget -or $PruneOldBuilds)) {
+  throw '-PruneOldBuildsOnly cannot be combined with -BuildOnly, -IncludeBuildTarget, or -PruneOldBuilds.'
+}
+
+if ($OfflineInstallerOnly) {
+  $targets.Add((Join-Path $buildPaths.CurrentDir 'offline_full'))
+  $targets.Add((Join-Path $desktopRoot 'build_target\offline_archive_cache'))
+  $targets.Add((Join-Path $desktopRoot 'build_target\offline_installer_staging'))
+  $targets.Add((Join-Path $desktopRoot 'build_target\tool_artifacts\wp_runs\WP-0308'))
+  $targets.Add((Join-Path $offlineRoot 'tools'))
+  $targets.Add((Join-Path $offlineRoot 'models'))
+  $targets.Add((Join-Path $offlineRoot 'cache'))
+  $targets.Add((Join-Path $offlineRoot 'payload.zip'))
+  $targets.Add((Join-Path $offlineRoot 'manifest.json'))
+  $targets.Add((Join-Path $env:APPDATA 'com.voxvulgi.voxvulgi\diagnostics\installer'))
+  Get-ChildItem -LiteralPath $buildPaths.OldVersionsDir -Force -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '(?i)offline|installer' } |
+    ForEach-Object { $targets.Add($_.FullName) }
+  Get-ChildItem -LiteralPath (Join-Path $desktopRoot 'build_target\logs') -Force -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '(?i)offline|installer|tauri_msi' } |
+    ForEach-Object { $targets.Add($_.FullName) }
+  Get-ChildItem -LiteralPath (Join-Path $desktopRoot 'build_target\tool_artifacts') -Force -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -match '(?i)offline|installer' } |
+    ForEach-Object { $targets.Add($_.FullName) }
+} elseif ($PruneOldBuildsOnly) {
+  $targets.Add($buildPaths.OldVersionsDir)
+} else {
+  $targets.Add((Join-Path $engineRoot 'target'))
+  $targets.Add((Join-Path $desktopRoot 'src-tauri\target'))
+}
+
+if ((-not $OfflineInstallerOnly) -and (-not $PruneOldBuildsOnly) -and (-not $BuildOnly)) {
   $targets.Add((Join-Path $offlineRoot 'tools'))
   $targets.Add((Join-Path $offlineRoot 'models'))
   $targets.Add((Join-Path $offlineRoot 'cache'))
@@ -34,10 +68,12 @@ if (-not $BuildOnly) {
   $targets.Add((Join-Path $offlineRoot 'manifest.json'))
 }
 
-Get-ChildItem -Path $engineRoot -Directory -Filter 'target_*' -ErrorAction SilentlyContinue |
-  ForEach-Object { $targets.Add($_.FullName) }
+if ((-not $OfflineInstallerOnly) -and (-not $PruneOldBuildsOnly)) {
+  Get-ChildItem -Path $engineRoot -Directory -Filter 'target_*' -ErrorAction SilentlyContinue |
+    ForEach-Object { $targets.Add($_.FullName) }
+}
 
-if (-not $BuildOnly) {
+if ((-not $OfflineInstallerOnly) -and (-not $PruneOldBuildsOnly) -and (-not $BuildOnly)) {
   Get-ChildItem -Path $repoRoot -Directory -Filter 'tmp_*' -ErrorAction SilentlyContinue |
     ForEach-Object { $targets.Add($_.FullName) }
 }
@@ -62,8 +98,12 @@ foreach ($target in $normalizedTargets) {
 if (-not $Force) {
   Write-Host ""
   Write-Host "Dry run only. Re-run with -Force to delete these paths."
-  Write-Host "Optional: add -IncludeBuildTarget to clean build_target\\Current too."
-  Write-Host "Optional: add -PruneOldBuilds (with -IncludeBuildTarget) to also clean old_versions."
+  if ($PruneOldBuildsOnly) {
+    Write-Host "PruneOldBuildsOnly preserves build_target\\Current and all other generated roots."
+  } else {
+    Write-Host "Optional: add -IncludeBuildTarget to clean build_target\\Current too."
+    Write-Host "Optional: add -PruneOldBuilds (with -IncludeBuildTarget) to also clean old_versions."
+  }
   exit 0
 }
 
@@ -112,13 +152,17 @@ if ($BuildOnly -and $BuildThrottleLimit -gt 1) {
       continue
     }
 
-    $item = Get-Item -LiteralPath $target
-    if ($item.PSIsContainer) {
-      Remove-Item -LiteralPath $target -Recurse -Force
-    } else {
-      Remove-Item -LiteralPath $target -Force
+    try {
+      $item = Get-Item -LiteralPath $target
+      if ($item.PSIsContainer) {
+        Remove-Item -LiteralPath $target -Recurse -Force
+      } else {
+        Remove-Item -LiteralPath $target -Force
+      }
+      Write-Host "Removed: $target"
+    } catch {
+      Write-Host "Removal blocked: $target :: $($_.Exception.Message)"
     }
-    Write-Host "Removed: $target"
   }
 }
 

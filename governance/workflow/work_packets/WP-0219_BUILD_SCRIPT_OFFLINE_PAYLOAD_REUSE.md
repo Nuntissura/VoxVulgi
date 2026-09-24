@@ -20,7 +20,7 @@ DONE
 ## Reused Systems
 
 - Existing `governance/scripts/build_desktop_target.ps1` target build flow.
-- Existing `governance/scripts/prep_offline_bundle.ps1` payload prep script.
+- Existing `offline-installer-runtime/scripts/prep_offline_bundle.ps1` payload prep script.
 - Existing pinned dependency manifest at `product/engine/resources/tooling/pinned_dependency_manifest.json`.
 - Existing generated offline payload files under `product/desktop/src-tauri/offline/`.
 

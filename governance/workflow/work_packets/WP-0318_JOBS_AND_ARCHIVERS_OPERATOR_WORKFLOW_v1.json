@@ -1,0 +1,52 @@
+{
+  "id": "WP-0318",
+  "version": "v1",
+  "status": "DONE",
+  "owner": "Codex",
+  "board": "../TASK_BOARD.md",
+  "refinement": "WP-0318_JOBS_AND_ARCHIVERS_OPERATOR_WORKFLOW_v1_REFINEMENT.md",
+  "requirements": [
+    {
+      "id": "VV-0318-001",
+      "text": "Jobs defaults to media titles, current action, meaningful progress and actionable errors; technical identifiers and maintenance remain available on demand."
+    },
+    {
+      "id": "VV-0318-002",
+      "text": "Stream bounded redacted live downloader activity, structured transfer bytes/speed/ETA when supplied, and early provider titles; unknown progress is indeterminate and transfer completion is distinct from finished output."
+    },
+    {
+      "id": "VV-0318-003",
+      "text": "All archivers expose the same activity component and reduce repeated explanations, card framing and secondary setup above primary work; preserve existing actions and subscriptions."
+    },
+    {
+      "id": "VV-0318-004",
+      "text": "Expose existing recurring workflows directly and consistently; do not imply an unimplemented image subscription capability exists."
+    },
+    {
+      "id": "VV-0318-005",
+      "text": "Use bounded canonical paging, no overlapping polling, stale-response protection and visibility-aware work; technical views do not poll while closed."
+    },
+    {
+      "id": "VV-0318-006",
+      "text": "Provide semantic frontend interaction and documented backend inspection for new behavior, retaining token authorization and quiet operation."
+    },
+    {
+      "id": "VV-0318-007",
+      "text": "Verify final packaged screens and behavior through the built-in bridge without Computer Use; retain product version and changelog, all operator data and existing downloads."
+    }
+  ],
+  "non_goals": [
+    "Localization Studio redesign",
+    "database replacement",
+    "offline payload changes",
+    "history deletion"
+  ],
+  "validation": [
+    "focused engine and frontend boundary tests",
+    "frontend build",
+    "governed core-only build",
+    "isolated packaged semantic and visual verification on all affected screens"
+  ],
+  "proof": "../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0318/operator_workflow/summary.md",
+  "completed_at": "2026-09-20"
+}

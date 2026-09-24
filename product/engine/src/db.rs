@@ -18,7 +18,12 @@ pub use database_runtime::{
     WRITER_QUEUE_CAPACITY,
 };
 
-const CURRENT_SCHEMA_VERSION: u32 = 54;
+const CURRENT_SCHEMA_VERSION: u32 = 59;
+/// WP-0321 S6: bounded archived-attempt history kept in `job_attempt` per surviving `job` row
+/// once it is superseded by a later attempt for the same video (`job.target_key`). Older
+/// superseded rows beyond this count are still deduped and deleted during the v58 migration, but
+/// do not get a `job_attempt` record. Shared with `jobs.rs`'s reopen/archive path.
+pub const JOB_ATTEMPT_HISTORY_LIMIT: u32 = 5;
 // WP-0258: raised from 750ms to 4000ms so read-only UI queries wait out a WAL
 // checkpoint instead of erroring "database is locked". Evidence: 47 subscription
 // refreshes failed with "database is locked" under DB contention.
@@ -56,12 +61,14 @@ pub const DIRECT_SQLITE_ACCESS_EXCEPTIONS: &[(&str, &str)] = &[
 /// startup schema authority and tests.
 pub const LEGACY_WRITE_CONTEXT_CALLS_REMAINING: usize = 0;
 
-struct MigrationStep {
-    version: u32,
-    apply: fn(&Connection) -> Result<()>,
+// WP-0321 S6: pub(crate) (not private) so `job_target_migration`'s tests can replay the
+// migration ladder up to a fixed version before exercising the v58 step directly.
+pub(crate) struct MigrationStep {
+    pub(crate) version: u32,
+    pub(crate) apply: fn(&Connection) -> Result<()>,
 }
 
-const MIGRATION_STEPS: &[MigrationStep] = &[
+pub(crate) const MIGRATION_STEPS: &[MigrationStep] = &[
     MigrationStep {
         version: 1,
         apply: apply_base_schema_v1,
@@ -243,8 +250,28 @@ const MIGRATION_STEPS: &[MigrationStep] = &[
         apply: apply_schema_v53,
     },
     MigrationStep {
-        version: CURRENT_SCHEMA_VERSION,
+        version: 54,
         apply: apply_schema_v54,
+    },
+    MigrationStep {
+        version: 55,
+        apply: apply_schema_v55,
+    },
+    MigrationStep {
+        version: 56,
+        apply: apply_schema_v56,
+    },
+    MigrationStep {
+        version: 57,
+        apply: apply_schema_v57,
+    },
+    MigrationStep {
+        version: 58,
+        apply: apply_schema_v58,
+    },
+    MigrationStep {
+        version: CURRENT_SCHEMA_VERSION,
+        apply: apply_schema_v59,
     },
 ];
 
@@ -339,6 +366,13 @@ pub fn migrate(conn: &Connection) -> Result<()> {
     for step in MIGRATION_STEPS {
         if current_version >= step.version {
             continue;
+        }
+        // WP-0321 S6: back up the live database via `VACUUM INTO` before the v58 job-target
+        // collapse, outside any transaction (VACUUM INTO manages its own). No-ops when the `job`
+        // table is empty, absent, or the connection is in-memory (see
+        // `job_target_migration::backup_before_v58_if_needed`).
+        if step.version == 58 {
+            crate::job_target_migration::backup_before_v58_if_needed(conn)?;
         }
         let tx = conn.unchecked_transaction()?;
         (step.apply)(&tx)?;
@@ -2950,6 +2984,371 @@ fn apply_schema_v54(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn apply_schema_v55(conn: &Connection) -> Result<()> {
+    // WP-0320: escalating cooldown retry needs to know how many consecutive cooldown canaries
+    // have failed since the current cooldown cycle began; additive so an existing durable policy
+    // state row keeps loading and simply starts the ladder at zero.
+    ensure_column(
+        conn,
+        "downloader_policy_state",
+        "cooldown_failed_probe_count",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    Ok(())
+}
+
+fn apply_schema_v56(conn: &Connection) -> Result<()> {
+    // WP-0321 S1: `count_youtube_single_unclassified` previously ran a full `library_item`
+    // table scan with `lower(...) LIKE` predicates on every row (152s measured against 144k
+    // rows, holding a read slot). This denormalizes the exact same predicate into a stored
+    // `youtube_video_candidate` flag, maintained by triggers at write time instead of computed
+    // per query, plus a partial index so the count becomes an indexed lookup. The predicate
+    // itself, and therefore the returned count, is unchanged; only where the computation happens
+    // moved from query time to write time.
+    ensure_column(
+        conn,
+        "library_item",
+        "youtube_video_candidate",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    conn.execute_batch(
+        r#"
+UPDATE library_item SET youtube_video_candidate = (
+  CASE WHEN (
+    (
+      lower(source_uri) LIKE '%youtube.com%'
+      OR lower(source_uri) LIKE '%youtu.be%'
+      OR lower(source_type) LIKE '%youtube%'
+    )
+    AND (
+      width IS NOT NULL
+      OR height IS NOT NULL
+      OR video_codec IS NOT NULL
+      OR lower(media_path) LIKE '%.mp4'
+      OR lower(media_path) LIKE '%.mkv'
+      OR lower(media_path) LIKE '%.webm'
+      OR lower(media_path) LIKE '%.mov'
+    )
+  ) THEN 1 ELSE 0 END
+);
+
+CREATE INDEX IF NOT EXISTS idx_library_item_youtube_video_candidate
+  ON library_item(youtube_video_candidate)
+  WHERE youtube_video_candidate = 1;
+
+-- SQLite's `recursive_triggers` pragma defaults to OFF (not set anywhere in this codebase), so
+-- the UPDATE statement inside each trigger body below does not re-invoke these same triggers.
+CREATE TRIGGER IF NOT EXISTS trg_library_item_youtube_candidate_insert
+AFTER INSERT ON library_item
+BEGIN
+  UPDATE library_item SET youtube_video_candidate = (
+    CASE WHEN (
+      (
+        lower(NEW.source_uri) LIKE '%youtube.com%'
+        OR lower(NEW.source_uri) LIKE '%youtu.be%'
+        OR lower(NEW.source_type) LIKE '%youtube%'
+      )
+      AND (
+        NEW.width IS NOT NULL
+        OR NEW.height IS NOT NULL
+        OR NEW.video_codec IS NOT NULL
+        OR lower(NEW.media_path) LIKE '%.mp4'
+        OR lower(NEW.media_path) LIKE '%.mkv'
+        OR lower(NEW.media_path) LIKE '%.webm'
+        OR lower(NEW.media_path) LIKE '%.mov'
+      )
+    ) THEN 1 ELSE 0 END
+  )
+  WHERE id = NEW.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_library_item_youtube_candidate_update
+AFTER UPDATE OF source_type, source_uri, media_path, width, height, video_codec ON library_item
+BEGIN
+  UPDATE library_item SET youtube_video_candidate = (
+    CASE WHEN (
+      (
+        lower(NEW.source_uri) LIKE '%youtube.com%'
+        OR lower(NEW.source_uri) LIKE '%youtu.be%'
+        OR lower(NEW.source_type) LIKE '%youtube%'
+      )
+      AND (
+        NEW.width IS NOT NULL
+        OR NEW.height IS NOT NULL
+        OR NEW.video_codec IS NOT NULL
+        OR lower(NEW.media_path) LIKE '%.mp4'
+        OR lower(NEW.media_path) LIKE '%.mkv'
+        OR lower(NEW.media_path) LIKE '%.webm'
+        OR lower(NEW.media_path) LIKE '%.mov'
+      )
+    ) THEN 1 ELSE 0 END
+  )
+  WHERE id = NEW.id;
+END;
+"#,
+    )?;
+    Ok(())
+}
+
+/// WP-0321 S4: collapses the five-mode ladder (normal/cautious/conservative/cooldown/hold) into
+/// two modes (normal/cooldown), and merges the separate `enumeration` policy lane into the shared
+/// `download` lane per (provider, auth_fingerprint, runtime_epoch) — after this migration a single
+/// YouTube block pauses both download and enumeration together under one state row keyed by
+/// `operation='download'`. Only mode changes get a transition row (matching the existing
+/// convention that transitions log mode changes, not every field mutation), tagged with reason
+/// `wp0321_simplified_modes`.
+fn apply_schema_v57(conn: &Connection) -> Result<()> {
+    #[derive(Clone)]
+    struct PolicyRow {
+        provider: String,
+        operation: String,
+        auth_fingerprint: String,
+        runtime_epoch: String,
+        mode: String,
+        corroboration_count: i64,
+        success_streak: i64,
+        entered_at_ms: i64,
+        last_evidence_at_ms: Option<i64>,
+        next_eligible_probe_at_ms: Option<i64>,
+        version: i64,
+        cooldown_failed_probe_count: i64,
+    }
+
+    let now_ms: i64 = conn.query_row(
+        "SELECT CAST(strftime('%s','now') AS INTEGER) * 1000",
+        [],
+        |row| row.get(0),
+    )?;
+
+    let mut rows: Vec<PolicyRow> = {
+        let mut statement = conn.prepare(
+            "SELECT provider,operation,auth_fingerprint,runtime_epoch,mode,corroboration_count,success_streak,entered_at_ms,last_evidence_at_ms,next_eligible_probe_at_ms,version,cooldown_failed_probe_count FROM downloader_policy_state",
+        )?;
+        let collected = statement
+            .query_map([], |row| {
+                Ok(PolicyRow {
+                    provider: row.get(0)?,
+                    operation: row.get(1)?,
+                    auth_fingerprint: row.get(2)?,
+                    runtime_epoch: row.get(3)?,
+                    mode: row.get(4)?,
+                    corroboration_count: row.get(5)?,
+                    success_streak: row.get(6)?,
+                    entered_at_ms: row.get(7)?,
+                    last_evidence_at_ms: row.get(8)?,
+                    next_eligible_probe_at_ms: row.get(9)?,
+                    version: row.get(10)?,
+                    cooldown_failed_probe_count: row.get(11)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        collected
+    };
+
+    // Step 1: squash the retired ladder modes (cautious/conservative/hold) to normal, resetting
+    // the counters/probe the retired modes used.
+    for row in rows.iter_mut() {
+        if matches!(row.mode.as_str(), "cautious" | "conservative" | "hold") {
+            let before_mode = row.mode.clone();
+            row.mode = "normal".to_string();
+            row.corroboration_count = 0;
+            row.success_streak = 0;
+            row.next_eligible_probe_at_ms = None;
+            row.cooldown_failed_probe_count = 0;
+            row.entered_at_ms = now_ms;
+            row.version += 1;
+            conn.execute(
+                "INSERT INTO downloader_policy_transition(id,provider,operation,auth_fingerprint,runtime_epoch,before_mode,after_mode,reason,evidence_ids_json,occurred_at_ms) VALUES(?1,?2,?3,?4,?5,?6,'normal','wp0321_simplified_modes','[]',?7)",
+                rusqlite::params![
+                    uuid::Uuid::new_v4().to_string(),
+                    row.provider,
+                    row.operation,
+                    row.auth_fingerprint,
+                    row.runtime_epoch,
+                    before_mode,
+                    now_ms,
+                ],
+            )?;
+        }
+    }
+
+    // Step 2: merge each `enumeration` row into the `download` row sharing the same
+    // (provider, auth_fingerprint, runtime_epoch), keeping the later probe and the higher failed
+    // count (the more cautious of the two), then rewrite the `download` row.
+    let enumeration_rows: Vec<PolicyRow> = rows
+        .iter()
+        .filter(|row| row.operation == "enumeration")
+        .cloned()
+        .collect();
+    for enumeration in &enumeration_rows {
+        let download_idx = rows.iter().position(|row| {
+            row.operation == "download"
+                && row.provider == enumeration.provider
+                && row.auth_fingerprint == enumeration.auth_fingerprint
+                && row.runtime_epoch == enumeration.runtime_epoch
+        });
+        if let Some(idx) = download_idx {
+            let before_mode = rows[idx].mode.clone();
+            let merged_mode = if before_mode == "cooldown" || enumeration.mode == "cooldown" {
+                "cooldown".to_string()
+            } else {
+                "normal".to_string()
+            };
+            let merged_probe = match (
+                rows[idx].next_eligible_probe_at_ms,
+                enumeration.next_eligible_probe_at_ms,
+            ) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            let merged_failed_probe_count = rows[idx]
+                .cooldown_failed_probe_count
+                .max(enumeration.cooldown_failed_probe_count);
+            let merged_last_evidence = match (
+                rows[idx].last_evidence_at_ms,
+                enumeration.last_evidence_at_ms,
+            ) {
+                (Some(a), Some(b)) => Some(a.max(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
+            let mode_changed = merged_mode != before_mode;
+            {
+                let row = &mut rows[idx];
+                row.mode = merged_mode.clone();
+                row.next_eligible_probe_at_ms = merged_probe;
+                row.cooldown_failed_probe_count = merged_failed_probe_count;
+                row.last_evidence_at_ms = merged_last_evidence;
+                row.corroboration_count = 0;
+                row.success_streak = 0;
+                row.entered_at_ms = now_ms;
+                row.version += 1;
+            }
+            if mode_changed {
+                conn.execute(
+                    "INSERT INTO downloader_policy_transition(id,provider,operation,auth_fingerprint,runtime_epoch,before_mode,after_mode,reason,evidence_ids_json,occurred_at_ms) VALUES(?1,?2,?3,?4,?5,?6,?7,'wp0321_simplified_modes','[]',?8)",
+                    rusqlite::params![
+                        uuid::Uuid::new_v4().to_string(),
+                        rows[idx].provider,
+                        rows[idx].operation,
+                        rows[idx].auth_fingerprint,
+                        rows[idx].runtime_epoch,
+                        before_mode,
+                        merged_mode,
+                        now_ms,
+                    ],
+                )?;
+            }
+        } else {
+            // No download row to merge into: the enumeration row becomes the download row for
+            // this identity (already normalized to normal/cooldown by step 1).
+            rows.push(PolicyRow {
+                provider: enumeration.provider.clone(),
+                operation: "download".to_string(),
+                auth_fingerprint: enumeration.auth_fingerprint.clone(),
+                runtime_epoch: enumeration.runtime_epoch.clone(),
+                mode: enumeration.mode.clone(),
+                corroboration_count: 0,
+                success_streak: 0,
+                entered_at_ms: now_ms,
+                last_evidence_at_ms: enumeration.last_evidence_at_ms,
+                next_eligible_probe_at_ms: enumeration.next_eligible_probe_at_ms,
+                version: enumeration.version + 1,
+                cooldown_failed_probe_count: enumeration.cooldown_failed_probe_count,
+            });
+        }
+    }
+
+    // Step 3: write back every `download` row (including any promoted from `enumeration` above),
+    // then drop every `enumeration` state row and lease — enumeration outcomes now share the
+    // `download` state row (`POLICY_STATE_OPERATION`).
+    for row in rows.iter().filter(|row| row.operation == "download") {
+        conn.execute(
+            "INSERT INTO downloader_policy_state(provider,operation,auth_fingerprint,runtime_epoch,mode,corroboration_count,success_streak,entered_at_ms,last_evidence_at_ms,next_eligible_probe_at_ms,version,cooldown_failed_probe_count) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(provider,operation,auth_fingerprint,runtime_epoch) DO UPDATE SET mode=excluded.mode,corroboration_count=excluded.corroboration_count,success_streak=excluded.success_streak,entered_at_ms=excluded.entered_at_ms,last_evidence_at_ms=excluded.last_evidence_at_ms,next_eligible_probe_at_ms=excluded.next_eligible_probe_at_ms,version=excluded.version,cooldown_failed_probe_count=excluded.cooldown_failed_probe_count",
+            rusqlite::params![
+                row.provider,
+                row.operation,
+                row.auth_fingerprint,
+                row.runtime_epoch,
+                row.mode,
+                row.corroboration_count,
+                row.success_streak,
+                row.entered_at_ms,
+                row.last_evidence_at_ms,
+                row.next_eligible_probe_at_ms,
+                row.version,
+                row.cooldown_failed_probe_count,
+            ],
+        )?;
+    }
+    conn.execute(
+        "DELETE FROM downloader_policy_state WHERE operation='enumeration'",
+        [],
+    )?;
+    conn.execute(
+        "DELETE FROM downloader_canary_lease WHERE operation='enumeration'",
+        [],
+    )?;
+    Ok(())
+}
+
+/// WP-0321 S6: collapses `download_direct_url` job history from one row per attempt to one
+/// durable row per video. Adds `job.target_key`/`job.attempt_no` and the bounded `job_attempt`
+/// archive table, deduplicates every existing `download_direct_url` row per
+/// `(service, media_id)` (see `job_target_migration::collapse_download_direct_url_targets`), and
+/// only then creates the unique partial index on `target_key` — creating it before dedupe would
+/// fail on the very duplicates this migration exists to resolve. The pre-migration `VACUUM INTO`
+/// backup runs earlier, outside this transaction (see `migrate`).
+pub(crate) fn apply_schema_v58(conn: &Connection) -> Result<()> {
+    ensure_column(conn, "job", "target_key", "TEXT")?;
+    ensure_column(conn, "job", "attempt_no", "INTEGER NOT NULL DEFAULT 1")?;
+    conn.execute_batch(
+        r#"
+CREATE TABLE IF NOT EXISTS job_attempt (
+  job_id TEXT NOT NULL REFERENCES job(id) ON DELETE CASCADE,
+  attempt_no INTEGER NOT NULL,
+  legacy_job_id TEXT,
+  batch_id TEXT,
+  track TEXT,
+  status TEXT NOT NULL,
+  error TEXT,
+  created_at_ms INTEGER NOT NULL,
+  started_at_ms INTEGER,
+  finished_at_ms INTEGER,
+  logs_path TEXT,
+  PRIMARY KEY (job_id, attempt_no)
+);
+CREATE INDEX IF NOT EXISTS idx_job_attempt_batch
+  ON job_attempt(batch_id, created_at_ms);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_job_attempt_legacy
+  ON job_attempt(legacy_job_id) WHERE legacy_job_id IS NOT NULL;
+"#,
+    )?;
+
+    crate::job_target_migration::collapse_download_direct_url_targets(conn)?;
+
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_job_target_key \
+         ON job(target_key) WHERE target_key IS NOT NULL",
+        [],
+    )?;
+    Ok(())
+}
+
+/// WP-0322 B1: bounded app-busy requeue counter for `youtube_subscription_refresh_v1` and
+/// `download_direct_url` jobs. Incremented each time a job attempt fails with a transient
+/// database-contention error (`writer_admission_timeout`, `read_admission_timeout`,
+/// `database is locked`) instead of a real failure, so the job can be silently requeued a
+/// bounded number of times without polluting subscription `last_error_message`/
+/// `consecutive_failures`.
+pub(crate) fn apply_schema_v59(conn: &Connection) -> Result<()> {
+    ensure_column(conn, "job", "app_busy_attempts", "INTEGER NOT NULL DEFAULT 0")?;
+    Ok(())
+}
+
 fn ensure_column(conn: &Connection, table: &str, column: &str, column_def: &str) -> Result<()> {
     let table_exists: bool = conn.query_row(
         "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name=?1",
@@ -4411,23 +4810,26 @@ CREATE INDEX idx_media_availability_refresh
             1,
             "one shared helper invocation must project both lane states from the transaction"
         );
+        // WP-0321 S4: one shared protection state per sign-in identity; download and
+        // enumeration statuses differ only by their lane baseline.
         assert!(
-            projection.contains("status_for(youtube_protection::OPERATION_DOWNLOAD)")
-                && projection.contains("status_for(youtube_protection::OPERATION_ENUMERATION)"),
+            projection.contains("status_for(&download_baseline)")
+                && projection.contains("status_for(&enumeration_baseline)"),
             "download and enumeration must use the same transaction-backed status helper"
+        );
+        assert!(
+            projection.contains("youtube_protection::POLICY_STATE_OPERATION")
+                && !projection.contains("OPERATION_ENUMERATION"),
+            "the snapshot must read the single shared policy state"
         );
         assert_eq!(
             projection
                 .matches("youtube_protection::policy_history_conn(")
                 .count(),
-            2,
-            "both bounded history pages must be queried from the same transaction"
+            1,
+            "the shared bounded history page must be queried from the same transaction"
         );
-        for required in [
-            "youtube_protection::load_tuning_conn(&tx)?",
-            "antibot_pacing_from_conn(&tx)",
-            "tx.commit()?",
-        ] {
+        for required in ["tx.commit()?"] {
             assert!(
                 projection.contains(required),
                 "shared snapshot is missing transaction query contract: {required}"
@@ -4498,5 +4900,98 @@ CREATE INDEX idx_media_availability_refresh
             observed.values().sum::<usize>(),
             LEGACY_WRITE_CONTEXT_CALLS_REMAINING
         );
+    }
+
+    #[test]
+    fn migrate_v57_normalizes_legacy_policy_modes_and_merges_enumeration() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let conn = open(&paths).expect("open");
+        // Run migrations up to (and including) v56 so v57 sees pre-simplification data.
+        for step in MIGRATION_STEPS.iter().take_while(|step| step.version <= 56) {
+            let tx = conn.unchecked_transaction().expect("tx");
+            (step.apply)(&tx).expect("apply step");
+            tx.pragma_update(None, "user_version", step.version)
+                .expect("bump user_version");
+            tx.commit().expect("commit");
+        }
+
+        // A conservative download lane on a stale epoch: squashed to normal.
+        conn.execute(
+            "INSERT INTO downloader_policy_state(provider,operation,auth_fingerprint,runtime_epoch,mode,corroboration_count,success_streak,entered_at_ms,last_evidence_at_ms,next_eligible_probe_at_ms,version,cooldown_failed_probe_count) VALUES('youtube','download','anonymous','epoch-a','conservative',3,1,1000,1000,NULL,4,0)",
+            [],
+        )
+        .expect("insert download row");
+        // A cooldown enumeration lane for the same identity, with a later probe and higher
+        // failed-count than the (post-squash) download row: must win the merge.
+        conn.execute(
+            "INSERT INTO downloader_policy_state(provider,operation,auth_fingerprint,runtime_epoch,mode,corroboration_count,success_streak,entered_at_ms,last_evidence_at_ms,next_eligible_probe_at_ms,version,cooldown_failed_probe_count) VALUES('youtube','enumeration','anonymous','epoch-a','cooldown',0,0,2000,2000,9999999,2,3)",
+            [],
+        )
+        .expect("insert enumeration row");
+        // An enumeration-only lane with no matching download row: promoted to download.
+        conn.execute(
+            "INSERT INTO downloader_policy_state(provider,operation,auth_fingerprint,runtime_epoch,mode,corroboration_count,success_streak,entered_at_ms,last_evidence_at_ms,next_eligible_probe_at_ms,version,cooldown_failed_probe_count) VALUES('youtube','enumeration','anonymous','epoch-b','normal',0,0,3000,3000,NULL,5,0)",
+            [],
+        )
+        .expect("insert orphan enumeration row");
+        conn.execute(
+            "INSERT INTO downloader_canary_lease(lease_id,job_id,provider,operation,auth_fingerprint,runtime_epoch,claimed_at_ms,expires_at_ms) VALUES('lease-1','job-1','youtube','enumeration','anonymous','epoch-a',1000,2000)",
+            [],
+        )
+        .expect("insert enumeration lease");
+
+        let tx = conn.unchecked_transaction().expect("tx");
+        apply_schema_v57(&tx).expect("apply v57");
+        tx.pragma_update(None, "user_version", 57)
+            .expect("bump user_version");
+        tx.commit().expect("commit");
+
+        let merged: (String, Option<i64>, i64) = conn
+            .query_row(
+                "SELECT mode,next_eligible_probe_at_ms,cooldown_failed_probe_count FROM downloader_policy_state WHERE provider='youtube' AND operation='download' AND auth_fingerprint='anonymous' AND runtime_epoch='epoch-a'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .expect("merged download row");
+        assert_eq!(merged.0, "cooldown");
+        assert_eq!(merged.1, Some(9_999_999));
+        assert_eq!(merged.2, 3);
+
+        let promoted_mode: String = conn
+            .query_row(
+                "SELECT mode FROM downloader_policy_state WHERE provider='youtube' AND operation='download' AND auth_fingerprint='anonymous' AND runtime_epoch='epoch-b'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("promoted download row");
+        assert_eq!(promoted_mode, "normal");
+
+        let enumeration_remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM downloader_policy_state WHERE operation='enumeration'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count enumeration rows");
+        assert_eq!(enumeration_remaining, 0);
+
+        let leases_remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM downloader_canary_lease WHERE operation='enumeration'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count enumeration leases");
+        assert_eq!(leases_remaining, 0);
+
+        let transition_reasons: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM downloader_policy_transition WHERE reason='wp0321_simplified_modes'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count transitions");
+        assert!(transition_reasons >= 2);
     }
 }

@@ -23,7 +23,35 @@ pub struct PythonLockfile {
     pub source_pins: Vec<String>,
     #[serde(default)]
     pub generator_notes: String,
+    #[serde(default)]
+    pub source_build: Option<LockedSourceBuild>,
     pub packages: Vec<LockedPackage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LockedSourceBuild {
+    pub python_tag: String,
+    pub platform_tag: String,
+    pub build_backend: LockedBuildArtifact,
+    pub packages: Vec<LockedSourcePackage>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LockedBuildArtifact {
+    pub name: String,
+    pub version: String,
+    pub filename: String,
+    pub url: String,
+    pub file_bytes: u64,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LockedSourcePackage {
+    pub name: String,
+    pub source_filename: String,
+    pub source_file_bytes: u64,
+    pub expected_wheel_filename: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -61,6 +89,16 @@ pub enum LockfileError {
          --require-hashes cannot proceed. First offender: {first_name}=={first_version}"
     )]
     MissingHashes {
+        pack: String,
+        missing_count: usize,
+        first_name: String,
+        first_version: String,
+    },
+    #[error(
+        "lockfile {pack} contains {missing_count} selected package(s) without an exact URL; \
+         direct acquisition cannot proceed. First offender: {first_name}=={first_version}"
+    )]
+    MissingUrls {
         pack: String,
         missing_count: usize,
         first_name: String,
@@ -132,9 +170,25 @@ impl PythonLockfile {
     /// Errors if any package is missing a sha256 (pip refuses --require-hashes on a
     /// partially-hashed file, so we fail loudly here instead of letting pip do it).
     pub fn render_hashed_requirements(&self) -> Result<String, LockfileError> {
-        let missing: Vec<&LockedPackage> = self
+        self.render_hashed_requirements_matching(false, |_| true)
+    }
+
+    pub fn render_hashed_requirements_matching<F>(
+        &self,
+        direct_urls: bool,
+        mut include: F,
+    ) -> Result<String, LockfileError>
+    where
+        F: FnMut(&LockedPackage) -> bool,
+    {
+        let selected = self
             .packages
             .iter()
+            .filter(|package| include(package))
+            .collect::<Vec<_>>();
+        let missing: Vec<&LockedPackage> = selected
+            .iter()
+            .copied()
             .filter(|p| p.sha256.as_deref().map(str::is_empty).unwrap_or(true))
             .collect();
         if let Some(first) = missing.first() {
@@ -145,19 +199,43 @@ impl PythonLockfile {
                 first_version: first.version.clone(),
             });
         }
+        if direct_urls {
+            let missing = selected
+                .iter()
+                .copied()
+                .filter(|package| package.url.as_deref().map(str::is_empty).unwrap_or(true))
+                .collect::<Vec<_>>();
+            if let Some(first) = missing.first() {
+                return Err(LockfileError::MissingUrls {
+                    pack: self.pack.clone(),
+                    missing_count: missing.len(),
+                    first_name: first.name.clone(),
+                    first_version: first.version.clone(),
+                });
+            }
+        }
 
         let mut out = String::new();
         out.push_str(&format!(
             "# auto-generated from {} (WP-0232). Do not edit by hand.\n",
             self.pack
         ));
-        for pkg in &self.packages {
+        for pkg in selected {
             // sha256 presence is guaranteed by the check above.
             let sha = pkg.sha256.as_deref().unwrap_or("");
-            out.push_str(&format!(
-                "{}=={} --hash=sha256:{}\n",
-                pkg.name, pkg.version, sha
-            ));
+            if direct_urls {
+                out.push_str(&format!(
+                    "{} @ {} --hash=sha256:{}\n",
+                    pkg.name,
+                    pkg.url.as_deref().unwrap_or(""),
+                    sha
+                ));
+            } else {
+                out.push_str(&format!(
+                    "{}=={} --hash=sha256:{}\n",
+                    pkg.name, pkg.version, sha
+                ));
+            }
         }
         Ok(out)
     }
@@ -175,6 +253,7 @@ mod tests {
             pip_version: "26.1.1".to_string(),
             source_pins: vec!["foo==1.0".to_string()],
             generator_notes: String::new(),
+            source_build: None,
             packages: vec![
                 LockedPackage {
                     name: "foo".to_string(),

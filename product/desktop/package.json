@@ -1,13 +1,14 @@
 {
   "name": "voxvulgi-desktop",
   "private": true,
-  "version": "0.1.183",
+  "version": "0.1.204",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
-    "test:contracts": "node --import tsx --test tests/**/*.test.ts",
+    "test:contracts": "node --import tsx --test tests/**/*.test.ts ../../offline-installer-runtime/tests/**/*.test.ts",
     "build:desktop:target": "powershell -ExecutionPolicy Bypass -File ../../governance/scripts/build_desktop_target.ps1",
+    "build:desktop:target:core-only": "powershell -ExecutionPolicy Bypass -File ../../governance/scripts/build_desktop_target.ps1 -CoreOnly",
     "build:desktop:target:no-prep": "powershell -ExecutionPolicy Bypass -File ../../governance/scripts/build_desktop_target.ps1 -SkipOfflineBundlePrep",
     "build:desktop:target:refresh": "powershell -ExecutionPolicy Bypass -File ../../governance/scripts/build_desktop_target.ps1 -RefreshOfflinePayload",
     "build:desktop:target:force-refresh": "powershell -ExecutionPolicy Bypass -File ../../governance/scripts/build_desktop_target.ps1 -ForceRefreshOfflinePayload",

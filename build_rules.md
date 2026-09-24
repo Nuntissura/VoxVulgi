@@ -9,6 +9,12 @@ These rules apply to frontend builds, backend builds, desktop builds, installer 
 - Every build or UI-impacting change must be tested through the real app boundary, not only compiled.
 - Verification must include visual inspection of the affected surface and backend or frontend navigation/interaction evidence for the affected behavior.
 - Routine verification must not pop up the app window, steal focus, or hijack the operator keyboard or mouse.
+- [VV-BUILD-AGENT-001] Computer-use, desktop mouse/keyboard simulation, and foreground-window automation are not acceptable routine VoxVulgi verification paths; needing one means the product's agent surface is incomplete.
+- [VV-BUILD-AGENT-002] Every operator workflow required for development proof or supported agent operation must expose the same product behavior through the semantic agent surface, not through a bespoke test-only implementation.
+- [VV-BUILD-AGENT-003] Agent-operable controls must be discoverable through stable semantic identity and declare their permitted action, effect class, and current availability; generic selectors, arbitrary script execution, and implicit permission from button shape remain forbidden.
+- [VV-BUILD-AGENT-004] Agent actions must be bounded, attributable, and return a structured receipt; long-running actions must remain independently observable while health, state, audit, navigation, and visual capture stay responsive.
+- [VV-BUILD-AGENT-005] Destructive or credential-revealing behavior is never made agent-operable merely to satisfy test coverage; it requires an explicit product authorization contract appropriate to the same real-world action.
+- [VV-BUILD-AGENT-006] Semantic UI inspection and action routes used against a running installed app must require a per-process unguessable bridge token read from the PID-bound bridge sidecar; never expose that token through health, state, audit, action receipts, WebView payloads, or diagnostics traces.
 - Prefer the Headless Agent Bridge and built-in visual debugger for app-boundary checks:
   - `GET /agent/health`
   - `GET /agent/state`
@@ -31,24 +37,30 @@ These rules apply to frontend builds, backend builds, desktop builds, installer 
 ## Offline Payload Build Policy
 
 - Treat the offline payload as the large bundled runtime dependency pack, not as normal app source.
+- Build the app/core against the separately installed managed runtime with `governance/scripts/build_desktop_target.ps1 -CoreOnly` (or `npm run build:desktop:target:core-only` from `product/desktop`).
+- A core-only build must not require, validate, refresh, build, bundle, install, warm up, or certify an offline payload; it retains the already-assigned product version, performs the desktop build and output placement, and writes a build log without changing the release changelog.
+- The pack warmup gate is not applicable to a core-only build because that build neither changes nor ships the dependency pack.
+- Desktop compilation must reuse `product/desktop/build_target/cargo_cache`; `Current` contains only the published app deliverables and must never be used as the compiler cache.
 - Routine app builds, UI checks, and developer verification must reuse an existing verified offline payload when the payload inputs did not change.
 - Do not refresh or rebuild the offline payload merely to prove unrelated UI/backend code changes.
 - Refresh the offline payload only when building a release that explicitly requires a fresh payload, when bundled dependency inputs changed, when the payload is missing/stale, or when the operator asks for a full dependency refresh.
 - Before starting a payload-refreshing build, state that it can be slow because it downloads, installs, verifies, and packages the local toolchain and models.
 - Payload refresh logs must show the active dependency/package/model stage clearly enough that a long run can be distinguished from a hang.
 
-## Single-Unit Offline Installer Build Gate (WP-0308)
+## Package-Only Offline Installer Gate (WP-0316)
 
-- [VV-BUILD-INSTALL-001] Every future public full-offline install/update build must publish one UDF ISO as the sole user-required artifact.
-- [VV-BUILD-INSTALL-002] The ISO must contain root `Install_VoxVulgi.exe`, `README.txt`, the payload manifest, and every governed 64 MiB bounded-solid payload archive; list and verify the completed ISO before publication.
-- [VV-BUILD-INSTALL-003] The installer definition must use Inno 7 `TExtractionWizardPage` to bulk-extract the externally shipped 64 MiB bounded-solid archives into an owned generation-specific staging tree, then transactionally promote the complete managed roots. `SolidCompression=no` remains mandatory for Inno's own compiled wrapper stream and does not disable solid blocks inside the external `.7z` payload archives. Inno `[Files] external extractarchive` entries, raw recursive dependency trees, and public `setup-*.bin` slices are forbidden.
-- [VV-BUILD-INSTALL-004] Archive builds must be content-fingerprinted and reused when inputs are unchanged. Routine builds must use atomic durable metadata receipts plus the prior full source-audit digest and must not recursively re-read source file bytes on a valid receipt hit. `-AuditPayloadSources` forces a fresh source-byte audit; `-RefreshPayloadArchives` forces that audit plus archive recreation. Every reuse still verifies the cached archive SHA-256, `7z t`, path safety, metadata policy, bounded-solid layout, and a second source-metadata snapshot before ISO creation.
-- [VV-BUILD-INSTALL-005] Every archive must pass `7z t`, path-safety inventory, and destination-boundary checks before ISO creation.
-- [VV-BUILD-INSTALL-006] Every installer run must enable logging, continuously checkpoint `installer_<version>_latest.log`, and retain a timestamped final log under `%APPDATA%\com.voxvulgi.voxvulgi\diagnostics\installer` on success, failure, or cancellation.
-- [VV-BUILD-INSTALL-007] Release verification must preserve the canonical representative Python-tree result of at least 2x versus the legacy raw-file fixture. The selected 64 MiB bounded-solid layout passed at 2.128x (222.717 s raw median versus 104.677 s archive median, identical output-tree SHA-256). A full clean-profile offline install on the documented reference local-SSD machine with default security settings remains a separate required target of at most 30 minutes.
-- [VV-BUILD-INSTALL-008] The single canonical build procedure is `governance/release/OFFLINE_INSTALLER_BUILD_MANUAL.md`; read it before installer work and update it whenever installer inputs, commands, outputs, tools, proof gates, or recovery behavior changes.
-- [VV-BUILD-INSTALL-009] The durable log must cover wrapper identity, named payload phase boundaries, core-installer handoff, before/after installed state, observed registry and binary versions, verification result, failure reason, and terminal outcome.
-- [VV-BUILD-INSTALL-010] Refuse publication when the wrapper can report success without proving the expected core uninstall-registry version and installed main-binary file version.
+- `[VV-BUILD-INSTALL-000]` through `[VV-BUILD-INSTALL-010]` live only in `offline-installer-runtime/GUIDE.md`.
+- Use only an entrypoint that `offline-installer-runtime/GUIDE.md` explicitly marks conforming.
+- `offline-installer-runtime/scripts/build_offline_release_fast.ps1` was deleted on 2026-08-30 because it was a stale, invalid, unwanted artifact that rebuilt and recertified product/runtime inputs during packaging.
+- Offline-installer packaging consumes explicit already-built and already-qualified inputs; it must not build, download, install, repair, warm up, upgrade, or mutate them.
+- Do not duplicate or replace that procedure here.
+
+## Release Identity Gate (WP-0316)
+
+- [VV-BUILD-VERSION-001] Desktop/installer build, repair, retry, test, and offline-packaging commands must not calculate, increment, or write a semantic version.
+- [VV-BUILD-VERSION-002] `build_desktop_target.ps1` requires `-ExpectedVersion <already-assigned-version>` for an actual desktop build and fails before building when it does not exactly match all product-version files.
+- [VV-BUILD-VERSION-003] Desktop and offline packaging commands must verify that the product-version files and `governance/release/BUILD_CHANGELOG.md` remain byte-for-byte unchanged.
+- [VV-BUILD-VERSION-004] Only an explicit operator-directed product-release action may assign a new version; only an exact proven, operator-designated release may be appended to the release changelog.
 
 ## No More Cards
 

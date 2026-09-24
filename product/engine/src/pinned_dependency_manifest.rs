@@ -12,6 +12,12 @@ pub struct PinnedDependencyManifest {
     /// use the legacy `pip install <pinned list>` path at install time.
     #[serde(default)]
     pub lockfiles: BTreeMap<String, String>,
+    /// Complete, mutually coherent installed-environment locks. Unlike the per-pack
+    /// resolver locks above, these cover every distribution in each shipped venv after
+    /// all packs have been composed. The full-offline payload validator fails closed
+    /// when either referenced lock is missing or the installed inventory drifts.
+    #[serde(default)]
+    pub offline_python_environment_locks: BTreeMap<String, String>,
     pub yt_dlp_windows: YtDlpWindowsPin,
     pub instagram_profile_provider: StandaloneZipToolPin,
     pub instagram_profile_enumerator: PythonWheelPin,
@@ -20,7 +26,7 @@ pub struct PinnedDependencyManifest {
     pub node_windows: NodeWindowsPin,
     pub youtube_po_provider: YoutubePoProviderPin,
     pub spleeter: SpleeterPins,
-    pub demucs: SingleSpecPin,
+    pub demucs: DemucsPin,
     pub diarization: PythonPackageSet,
     pub tts_preview: PythonPackageSet,
     pub tts_neural_local_v1: NeuralTtsPins,
@@ -103,6 +109,9 @@ pub struct YoutubePoProviderPin {
     pub node_modules_tree_sha256_hex: String,
     pub server_entrypoint_sha256_hex: String,
     pub application_complete_tree_sha256_hex: String,
+    pub canvas_prebuilt_url: String,
+    pub canvas_prebuilt_sha256_hex: String,
+    pub canvas_prebuilt_file_bytes: u64,
     pub source_label: String,
 }
 
@@ -138,6 +147,16 @@ pub struct SingleSpecPin {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DemucsPin {
+    pub pinned_spec: String,
+    pub unpinned_fallback_spec: String,
+    pub model_url: String,
+    pub model_relative_path: String,
+    pub model_file_bytes: u64,
+    pub model_sha256_hex: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PythonPackageSet {
     pub pinned: Vec<String>,
     pub unpinned_fallback: Vec<String>,
@@ -147,9 +166,22 @@ pub struct PythonPackageSet {
 pub struct NeuralTtsPins {
     pub compatibility_upgrades: Vec<String>,
     pub pinned: Vec<String>,
-    pub unpinned_fallback: Vec<String>,
-    #[serde(default)]
-    pub warmup_recovery_force_reinstall: Vec<String>,
+    pub spacy_model: PythonWheelPin,
+    pub kokoro_model: HuggingFaceModelPin,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HuggingFaceModelPin {
+    pub repo_id: String,
+    pub revision: String,
+    pub files: Vec<SizedPinnedFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SizedPinnedFile {
+    pub filename: String,
+    pub file_bytes: u64,
+    pub sha256_hex: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -210,7 +242,7 @@ mod tests {
     #[test]
     fn manifest_parses_and_contains_expected_sections() {
         let manifest = manifest();
-        assert_eq!(manifest.schema_version, 2);
+        assert_eq!(manifest.schema_version, 3);
         assert_eq!(
             manifest.allow_unpinned_fallback_env,
             "VOXVULGI_ALLOW_UNPINNED_FALLBACK"
@@ -222,6 +254,20 @@ mod tests {
             "52FE3C26DCF71FBDC85B528589020BB0B8E383155CFA81B64DD447BBE35E24B8"
         );
         assert_eq!(manifest.portable_python_windows.version, "3.11.9");
+        assert_eq!(
+            manifest
+                .offline_python_environment_locks
+                .get("main_windows_x64_cp311")
+                .map(String::as_str),
+            Some("final_environment_locks/main_windows_x64_cp311.lock.json")
+        );
+        assert_eq!(
+            manifest
+                .offline_python_environment_locks
+                .get("cosyvoice_windows_x64_cp311")
+                .map(String::as_str),
+            Some("final_environment_locks/cosyvoice_windows_x64_cp311.lock.json")
+        );
         assert_eq!(manifest.deno_windows.version, "2.7.5");
         assert_eq!(manifest.node_windows.version, "24.19.0");
         assert_eq!(manifest.node_windows.npm_version, "11.17.0");
@@ -230,6 +276,19 @@ mod tests {
             "2D0906A746B7AB1280DDCF6B3C884068FDE9C00FB647BC31DDD1EB82BBC50FBB"
         );
         assert_eq!(manifest.youtube_po_provider.version, "1.3.1");
+        assert_eq!(
+            manifest.youtube_po_provider.canvas_prebuilt_file_bytes,
+            15_235_616
+        );
+        assert_eq!(
+            manifest.youtube_po_provider.canvas_prebuilt_sha256_hex,
+            "BA953CC8C38303AB94CC83461C7561506A5A3AF37D6C678DE4A47914D2D0BB48"
+        );
+        assert_eq!(manifest.demucs.model_file_bytes, 84_141_911);
+        assert_eq!(
+            manifest.demucs.model_sha256_hex,
+            "8726E21A993978C7BA086D3872E7608D7D5BFCA646CA4ACA459FFDA844FAA8B4"
+        );
         assert_eq!(
             manifest.youtube_po_provider.derived_lock_sha256_hex,
             "1716EE78267544F03D64AC1CCBB365C718B9CC667BD965406311076AE849F8B4"
@@ -248,12 +307,12 @@ mod tests {
             .diarization
             .pinned
             .iter()
-            .any(|pin| pin == "numba==0.65.0"));
+            .any(|pin| pin == "numba==0.66.0"));
         assert!(manifest
             .diarization
             .pinned
             .iter()
-            .any(|pin| pin == "llvmlite==0.47.0"));
+            .any(|pin| pin == "llvmlite==0.48.0"));
         assert_eq!(
             manifest
                 .tts_voice_preserving_local_v1
@@ -274,21 +333,12 @@ mod tests {
             .pinned
             .iter()
             .any(|pin| pin == "transformers==4.49.0"));
-        assert!(manifest
-            .tts_neural_local_v1
-            .warmup_recovery_force_reinstall
-            .iter()
-            .any(|pin| pin.starts_with("transformers==")));
-        assert!(manifest
-            .tts_neural_local_v1
-            .warmup_recovery_force_reinstall
-            .iter()
-            .any(|pin| pin.starts_with("huggingface_hub==")));
-        assert!(manifest
-            .tts_neural_local_v1
-            .warmup_recovery_force_reinstall
-            .iter()
-            .any(|pin| pin.starts_with("kokoro==")));
+        assert_eq!(manifest.tts_neural_local_v1.spacy_model.version, "3.8.0");
+        assert_eq!(
+            manifest.tts_neural_local_v1.kokoro_model.revision,
+            "f3ff3571791e39611d31c381e3a41a3af07b4987"
+        );
+        assert_eq!(manifest.tts_neural_local_v1.kokoro_model.files.len(), 3);
         // hf_hub pin must match between Kokoro and OpenVoice groups so neither one
         // downgrades the venv on top of the other.
         let openvoice_hf = manifest

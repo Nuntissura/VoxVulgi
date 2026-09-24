@@ -1,2 +1,1 @@
-setuptools<80
-wheel
+setuptools==80.10.2

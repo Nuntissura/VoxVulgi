@@ -20,12 +20,197 @@ instead of papering over it with silence); model/reference problems fail loudly.
 """
 
 import argparse
+import hashlib
 import json
 import os
+import stat
 import sys
 import threading
 import time
 import traceback
+
+
+# The public render path is local-only. Apply the network-silent environment before
+# importing torch, Transformers, ModelScope, or any CosyVoice module so neither warmup
+# nor a job can turn a missing bundled byte into an implicit download.
+for _name in (
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+):
+    os.environ.pop(_name, None)
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+os.environ["HF_DATASETS_OFFLINE"] = "1"
+
+MODEL_MANIFEST_SHA256 = "3730f28cf1d7c31e663fb1823b4d1856aba04be7fda68c95f0536d9ea47c5374"
+MODEL_REPO = "FunAudioLLM/CosyVoice2-0.5B"
+MODEL_REVISION = "eec1ae6c79877dbd9379285cf8789c9e0879293d"
+WETEXT_REPO = "pengzhendong/wetext"
+WETEXT_REVISION = "b04bc07588601f7619b20efbb01cd1fa7278ccbc"
+_REPARSE_ATTRIBUTE = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+
+
+def _is_reparse(file_stat):
+    return bool(getattr(file_stat, "st_file_attributes", 0) & _REPARSE_ATTRIBUTE)
+
+
+def _file_identity(file_stat):
+    return (int(file_stat.st_dev), int(file_stat.st_ino))
+
+
+def _assert_plain_ancestor_chain(path):
+    current = os.path.abspath(path)
+    while True:
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+        current_stat = os.lstat(current)
+        if not stat.S_ISDIR(current_stat.st_mode) or _is_reparse(current_stat):
+            raise SystemExit(
+                f"cosyvoice integrity: managed ancestor is linked/reparse-backed: {current}"
+            )
+
+
+def _hash_exact_regular_file(path, expected_bytes, expected_sha256):
+    path_before = os.lstat(path)
+    if (
+        not stat.S_ISREG(path_before.st_mode)
+        or _is_reparse(path_before)
+        or int(path_before.st_nlink) != 1
+        or int(path_before.st_size) != int(expected_bytes)
+    ):
+        raise SystemExit(f"cosyvoice integrity: unsafe or wrong-sized model file: {path}")
+    digest = hashlib.sha256()
+    with open(path, "rb", buffering=0) as stream:
+        opened = os.fstat(stream.fileno())
+        if (
+            _file_identity(opened) != _file_identity(path_before)
+            or int(opened.st_nlink) != 1
+            or int(opened.st_size) != int(expected_bytes)
+            or _is_reparse(opened)
+        ):
+            raise SystemExit(f"cosyvoice integrity: model pathname changed before hashing: {path}")
+        while True:
+            chunk = stream.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+        opened_after = os.fstat(stream.fileno())
+    path_after = os.lstat(path)
+    with open(path, "rb", buffering=0) as reopened_stream:
+        reopened = os.fstat(reopened_stream.fileno())
+    if (
+        _file_identity(opened) != _file_identity(opened_after)
+        or _file_identity(opened) != _file_identity(path_after)
+        or _file_identity(opened) != _file_identity(reopened)
+        or int(opened_after.st_nlink) != 1
+        or int(path_after.st_nlink) != 1
+        or int(reopened.st_nlink) != 1
+        or int(path_after.st_size) != int(expected_bytes)
+        or int(reopened.st_size) != int(expected_bytes)
+        or _is_reparse(path_after)
+        or _is_reparse(reopened)
+        or digest.hexdigest() != expected_sha256
+    ):
+        raise SystemExit(f"cosyvoice integrity: model file identity mismatch: {path}")
+
+
+def _verify_exact_tree(root, source):
+    _assert_plain_ancestor_chain(root)
+    root_before = os.lstat(root)
+    if not stat.S_ISDIR(root_before.st_mode) or _is_reparse(root_before):
+        raise SystemExit(f"cosyvoice integrity: unsafe model root: {root}")
+    expected_files = {entry["path"]: entry for entry in source["files"]}
+    expected_dirs = set(source.get("directories") or [])
+    for relative in expected_files:
+        parts = relative.split("/")
+        expected_dirs.update("/".join(parts[:index]) for index in range(1, len(parts)))
+
+    observed_files = set()
+    observed_dirs = set()
+
+    def visit(directory, relative_parent=""):
+        with os.scandir(directory) as iterator:
+            entries = sorted(iterator, key=lambda entry: entry.name)
+        for entry in entries:
+            if not entry.name.isascii() or any(value in entry.name for value in ("/", "\\", ":")):
+                raise SystemExit(f"cosyvoice integrity: unsafe model entry name: {entry.name!r}")
+            relative = entry.name if not relative_parent else f"{relative_parent}/{entry.name}"
+            entry_stat = os.lstat(entry.path)
+            if _is_reparse(entry_stat) or stat.S_ISLNK(entry_stat.st_mode):
+                raise SystemExit(f"cosyvoice integrity: linked/reparse model entry: {relative}")
+            if stat.S_ISDIR(entry_stat.st_mode):
+                if relative not in expected_dirs or relative in observed_dirs:
+                    raise SystemExit(f"cosyvoice integrity: unexpected model directory: {relative}")
+                observed_dirs.add(relative)
+                visit(entry.path, relative)
+            elif stat.S_ISREG(entry_stat.st_mode):
+                expected = expected_files.get(relative)
+                if expected is None or relative in observed_files:
+                    raise SystemExit(f"cosyvoice integrity: unexpected model file: {relative}")
+                observed_files.add(relative)
+                _hash_exact_regular_file(entry.path, expected["bytes"], expected["sha256"])
+            else:
+                raise SystemExit(f"cosyvoice integrity: unsupported model entry: {relative}")
+
+    visit(root)
+    root_after = os.lstat(root)
+    if (
+        _file_identity(root_before) != _file_identity(root_after)
+        or _is_reparse(root_after)
+        or observed_files != set(expected_files)
+        or observed_dirs != expected_dirs
+    ):
+        raise SystemExit(f"cosyvoice integrity: incomplete or changed model tree: {root}")
+
+
+def _contains_forbidden_model_key(value):
+    if isinstance(value, dict):
+        return any(
+            key in {"auto_map", "_attn_implementation_internal", "trust_remote_code"}
+            or _contains_forbidden_model_key(child)
+            for key, child in value.items()
+        )
+    if isinstance(value, list):
+        return any(_contains_forbidden_model_key(child) for child in value)
+    return False
+
+
+def _verify_exact_payload(model_parent):
+    backend_root = os.path.dirname(os.path.abspath(__file__))
+    manifest_path = os.path.join(backend_root, "cosyvoice_model_manifest.json")
+    with open(manifest_path, "rb") as stream:
+        manifest_bytes = stream.read()
+    if hashlib.sha256(manifest_bytes).hexdigest() != MODEL_MANIFEST_SHA256:
+        raise SystemExit("cosyvoice integrity: governed model manifest identity mismatch")
+    manifest = json.loads(manifest_bytes)
+    if (
+        manifest.get("schema") != "voxvulgi.cosyvoice_model_manifest.v1"
+        or manifest["cosyvoice"].get("provider") != "huggingface"
+        or manifest["cosyvoice"].get("repo") != MODEL_REPO
+        or manifest["cosyvoice"].get("revision") != MODEL_REVISION
+        or len(manifest["cosyvoice"].get("files") or []) != 19
+        or manifest["wetext"].get("provider") != "modelscope"
+        or manifest["wetext"].get("repo") != WETEXT_REPO
+        or manifest["wetext"].get("revision") != WETEXT_REVISION
+        or len(manifest["wetext"].get("files") or []) != 26
+        or len(manifest["wetext"].get("directories") or []) != 9
+    ):
+        raise SystemExit("cosyvoice integrity: governed model manifest contract mismatch")
+    model_root = os.path.join(os.path.abspath(model_parent), "CosyVoice2-0.5B")
+    wetext_root = os.path.join(backend_root, "wetext")
+    _verify_exact_tree(model_root, manifest["cosyvoice"])
+    _verify_exact_tree(wetext_root, manifest["wetext"])
+    with open(os.path.join(model_root, "CosyVoice-BlankEN", "config.json"), "rb") as stream:
+        blank_config = json.load(stream)
+    if _contains_forbidden_model_key(blank_config):
+        raise SystemExit("cosyvoice integrity: BlankEN config requests dynamic/remote model code")
+    print("cosyvoice_exact_payload_verified", flush=True)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(
@@ -233,6 +418,11 @@ def main():
         help="WP-0262: run the bounded/instrumented import+model+synth warmup, then exit.",
     )
     args = parser.parse_args()
+
+    # This is the wrapper's own pre-import gate. Rust also validates the same embedded
+    # manifest before spawning us; keeping the gate here prevents a direct invocation
+    # from weakening readiness to a handful of presence checks.
+    _verify_exact_payload(args.model_dir)
 
     if args.warmup:
         run_warmup(args.model_dir)

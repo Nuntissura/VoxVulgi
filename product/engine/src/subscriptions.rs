@@ -130,6 +130,12 @@ pub struct YoutubeSubscriptionRow {
     pub last_error_message: Option<String>,
     pub consecutive_failures: i64,
     pub next_allowed_refresh_at_ms: Option<i64>,
+    // WP-0322 B3: derived (not stored) next scheduled refresh time, so the UI can show "next
+    // automatic try" without recomputing the due/backoff formula itself. See
+    // `compute_next_check_at_ms` for the exact formula. `None` means the subscription is due for
+    // a refresh as soon as the runner next scans it (already past due and not backed off).
+    #[serde(default)]
+    pub next_check_at_ms: Option<i64>,
     pub created_at_ms: i64,
     pub updated_at_ms: i64,
     // WP-0255: honest per-subscription progress (additive schema v18). Written by the
@@ -827,6 +833,33 @@ fn is_subscription_backoff_ready(sub: &YoutubeSubscriptionRow, now_ms_value: i64
     match sub.next_allowed_refresh_at_ms {
         Some(next_allowed) => now_ms_value >= next_allowed,
         None => true,
+    }
+}
+
+/// WP-0322 B3: `next_check_at_ms` formula, mirroring the same two gates `is_subscription_due`/
+/// `is_subscription_backoff_ready` apply at dispatch time:
+/// - `due_at_ms` = `last_queued_at_ms + refresh_interval_minutes` (minutes clamped to >=1, same
+///   as `is_subscription_due`), or `None` when the subscription has never been queued (due
+///   immediately).
+/// - `backoff_at_ms` = `next_allowed_refresh_at_ms` (the exponential-backoff timestamp written by
+///   `record_subscription_refresh_failure_with_error`), or `None` when not backed off.
+/// - `next_check_at_ms` = the later of the two present timestamps; `None` (due now) only when
+///   both are `None`.
+fn compute_next_check_at_ms(
+    last_queued_at_ms: Option<i64>,
+    refresh_interval_minutes: i64,
+    next_allowed_refresh_at_ms: Option<i64>,
+) -> Option<i64> {
+    let interval_ms = refresh_interval_minutes
+        .max(1)
+        .saturating_mul(60)
+        .saturating_mul(1000);
+    let due_at_ms = last_queued_at_ms.map(|last_queued| last_queued.saturating_add(interval_ms));
+    match (due_at_ms, next_allowed_refresh_at_ms) {
+        (None, None) => None,
+        (Some(due), None) => Some(due),
+        (None, Some(backoff)) => Some(backoff),
+        (Some(due), Some(backoff)) => Some(due.max(backoff)),
     }
 }
 
@@ -1711,6 +1744,199 @@ pub fn export_youtube_subscriptions_json(
         out_path: out_path.to_string_lossy().to_string(),
         count: payload.subscriptions.len(),
     })
+}
+
+// WP-0322 A: automatic + on-demand subscription export. Only YouTube has an importable export
+// function today (`export_youtube_subscriptions_json`); Instagram/TikTok subscriptions have no
+// sibling export function, so this writes YouTube-only files and the receipt/settings surface
+// says so (`providers: ["youtube"]` in the caller-facing shape).
+const SUBSCRIPTIONS_EXPORT_KEEP: usize = 30;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionsExportReceipt {
+    pub path: String,
+    pub count: usize,
+    pub providers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubscriptionsExportSettings {
+    pub dir: String,
+    pub default_dir: String,
+    pub is_default: bool,
+    pub keep: usize,
+    pub last_export_at_ms: Option<i64>,
+    pub last_export_path: Option<String>,
+    pub last_export_count: Option<i64>,
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct SubscriptionsExportState {
+    #[serde(default)]
+    last_export_at_ms: Option<i64>,
+    #[serde(default)]
+    last_export_path: Option<String>,
+    #[serde(default)]
+    last_export_count: Option<i64>,
+    #[serde(default)]
+    last_error: Option<String>,
+}
+
+fn read_subscriptions_export_state(paths: &AppPaths) -> SubscriptionsExportState {
+    std::fs::read_to_string(paths.subscriptions_export_state_path())
+        .ok()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
+}
+
+fn write_subscriptions_export_state(
+    paths: &AppPaths,
+    state: &SubscriptionsExportState,
+) -> Result<()> {
+    let text = serde_json::to_string_pretty(state)?;
+    persistence::atomic_write_text(&paths.subscriptions_export_state_path(), &text)?;
+    Ok(())
+}
+
+/// `subscriptions_<8-digit-date>_<6-digit-time>.json`, exactly what
+/// [`export_subscriptions_snapshot`] writes; used both to filter what the automatic prune is
+/// allowed to touch and, incidentally, to filter what a directory listing treats as an export.
+fn is_subscriptions_export_filename(name: &str) -> bool {
+    let Some(rest) = name.strip_prefix("subscriptions_") else {
+        return false;
+    };
+    let Some(digits) = rest.strip_suffix(".json") else {
+        return false;
+    };
+    let bytes = digits.as_bytes();
+    bytes.len() == 15
+        && bytes[..8].iter().all(u8::is_ascii_digit)
+        && bytes[8] == b'_'
+        && bytes[9..].iter().all(u8::is_ascii_digit)
+}
+
+/// Deletes every file in `dir` matching [`is_subscriptions_export_filename`] beyond the newest
+/// [`SUBSCRIPTIONS_EXPORT_KEEP`] (filenames sort lexicographically == chronologically because
+/// the timestamp is fixed-width and zero-padded). Any other file in the folder is left alone.
+fn prune_subscriptions_export_dir(dir: &Path) -> Result<()> {
+    let mut names: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            continue;
+        }
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if is_subscriptions_export_filename(&name) {
+            names.push(name);
+        }
+    }
+    names.sort();
+    names.reverse();
+    for name in names.into_iter().skip(SUBSCRIPTIONS_EXPORT_KEEP) {
+        let _ = std::fs::remove_file(dir.join(name));
+    }
+    Ok(())
+}
+
+pub fn get_subscriptions_export_settings(paths: &AppPaths) -> Result<SubscriptionsExportSettings> {
+    let dir = paths.effective_subscriptions_export_dir()?;
+    let default_dir = paths.default_subscriptions_export_dir();
+    let is_default = paths.subscriptions_export_dir_override()?.is_none();
+    let state = read_subscriptions_export_state(paths);
+    Ok(SubscriptionsExportSettings {
+        dir: dir.to_string_lossy().to_string(),
+        default_dir: default_dir.to_string_lossy().to_string(),
+        is_default,
+        keep: SUBSCRIPTIONS_EXPORT_KEEP,
+        last_export_at_ms: state.last_export_at_ms,
+        last_export_path: state.last_export_path,
+        last_export_count: state.last_export_count,
+        last_error: state.last_error,
+    })
+}
+
+/// `dir: None` resets to the default folder. A non-empty override must be an absolute,
+/// creatable-or-existing folder (disk-agnostic: relative paths are rejected outright rather than
+/// silently resolved against an ambiguous current directory).
+pub fn set_subscriptions_export_dir(
+    paths: &AppPaths,
+    dir: Option<String>,
+) -> Result<SubscriptionsExportSettings> {
+    match dir.as_deref().map(str::trim) {
+        None | Some("") => {
+            paths.clear_subscriptions_export_dir_override()?;
+        }
+        Some(trimmed) => {
+            let candidate = PathBuf::from(trimmed);
+            if !candidate.is_absolute() {
+                return Err(EngineError::InstallFailed(format!(
+                    "subscriptions export folder must be an absolute path: {trimmed}"
+                )));
+            }
+            std::fs::create_dir_all(&candidate)?;
+            paths.set_subscriptions_export_dir_override(&candidate)?;
+        }
+    }
+    get_subscriptions_export_settings(paths)
+}
+
+/// Writes `subscriptions_<yyyymmdd_hhmmss>.json` (the existing importable
+/// `export_youtube_subscriptions_json` format) atomically (temp file in the same folder, then
+/// rename) into the configured/default export folder, prunes to the newest
+/// [`SUBSCRIPTIONS_EXPORT_KEEP`] files, and records the outcome (time/path/count/error) so
+/// [`get_subscriptions_export_settings`] can show it without rescanning the folder.
+pub fn export_subscriptions_snapshot(paths: &AppPaths) -> Result<SubscriptionsExportReceipt> {
+    let result = (|| -> Result<SubscriptionsExportReceipt> {
+        let dir = paths.effective_subscriptions_export_dir()?;
+        std::fs::create_dir_all(&dir)?;
+        let filename = format!(
+            "subscriptions_{}.json",
+            jobs::format_yyyymmdd_hhmmss_utc(now_ms())
+        );
+        let final_path = dir.join(&filename);
+        let temp_path = dir.join(format!(".{filename}.tmp-{}", Uuid::new_v4().simple()));
+        // The database can be briefly busy (background writes); wait and retry instead of
+        // failing the operator's export on the first "database is locked" (WP-0322).
+        let mut attempt = 0_u32;
+        let summary = loop {
+            match export_youtube_subscriptions_json(paths, &temp_path) {
+                Ok(summary) => break summary,
+                Err(error) if attempt < 10 && jobs::is_app_busy_error(&error.to_string()) => {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                }
+                Err(error) => {
+                    let _ = std::fs::remove_file(&temp_path);
+                    return Err(error);
+                }
+            }
+        };
+        std::fs::rename(&temp_path, &final_path)?;
+        prune_subscriptions_export_dir(&dir)?;
+        Ok(SubscriptionsExportReceipt {
+            path: final_path.to_string_lossy().to_string(),
+            count: summary.count,
+            providers: vec!["youtube".to_string()],
+        })
+    })();
+
+    let mut state = read_subscriptions_export_state(paths);
+    match &result {
+        Ok(receipt) => {
+            state.last_export_at_ms = Some(now_ms());
+            state.last_export_path = Some(receipt.path.clone());
+            state.last_export_count = Some(receipt.count as i64);
+            state.last_error = None;
+        }
+        Err(err) => {
+            state.last_error = Some(err.to_string());
+        }
+    }
+    let _ = write_subscriptions_export_state(paths, &state);
+    result
 }
 
 pub fn import_youtube_subscriptions_json(
@@ -5060,7 +5286,7 @@ pub(crate) fn refresh_subscription_activity_rollup_for_job(
     paths: &AppPaths,
     job_id: &str,
 ) -> Result<()> {
-    let mut conn = db::write_context(paths)?;
+    let conn = db::open_readonly(paths)?;
     let subscription_id: Option<String> = conn
         .query_row(
             "SELECT COALESCE(json_extract(j.params_json,'$.subscription_id'), json_extract(parent.params_json,'$.subscription_id')) FROM job j LEFT JOIN job parent ON parent.id=j.batch_id WHERE j.id=?1",
@@ -5069,28 +5295,43 @@ pub(crate) fn refresh_subscription_activity_rollup_for_job(
         )
         .optional()?
         .flatten();
+    drop(conn);
     let Some(subscription_id) = subscription_id.filter(|value| !value.trim().is_empty()) else {
         return Ok(());
     };
+    refresh_subscription_activity_rollup_for_subscription_id(paths, &subscription_id)
+}
+
+/// WP-0321 S6: same recompute as `refresh_subscription_activity_rollup_for_job`, but keyed
+/// directly by `subscription_id` instead of derived from one job's current row. A reopened
+/// download can move to a batch that belongs to a *different* subscription than the one its
+/// terminal attempt just left (or to no subscription at all); refreshing only the job's current
+/// subscription would leave the old subscription's rollup stale (still counting a job that moved
+/// away). Callers that reopen a row across batches call this once per subscription touched.
+pub(crate) fn refresh_subscription_activity_rollup_for_subscription_id(
+    paths: &AppPaths,
+    subscription_id: &str,
+) -> Result<()> {
+    let mut conn = db::write_context(paths)?;
     // Acquire the writer reservation before taking the canonical snapshot. Otherwise an older
     // caller can read counts, pause, and overwrite a newer caller's projection after it commits.
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let counts: (i64, i64, i64, i64) = tx.query_row(
-        "WITH active_batches AS MATERIALIZED (SELECT DISTINCT batch_id FROM job WHERE type='download_direct_url' AND status IN ('queued','running') AND batch_id IS NOT NULL AND json_extract(params_json,'$.subscription_id')=?1) SELECT COALESCE(SUM(status='queued'),0),COALESCE(SUM(status='running'),0),COALESCE(SUM(status='succeeded'),0),COALESCE(SUM(status IN ('failed','canceled')),0) FROM job WHERE type='download_direct_url' AND batch_id IN (SELECT batch_id FROM active_batches)",
-        [&subscription_id],
+        "WITH active_batches AS MATERIALIZED (SELECT DISTINCT batch_id FROM job WHERE type='download_direct_url' AND status IN ('queued','running') AND batch_id IS NOT NULL AND json_extract(params_json,'$.subscription_id')=?1) SELECT COALESCE(SUM(status='queued'),0),COALESCE(SUM(status='running'),0),COALESCE(SUM(status='succeeded'),0),COALESCE(SUM(status IN ('failed','canceled')),0) FROM job INDEXED BY idx_job_batch_created WHERE type='download_direct_url' AND batch_id IN (SELECT batch_id FROM active_batches)",
+        [subscription_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
     let current: Option<(Option<String>, Option<f32>)> = tx
         .query_row(
             "SELECT target_title,progress FROM job WHERE type='download_direct_url' AND status='running' AND json_extract(params_json,'$.subscription_id')=?1 ORDER BY started_at_ms DESC LIMIT 1",
-            [&subscription_id],
+            [subscription_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
     if counts.0 + counts.1 == 0 {
         tx.execute(
             "DELETE FROM subscription_activity_rollup WHERE subscription_id=?1",
-            [&subscription_id],
+            [subscription_id],
         )?;
     } else {
         tx.execute(
@@ -5879,6 +6120,7 @@ fn row_to_subscription(row: &rusqlite::Row<'_>) -> rusqlite::Result<YoutubeSubsc
         last_error_message: None,
         consecutive_failures: row.get(13)?,
         next_allowed_refresh_at_ms: row.get(14)?,
+        next_check_at_ms: compute_next_check_at_ms(row.get(11)?, row.get(10)?, row.get(14)?),
         created_at_ms: row.get(15)?,
         updated_at_ms: row.get(16)?,
         // WP-0255: progress fields default to None here; only the UI list query
@@ -9184,5 +9426,121 @@ VALUES (?1, ?2, ?3, ?4, 0.0, ?5, ?6, '', ?7)
         let loaded = subscription_by_id_conn(&conn, &sub.id).unwrap().unwrap();
         assert_eq!(loaded.id, sub.id);
         assert_eq!(loaded.source_url, "https://www.tiktok.com/@tiktok_creator");
+    }
+
+    // WP-0322 A tests.
+
+    fn seed_export_subscription(paths: &AppPaths, title: &str) {
+        upsert_youtube_subscription(
+            paths,
+            YoutubeSubscriptionUpsert {
+                id: None,
+                title: title.to_string(),
+                source_url: format!("https://www.youtube.com/@{title}/videos"),
+                folder_map: Some(title.to_string()),
+                output_dir_override: None,
+                library_id: None,
+                use_browser_cookies: false,
+                browser_cookie_source: None,
+                auth_session_input: None,
+                clear_auth_session: false,
+                active: true,
+                preset_id: None,
+                group_ids: Vec::new(),
+                refresh_interval_minutes: Some(DEFAULT_REFRESH_INTERVAL_MINUTES),
+            },
+        )
+        .expect("seed export subscription");
+    }
+
+    #[test]
+    fn export_subscriptions_snapshot_writes_file_importable_and_reads_back_same_count() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        crate::db::ensure_schema(&paths).expect("schema");
+        seed_export_subscription(&paths, "creator_one");
+        seed_export_subscription(&paths, "creator_two");
+
+        let receipt = export_subscriptions_snapshot(&paths).expect("export");
+        assert_eq!(receipt.count, 2);
+        assert_eq!(receipt.providers, vec!["youtube".to_string()]);
+        let out_path = PathBuf::from(&receipt.path);
+        assert!(out_path.exists(), "export file should exist");
+        assert!(out_path
+            .file_name()
+            .and_then(|v| v.to_str())
+            .is_some_and(is_subscriptions_export_filename));
+
+        // Import into a fresh app and confirm the same count round-trips.
+        let import_dir = tempfile::tempdir().expect("import tempdir");
+        let import_paths = AppPaths::new(import_dir.path().to_path_buf());
+        crate::db::ensure_schema(&import_paths).expect("import schema");
+        let import_summary =
+            import_youtube_subscriptions_json(&import_paths, &out_path).expect("import");
+        assert_eq!(import_summary.total_in_file, 2);
+        assert_eq!(import_summary.inserted, 2);
+
+        // Settings reflect the just-written state.
+        let settings = get_subscriptions_export_settings(&paths).expect("settings");
+        assert_eq!(settings.last_export_count, Some(2));
+        assert_eq!(settings.last_export_path.as_deref(), Some(receipt.path.as_str()));
+        assert!(settings.last_error.is_none());
+        assert!(settings.is_default);
+        assert_eq!(settings.keep, SUBSCRIPTIONS_EXPORT_KEEP);
+    }
+
+    #[test]
+    fn prune_subscriptions_export_dir_keeps_newest_30_and_ignores_unrelated_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        for i in 0..35 {
+            let name = format!("subscriptions_2026010{:01}_{:02}0000.json", i / 10, i % 10);
+            std::fs::write(dir.path().join(name), "{}").expect("write export file");
+        }
+        std::fs::write(dir.path().join("unrelated.json"), "{}").expect("write unrelated");
+        std::fs::write(dir.path().join("subscriptions_not_a_timestamp.json"), "{}")
+            .expect("write malformed");
+
+        prune_subscriptions_export_dir(dir.path()).expect("prune");
+
+        let remaining: Vec<String> = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+        let export_count = remaining
+            .iter()
+            .filter(|name| is_subscriptions_export_filename(name))
+            .count();
+        assert_eq!(export_count, SUBSCRIPTIONS_EXPORT_KEEP);
+        assert!(remaining.contains(&"unrelated.json".to_string()));
+        assert!(remaining.contains(&"subscriptions_not_a_timestamp.json".to_string()));
+    }
+
+    #[test]
+    fn subscriptions_export_settings_round_trip_including_reset_to_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        crate::db::ensure_schema(&paths).expect("schema");
+
+        let default_settings = get_subscriptions_export_settings(&paths).expect("defaults");
+        assert!(default_settings.is_default);
+        assert_eq!(default_settings.dir, default_settings.default_dir);
+
+        let custom_dir = dir.path().join("custom_export_location");
+        let updated = set_subscriptions_export_dir(
+            &paths,
+            Some(custom_dir.to_string_lossy().to_string()),
+        )
+        .expect("set custom dir");
+        assert!(!updated.is_default);
+        assert_eq!(updated.dir, custom_dir.to_string_lossy().to_string());
+        assert!(custom_dir.exists());
+
+        let reset = set_subscriptions_export_dir(&paths, None).expect("reset to default");
+        assert!(reset.is_default);
+        assert_eq!(reset.dir, reset.default_dir);
+
+        let relative = set_subscriptions_export_dir(&paths, Some("relative/path".to_string()));
+        assert!(relative.is_err(), "relative export dir must be rejected");
     }
 }

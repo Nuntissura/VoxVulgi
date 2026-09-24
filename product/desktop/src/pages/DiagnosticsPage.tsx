@@ -17,8 +17,20 @@ import { copyPathToClipboard, openPathBestEffort, revealPath as revealFilesystem
 import { loadYoutubeProtectionSnapshot } from "../lib/youtubeProtectionSnapshot";
 import { RootRebindControl } from "../components/RootRebindControl";
 
+type RuntimeProvenance = {
+  mode: "isolated" | "legacy_app_data" | "managed_offline";
+  user_data_root: string;
+  runtime_root: string;
+  generation_root: string;
+  runtime_id: string | null;
+  manifest_sha256: string | null;
+  manifest_status: string;
+  fallback_policy: string;
+};
+
 type DiagnosticsInfo = {
   app_data_dir: string;
+  runtime: RuntimeProvenance;
   db_path: string;
   app_name: string;
   app_version: string;
@@ -547,7 +559,7 @@ type YoutubeProtectionDiagnosticsStatus = {
   state: {
     operation: string;
     runtime_epoch: string;
-    mode: "normal" | "cautious" | "conservative" | "cooldown" | "hold";
+    mode: "normal" | "cooldown"; // WP-0321 S4: two protection modes only
     corroboration_count: number;
     success_streak: number;
     last_evidence_at_ms: number | null;
@@ -899,6 +911,11 @@ function capabilityProbeProvenance(status: PerformanceTierStatus | DemucsPackSta
   const shared = status.shared_flight ? " · shared flight" : "";
   const verified = status.verified_at_ms > 0 ? ` · verified ${formatTs(status.verified_at_ms)}` : " · not verified";
   return `${status.probe_state} · ${status.freshness}${verified}${pid}${shared} · source ${status.source_identity}`;
+}
+
+function probeText(value: boolean | null | undefined, ready: string, notReady: string): string {
+  if (value === null || value === undefined) return "checking…";
+  return value ? ready : notReady;
 }
 
 function formatBytes(bytes: number): string {
@@ -1308,11 +1325,11 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     try {
       const [core, performance] = await Promise.all([
         requestDemand("diagnostics.tools-core", async () => ({
-          nextFfmpeg: await invoke<FfmpegToolsStatus>("tools_ffmpeg_status"),
-          nextYtdlp: await invoke<YtDlpToolsStatus>("tools_ytdlp_status"),
-          nextJsRuntime: await invoke<JsRuntimeToolsStatus>("tools_js_runtime_status"),
-          nextPython: await invoke<PythonToolchainStatus>("tools_python_status"),
-          nextPortablePython: await invoke<PortablePythonStatus>("tools_python_portable_status"),
+          nextFfmpeg: await invoke<FfmpegToolsStatus>("tools_ffmpeg_status", force ? { force: true } : undefined),
+          nextYtdlp: await invoke<YtDlpToolsStatus>("tools_ytdlp_status", force ? { force: true } : undefined),
+          nextJsRuntime: await invoke<JsRuntimeToolsStatus>("tools_js_runtime_status", force ? { force: true } : undefined),
+          nextPython: await invoke<PythonToolchainStatus>("tools_python_status", force ? { force: true } : undefined),
+          nextPortablePython: await invoke<PortablePythonStatus>("tools_python_portable_status", force ? { force: true } : undefined),
           nextIntegrity: await invoke<PackIntegrityManifestStatus>("tools_pack_integrity_manifest_status"),
         }), "tools", force),
         requestDemand(
@@ -1679,31 +1696,35 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       },
       {
         name: "yt-dlp",
-        state: ytdlp?.available
-          ? ytdlp.bundled_installed
-            ? "included and ready now"
-            : "ready from local runtime path"
-          : "not ready",
+        state: !ytdlp
+          ? "checking…"
+          : ytdlp.available
+            ? ytdlp.bundled_installed
+              ? "included and ready now"
+              : "ready from local runtime path"
+            : "not ready",
       },
       {
         name: "JS runtime for yt-dlp",
-        state: jsRuntime?.available
-          ? jsRuntime.bundled_deno_installed
-            ? "included and ready now"
-            : `ready from ${jsRuntime.preferred_runtime || "local"} runtime path`
-          : "not ready",
+        state: !jsRuntime
+          ? "checking…"
+          : jsRuntime.available
+            ? jsRuntime.bundled_deno_installed
+              ? "included and ready now"
+              : `ready from ${jsRuntime.preferred_runtime || "local"} runtime path`
+            : "not ready",
       },
       {
         name: "Portable Python",
-        state: portablePython?.installed ? "installed locally" : "not installed",
+        state: probeText(portablePython?.installed, "installed locally", "not installed"),
       },
       {
         name: "Python venv",
-        state: python?.venv_exists ? "prepared and reusable" : "not prepared",
+        state: probeText(python?.venv_exists, "prepared and reusable", "not prepared"),
       },
       {
         name: "Voice-preserving pack",
-        state: ttsVoicePreservingLocalV1?.installed ? "installed and ready" : "optional / not installed",
+        state: probeText(ttsVoicePreservingLocalV1?.installed, "installed and ready", "optional / not installed"),
       },
     ],
     [jsRuntime?.available, jsRuntime?.bundled_deno_installed, jsRuntime?.preferred_runtime, portablePython?.installed, python?.venv_exists, startup?.offline_bundle_state, ttsVoicePreservingLocalV1?.installed, ytdlp?.available, ytdlp?.bundled_installed],
@@ -1759,8 +1780,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     ttsNeuralLocalV1?.installed && ttsVoicePreservingLocalV1?.installed,
   );
 
+  // WP-0320: an unloaded section (idle/queued/loading) is "Checking...", never a verdict.
   const phase2SummaryLabel =
-    sectionStatus.phase2.state === "loading" && !phase2Latest
+    !phase2Latest && sectionStatus.phase2.state !== "failed"
       ? "Checking..."
       : phase2HasActive
         ? "Installing..."
@@ -1771,9 +1793,11 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           : "Not installed";
 
   const ffmpegSummaryLabel =
-    sectionStatus.tools.state === "loading" && !ffmpeg
-      ? "Checking..."
-      : ffmpeg?.installed
+    !ffmpeg
+      ? sectionStatus.tools.state === "failed"
+        ? "Unknown"
+        : "Checking..."
+      : ffmpeg.installed
         ? "Ready"
         : "Missing";
 
@@ -2245,6 +2269,19 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       const copied = await copyPathToClipboard(info.app_data_dir);
       const suffix = copied ? " Path copied to clipboard." : "";
       setError(`Open app data folder failed: ${String(e)}.${suffix}`);
+    }
+  }
+
+  async function openRuntimeDir() {
+    setError(null);
+    if (!info?.runtime.runtime_root) return;
+    try {
+      const opened = await openPathBestEffort(info.runtime.runtime_root);
+      setNotice(`Managed runtime folder: ${opened.path}`);
+    } catch (e) {
+      const copied = await copyPathToClipboard(info.runtime.runtime_root);
+      const suffix = copied ? " Path copied to clipboard." : "";
+      setError(`Open managed runtime folder failed: ${String(e)}.${suffix}`);
     }
   }
 
@@ -2962,7 +2999,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       </div>
 
       <div className="card">
-        <h2>App data</h2>
+        <h2>Data and runtime</h2>
         <div className="kv">
           <div className="k">App data dir</div>
           <div className="v">{info?.app_data_dir ?? "-"}</div>
@@ -2971,12 +3008,38 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <div className="k">DB path</div>
           <div className="v">{info?.db_path ?? "-"}</div>
         </div>
+        <div className="kv">
+          <div className="k">Runtime mode</div>
+          <div className="v">{info?.runtime.mode ?? "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Runtime root</div>
+          <div className="v">{info?.runtime.runtime_root ?? "-"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Selected generation</div>
+          <div className="v">{info?.runtime.runtime_id ?? "legacy / none"}</div>
+        </div>
+        <div className="kv">
+          <div className="k">Runtime manifest</div>
+          <div className="v">
+            {info?.runtime.manifest_status ?? "-"}
+            {info?.runtime.manifest_sha256 ? ` / ${info.runtime.manifest_sha256}` : ""}
+          </div>
+        </div>
+        <div className="kv">
+          <div className="k">Dependency fallback</div>
+          <div className="v">{info?.runtime.fallback_policy ?? "-"}</div>
+        </div>
         <div className="row">
           <button type="button" disabled={busy || !info?.app_data_dir} onClick={openAppDataDir}>
             Open app data folder
           </button>
           <button type="button" disabled={busy || !info?.db_path} onClick={revealDbFile}>
             Reveal DB file
+          </button>
+          <button type="button" disabled={busy || !info?.runtime.runtime_root} onClick={openRuntimeDir}>
+            Open runtime folder
           </button>
           <button type="button" disabled={busy} onClick={() => void loadBuildSection(true)}>
             Refresh
@@ -3555,11 +3618,11 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       <div className="card" id="diag-tools">
         <h2>Tools</h2>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
-          Core tool state loads first so this page stays truthful. Optional pack versions and adapter details continue filling in below without blocking FFmpeg or yt-dlp readiness.
+          Tool state is probed on demand and cached for 10 minutes; Refresh re-probes.
         </div>
         <div className="kv">
           <div className="k">FFmpeg</div>
-          <div className="v">{ffmpeg?.installed ? "installed" : "not installed"}</div>
+          <div className="v">{probeText(ffmpeg?.installed, "installed", "not installed")}</div>
         </div>
         <div className="kv">
           <div className="k">ffmpeg path</div>
@@ -3580,7 +3643,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
         <div className="kv">
           <div className="k">yt-dlp</div>
-          <div className="v">{ytdlp?.available ? "Ready" : "Not ready"}</div>
+          <div className="v">{probeText(ytdlp?.available, "Ready", "Not ready")}</div>
         </div>
         <div className="kv">
           <div className="k">yt-dlp version</div>
@@ -3592,7 +3655,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         </div>
         <div className="kv">
           <div className="k">Included yt-dlp</div>
-          <div className="v">{ytdlp?.bundled_installed ? "installed" : "not installed"}</div>
+          <div className="v">{probeText(ytdlp?.bundled_installed, "installed", "not installed")}</div>
         </div>
         <div className="kv">
           <div className="k">Included yt-dlp path</div>
@@ -3607,7 +3670,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         </div>
         <div className="kv">
           <div className="k">JS runtime for yt-dlp</div>
-          <div className="v">{jsRuntime?.available ? "Ready" : "Not ready"}</div>
+          <div className="v">{probeText(jsRuntime?.available, "Ready", "Not ready")}</div>
         </div>
         <div className="kv">
           <div className="k">Preferred runtime</div>
@@ -3624,7 +3687,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         <div className="kv">
           <div className="k">Included Deno</div>
           <div className="v">
-            {jsRuntime?.bundled_deno_installed ? "installed" : "not installed"}
+            {probeText(jsRuntime?.bundled_deno_installed, "installed", "not installed")}
           </div>
         </div>
         <div className="kv">
@@ -3638,7 +3701,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
         <div className="kv">
           <div className="k">Python (voice cloning)</div>
-          <div className="v">{python?.base_available ? "Ready" : "Not ready"}</div>
+          <div className="v">{probeText(python?.base_available, "Ready", "Not ready")}</div>
         </div>
         <div className="kv">
           <div className="k">Python version</div>
@@ -3670,7 +3733,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         </div>
         <div className="kv">
           <div className="k">Portable Python</div>
-          <div className="v">{portablePython?.installed ? "installed" : "not installed"}</div>
+          <div className="v">{probeText(portablePython?.installed, "installed", "not installed")}</div>
         </div>
         <div className="kv">
           <div className="k">Portable Python version</div>
@@ -3695,7 +3758,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
         <div className="kv">
           <div className="k">Spleeter (separation)</div>
-          <div className="v">{spleeter?.installed ? "installed" : "not installed"}</div>
+          <div className="v">{probeText(spleeter?.installed, "installed", "not installed")}</div>
         </div>
         <div className="kv">
           <div className="k">Spleeter version</div>
@@ -3704,7 +3767,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
         <div className="kv">
           <div className="k">Demucs (separation optional)</div>
-          <div className="v">{demucs?.installed ? "installed" : "not installed"}</div>
+          <div className="v">{probeText(demucs?.installed, "installed", "not installed")}</div>
         </div>
         <div className="kv">
           <div className="k">demucs</div>
@@ -3716,8 +3779,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         <div className="kv">
           <div className="k">Diarization (baseline)</div>
           <div className="v">
-            {diarization?.state ??
-              (diarization?.installed ? "installed" : "not installed")}
+            {diarization
+              ? diarization.state ?? (diarization.installed ? "installed" : "not installed")
+              : "checking…"}
           </div>
         </div>
         <div className="kv">
@@ -3765,7 +3829,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
         <div className="kv">
           <div className="k">TTS preview (pyttsx3)</div>
-          <div className="v">{ttsPreview?.installed ? "installed" : "not installed"}</div>
+          <div className="v">{probeText(ttsPreview?.installed, "installed", "not installed")}</div>
         </div>
         <div className="kv">
           <div className="k">pyttsx3</div>
@@ -3775,11 +3839,13 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         <div className="kv">
           <div className="k">TTS preview (neural local)</div>
           <div className="v">
-            {ttsNeuralLocalV1?.installed
-              ? "installed"
-              : ttsNeuralLocalV1?.repair_required
-                ? "repair needed"
-                : "not installed"}
+            {!ttsNeuralLocalV1
+              ? "checking…"
+              : ttsNeuralLocalV1.installed
+                ? "installed"
+                : ttsNeuralLocalV1.repair_required
+                  ? "repair needed"
+                  : "not installed"}
           </div>
         </div>
         <div className="kv">
@@ -3804,11 +3870,13 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         <div className="kv">
           <div className="k">TTS voice-preserving (local)</div>
           <div className="v">
-            {ttsVoicePreservingLocalV1?.installed
-              ? "installed"
-              : ttsVoicePreservingLocalV1?.repair_required
-                ? "repair needed"
-                : "not installed"}
+            {!ttsVoicePreservingLocalV1
+              ? "checking…"
+              : ttsVoicePreservingLocalV1.installed
+                ? "installed"
+                : ttsVoicePreservingLocalV1.repair_required
+                  ? "repair needed"
+                  : "not installed"}
           </div>
         </div>
         <div className="kv">
@@ -4846,7 +4914,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
         <div className="kv">
           <div className="k">Performance tier</div>
-          <div className="v">{perfTier?.tier ?? "-"}</div>
+          <div className="v">{perfTier ? perfTier.tier ?? "-" : "checking…"}</div>
         </div>
         <div className="kv">
           <div className="k">GPUs</div>

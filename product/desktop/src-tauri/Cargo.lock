@@ -798,7 +798,7 @@ dependencies = [
 
 [[package]]
 name = "desktop"
-version = "0.1.183"
+version = "0.1.204"
 dependencies = [
  "base64 0.22.1",
  "hex",
@@ -816,6 +816,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-runtime",
  "tempfile",
+ "uuid",
  "voxvulgi_engine",
  "windows-sys 0.59.0",
  "zip 0.6.6",

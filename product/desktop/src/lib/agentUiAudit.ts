@@ -5,8 +5,18 @@ export type AgentUiAuditRequest = {
 
 export type AgentUiActionRequest = {
   audit_id?: string;
-  action?: "click" | "scroll_into_view" | "scroll_content";
+  action?: "click" | "scroll_into_view" | "scroll_content" | "activate_product_action" | "set_value" | "select_option";
   scroll_top?: number;
+  value?: string;
+  actor_id?: string;
+  expected_product_action_id?: string;
+};
+
+export type AgentUiEffectClass = "read_only" | "external_probe" | "reversible_state_change";
+
+export type AgentUiSelectChoice = {
+  value: string;
+  label: string;
 };
 
 type AgentUiRect = {
@@ -33,6 +43,11 @@ export type AgentUiElement = {
   selected: boolean | null;
   expanded: boolean | null;
   value_summary: string | null;
+  product_action_id: string | null;
+  effect_class: AgentUiEffectClass | null;
+  input_kind: "text" | "select" | null;
+  available_choices: AgentUiSelectChoice[] | null;
+  available_choices_truncated: boolean;
   rect: AgentUiRect;
   safe_actions: string[];
   dom_path: string;
@@ -50,6 +65,30 @@ export type AgentUiAuditResult = {
 };
 
 let nextAuditId = 1;
+
+export function normalizeAgentActorId(value: string | undefined, required: boolean): string {
+  const actorId = value?.trim() ?? "";
+  if (!actorId) {
+    if (required) throw new Error("actor_id is required for product actions");
+    return "agent";
+  }
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,63}$/.test(actorId)) {
+    throw new Error("actor_id must be a stable 1-64 character token");
+  }
+  return actorId;
+}
+
+export function requireExpectedProductActionId(
+  expectedValue: string | undefined,
+  actualValue: string | null,
+): string {
+  const expected = expectedValue?.trim() ?? "";
+  if (!expected) throw new Error("expected_product_action_id is required for product actions");
+  if (!/^[a-z0-9][a-z0-9._-]{2,127}$/.test(expected) || expected !== actualValue) {
+    throw new Error("expected_product_action_id does not match the current audited control");
+  }
+  return expected;
+}
 
 function compactText(value: string | null | undefined, maxLength: number): string {
   const compact = (value ?? "").replace(/\s+/g, " ").trim();
@@ -193,14 +232,31 @@ function safeValueSummary(element: HTMLElement): string | null {
   return null;
 }
 
+function isSensitiveAgentInput(element: HTMLElement): boolean {
+  const descriptor = `${element.id} ${(element as HTMLInputElement).name ?? ""} ${element.getAttribute("aria-label") ?? ""} ${element.getAttribute("placeholder") ?? ""}`.toLowerCase();
+  return (element instanceof HTMLInputElement && element.type.toLowerCase() === "password") ||
+    /cookie|token|password|secret|credential/.test(descriptor);
+}
+
 export function classifySafeAgentActions(
   tag: string,
   role: string,
   hasStructuralState: boolean,
   explicitlySafe: boolean,
+  productActionId = "",
+  effectClass = "",
+  inputKind = "",
 ): string[] {
   const actions = ["scroll_into_view"];
   if (tag === "summary" || role === "tab" || hasStructuralState || explicitlySafe) actions.push("click");
+  if (
+    /^[a-z0-9][a-z0-9._-]{2,127}$/.test(productActionId) &&
+    ["read_only", "external_probe", "reversible_state_change"].includes(effectClass)
+  ) {
+    if (inputKind === "select" && tag === "select") actions.push("select_option");
+    else if (inputKind === "text" && (tag === "input" || tag === "textarea")) actions.push("set_value");
+    else actions.push("activate_product_action");
+  }
   return actions;
 }
 
@@ -221,6 +277,28 @@ function describeElement(element: HTMLElement): AgentUiElement {
     element instanceof HTMLInputElement && (element.type === "checkbox" || element.type === "radio")
       ? element.checked
       : null;
+  const productActionId = element.dataset.agentActionId?.trim() ?? "";
+  const rawEffectClass = element.dataset.agentEffectClass?.trim() ?? "";
+  const effectClass = ["read_only", "external_probe", "reversible_state_change"].includes(rawEffectClass)
+    ? rawEffectClass as AgentUiEffectClass
+    : null;
+  const declaredInputKind = element.dataset.agentInputKind?.trim() ?? "";
+  const inputKind = !isSensitiveAgentInput(element) &&
+    ((declaredInputKind === "select" && element instanceof HTMLSelectElement) ||
+      (declaredInputKind === "text" &&
+        (element instanceof HTMLTextAreaElement || element instanceof HTMLInputElement)))
+    ? declaredInputKind as "text" | "select"
+    : null;
+  const enabledSelectOptions = inputKind === "select" && element instanceof HTMLSelectElement
+    ? Array.from(element.options).filter((option) => !option.disabled)
+    : [];
+  const availableChoices = enabledSelectOptions
+    .filter((option) => option.value.length <= 512)
+    .slice(0, 100)
+    .map((option) => ({
+      value: option.value,
+      label: compactText(option.textContent || option.label || option.value, 120),
+    }));
   return {
     audit_id: auditIdFor(element),
     id: element.id || null,
@@ -245,6 +323,12 @@ function describeElement(element: HTMLElement): AgentUiElement {
       stateBoolean(element, "aria-expanded") ??
       (element instanceof HTMLDetailsElement ? element.open : null),
     value_summary: safeValueSummary(element),
+    product_action_id: productActionId || null,
+    effect_class: effectClass,
+    input_kind: inputKind,
+    available_choices: inputKind === "select" ? availableChoices : null,
+    available_choices_truncated:
+      inputKind === "select" && availableChoices.length < enabledSelectOptions.length,
     rect: {
       x: Math.round(rect.x),
       y: Math.round(rect.y),
@@ -258,6 +342,9 @@ function describeElement(element: HTMLElement): AgentUiElement {
         element.hasAttribute("aria-expanded") ||
         (role === "option" && element.hasAttribute("aria-selected")),
       element.dataset.agentSafeAction === "true",
+      productActionId,
+      rawEffectClass,
+      inputKind ?? "",
     ),
     dom_path: domPath(element),
   };
@@ -331,7 +418,11 @@ export function performAgentUiAction(request: AgentUiActionRequest): Record<stri
     if (!content) throw new Error("content scroll surface is unavailable");
     const requested = Number(request.scroll_top ?? 0);
     content.scrollTop = Math.max(0, Math.min(content.scrollHeight, Number.isFinite(requested) ? requested : 0));
-    return { action, scroll_top: Math.round(content.scrollTop) };
+    return {
+      action,
+      actor_id: normalizeAgentActorId(request.actor_id, false),
+      scroll_top: Math.round(content.scrollTop),
+    };
   }
 
   const auditId = request.audit_id?.trim();
@@ -348,12 +439,85 @@ export function performAgentUiAction(request: AgentUiActionRequest): Record<stri
     }
     if (before.disabled) throw new Error(`refused disabled control: ${before.name || before.audit_id}`);
     target.click();
+  } else if (action === "activate_product_action") {
+    if (!before.safe_actions.includes("activate_product_action")) {
+      throw new Error(`refused undeclared product action for ${before.tag} "${before.name || before.text_preview}"`);
+    }
+    if (!before.product_action_id || !before.effect_class) {
+      throw new Error("refused product action without stable ID and allowed effect classification");
+    }
+    requireExpectedProductActionId(request.expected_product_action_id, before.product_action_id);
+    const actorId = normalizeAgentActorId(request.actor_id, true);
+    if (before.disabled) throw new Error(`refused disabled control: ${before.name || before.audit_id}`);
+    target.click();
+    return {
+      action,
+      accepted: true,
+      accepted_at_ms: Date.now(),
+      actor_id: actorId,
+      product_action_id: before.product_action_id,
+      effect_class: before.effect_class,
+      target_before: before,
+    };
+  } else if (action === "select_option") {
+    if (!before.safe_actions.includes("select_option") || !(target instanceof HTMLSelectElement)) {
+      throw new Error("refused select interaction without explicit semantic opt-in");
+    }
+    requireExpectedProductActionId(request.expected_product_action_id, before.product_action_id);
+    if (before.disabled) throw new Error(`refused disabled control: ${before.name || before.audit_id}`);
+    const actorId = normalizeAgentActorId(request.actor_id, true);
+    const value = request.value;
+    if (typeof value !== "string" || value.length > 512) throw new Error("bounded select value is required");
+    const option = Array.from(target.options).find((candidate) => candidate.value === value);
+    if (!option || option.disabled) throw new Error("refused unavailable select option");
+    const setter = Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value")?.set;
+    setter?.call(target, value);
+    target.dispatchEvent(new Event("change", { bubbles: true }));
+    return {
+      action,
+      accepted: true,
+      accepted_at_ms: Date.now(),
+      actor_id: actorId,
+      product_action_id: before.product_action_id,
+      effect_class: before.effect_class,
+      value_summary: compactText(option.textContent, 120),
+      target_before: before,
+    };
+  } else if (action === "set_value") {
+    if (!before.safe_actions.includes("set_value") ||
+      !(target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) ||
+      isSensitiveAgentInput(target)) {
+      throw new Error("refused text interaction without explicit non-secret semantic opt-in");
+    }
+    requireExpectedProductActionId(request.expected_product_action_id, before.product_action_id);
+    if (before.disabled) throw new Error(`refused disabled control: ${before.name || before.audit_id}`);
+    const actorId = normalizeAgentActorId(request.actor_id, true);
+    const value = request.value;
+    if (typeof value !== "string" || value.length > 2_048) throw new Error("bounded text value is required");
+    const prototype = target instanceof HTMLTextAreaElement
+      ? HTMLTextAreaElement.prototype
+      : HTMLInputElement.prototype;
+    const setter = Object.getOwnPropertyDescriptor(prototype, "value")?.set;
+    setter?.call(target, value);
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+    target.dispatchEvent(new Event("change", { bubbles: true }));
+    return {
+      action,
+      accepted: true,
+      accepted_at_ms: Date.now(),
+      actor_id: actorId,
+      product_action_id: before.product_action_id,
+      effect_class: before.effect_class,
+      value_summary: value ? `${value.length} characters` : "empty",
+      target_before: before,
+    };
   } else {
     throw new Error(`unsupported UI action: ${String(action)}`);
   }
 
   return {
     action,
+    actor_id: normalizeAgentActorId(request.actor_id, false),
     target_before: before,
   };
 }

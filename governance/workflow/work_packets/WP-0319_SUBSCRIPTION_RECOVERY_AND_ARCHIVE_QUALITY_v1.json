@@ -1,0 +1,44 @@
+{
+  "id": "WP-0319",
+  "version": "v1",
+  "status": "BLOCKED",
+  "board": "../TASK_BOARD.md",
+  "refinement": "WP-0319_SUBSCRIPTION_RECOVERY_AND_ARCHIVE_QUALITY_v1_REFINEMENT.md",
+  "requirements": [
+    {
+      "id": "VV-0319-001",
+      "text": "Repair subscription path producer/consumer including all queued legacy exact-dot templates; preserve destination and traversal rejection."
+    },
+    {
+      "id": "VV-0319-002",
+      "text": "Enforce best available quality without codec/container/height caps at execution and retry boundaries; retain quality selection and warning evidence and reject incomplete YouTube fallback."
+    },
+    {
+      "id": "VV-0319-003",
+      "text": "Embed available original-language and English authored/automatic subtitles in MKV with truthful metadata and explicit absence; validate before publication."
+    },
+    {
+      "id": "VV-0319-004",
+      "text": "Expose actual resolution, subtitle result and policy in activity/manual; use quiet attributable bridge controls and recover the complete eligible canonical failed subscription set with lineage."
+    },
+    {
+      "id": "VV-0319-005",
+      "text": "Create and verify core installer without changing version/changelog or offline payload; preserve operator state and prove exact subscription outcome."
+    }
+  ],
+  "proof": "../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0319/subscription_quality/summary.md",
+  "completed_outcomes": [
+    "Best-quality MKV and available original/English subtitle policy implemented and verified",
+    "All 3102 recent failed YouTube subscription originals reconciled to replacements; interrupted jobs resumed",
+    "Core installer built and installed with version 0.1.204 and preserved user data",
+    "Real 4K/60fps production NAS publication and library registration verified",
+    "Pinned Instagram enumerator dependency repaired"
+  ],
+  "blocker": {
+    "id": "VV-0319-BLOCKER-001",
+    "surface": "Instagram profile enumeration",
+    "observed": "HTTP 400 feedback_required after configured Firefox session import",
+    "required_external_change": "Instagram accepts the session/request",
+    "job_id": "8f48c9d0-79c7-4106-83d0-d9086b9bbc69"
+  }
+}

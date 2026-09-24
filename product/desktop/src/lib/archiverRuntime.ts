@@ -72,8 +72,11 @@ export type ArchiverJobRow = CanonicalTitleProjection & {
   item_id: string | null;
   job_type: string;
   params_json?: string;
+  // WP-0321 S6: downloads reuse the same row on retry (retry_of_job_id/retry_replacement_job_id
+  // stay null there; use attempt_no > 1 instead). Other job types still populate these fields.
   retry_of_job_id?: string | null;
   retry_replacement_job_id?: string | null;
+  attempt_no?: number;
   // The engine persists this. Optional only while old installed databases are
   // backfilled; consumers must render that state as Unclassified.
   track?: string | null;

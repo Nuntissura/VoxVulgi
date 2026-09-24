@@ -13,6 +13,7 @@ function Get-DesktopBuildTargetPaths {
     BuildRoot = $buildRoot
     LegacyBuildRoot = $legacyBuildRoot
     CurrentDir = Join-Path $buildRoot 'Current'
+    CargoCacheDir = Join-Path $buildRoot 'cargo_cache'
     LogsDir = Join-Path $buildRoot 'logs'
     ToolArtifactsDir = Join-Path $buildRoot 'tool_artifacts'
     OldVersionsDir = Join-Path $buildRoot 'old_versions'
@@ -39,6 +40,6 @@ function Initialize-DesktopBuildTargetLayout {
     }
   }
 
-  New-Item -ItemType Directory -Force -Path $paths.BuildRoot, $paths.CurrentDir, $paths.LogsDir, $paths.ToolArtifactsDir, $paths.OldVersionsDir | Out-Null
+  New-Item -ItemType Directory -Force -Path $paths.BuildRoot, $paths.CurrentDir, $paths.CargoCacheDir, $paths.LogsDir, $paths.ToolArtifactsDir, $paths.OldVersionsDir | Out-Null
   return $paths
 }

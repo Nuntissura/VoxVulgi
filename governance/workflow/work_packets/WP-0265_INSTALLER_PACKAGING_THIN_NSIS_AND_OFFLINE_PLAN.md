@@ -1,10 +1,10 @@
 # Work Packet: WP-0265 - Installer packaging fix (thin NSIS) + full-offline packaging plan
 
-> Historical record only. Its installer build commands, Inno 6/spanned-output architecture, and artifact expectations are superseded. The only current installer creation procedure is `governance/release/OFFLINE_INSTALLER_BUILD_MANUAL.md`; current delivery is governed by WP-0308.
+> SUPERSEDED 2026-08-30 by WP-0316. Historical evidence only. Its installer build commands, hydration architecture, and artifact expectations must not be used for a new release; the only detailed procedure is `offline-installer-runtime/GUIDE.md`.
 
 ## Status
 
-BLOCKED (thin build 0.1.91 shipped; full-quality single-exe OFFLINE installer built + component-verified; pending final clean-machine install proof)
+SUPERSEDED (historical delivery evidence retained; active work moved to WP-0316)
 
 ## Owner
 
@@ -66,7 +66,7 @@ Operator 2026-07-08 chose (AskUserQuestion): single self-installing ~big .exe, "
 ### Approach (Inno Setup, no app rebuild needed)
 - Tooling: **Inno Setup 6.7.3** (`ISCC.exe`). NSIS/WiX cannot make a single archive >~2 GB; Inno natively handles the multi-GB size, per-user file placement, and a real progress bar.
 - The single `.exe` = the existing 8.6 MB NSIS `setup.exe` (run silently `/S`, keeps the app install + Update/Reinstall/Full-reinstall/Uninstall maintenance flow) + the ~12.83 GB relocatable pack payload laid into per-user `%APPDATA%\com.voxvulgi.voxvulgi`.
-- Script: `product/desktop/src-tauri/installer/VoxVulgi_offline_full.iss`; driver: `governance/scripts/build_offline_full_installer.ps1` (both parameterized/portable via `/D` defines; the driver guards the payload before compiling).
+- Script: `offline-installer-runtime/installer/VoxVulgi_offline_full.iss`; driver: `offline-installer-runtime/scripts/build_offline_full_installer.ps1` (both parameterized/portable via `/D` defines; the driver guards the payload before compiling).
 - `PrivilegesRequired=lowest` so `{userappdata}`/`{userprofile}` resolve to the real user; the NSIS `setup.exe` self-elevates for its per-machine app install.
 
 ### Payload build (12.83 GB, from the LIVE working install)
@@ -90,8 +90,8 @@ Operator 2026-07-08 chose (AskUserQuestion): single self-installing ~big .exe, "
 - demucs (optional, non-default separation): pre-broken on the LIVE install too (`torchaudio` `PyInit__torchaudio`, torch 2.10) — NOT introduced by relocation, NOT the default; out of scope (separate dependency task if wanted).
 
 ### Artifacts
-- `product/desktop/src-tauri/installer/VoxVulgi_offline_full.iss`
-- `governance/scripts/build_offline_full_installer.ps1`
+- `offline-installer-runtime/installer/VoxVulgi_offline_full.iss`
+- `offline-installer-runtime/scripts/build_offline_full_installer.ps1`
 - Output: `VoxVulgi_0.1.91_x64_offline_full_setup.exe` (built under the operator's chosen output dir; ~10-12 GB).
 
 ### Acceptance / remaining proof

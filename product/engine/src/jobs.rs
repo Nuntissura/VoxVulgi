@@ -1,12 +1,13 @@
 use crate::paths::AppPaths;
 use crate::{
-    asr, cmd, config, db, ffmpeg, image_batch, library, persistence, provider_metadata,
-    root_rebind, speakers, subscriptions, subtitle_tracks, subtitles, tools, translate,
+    asr, cmd, config, db, ffmpeg, image_batch, job_target_migration, library, persistence,
+    provider_metadata, root_rebind, speakers, subscriptions, subtitle_tracks, subtitles, tools,
+    translate,
     video_libraries, voice_backend_adapters, voice_backends, voice_cast_packs, voice_plans,
     voice_reference_candidates, voice_templates, youtube_protection, EngineError, Result,
 };
 use regex::Regex;
-use rusqlite::{params, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, ErrorCode, OptionalExtension, TransactionBehavior};
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -147,17 +148,40 @@ const DOWNLOAD_LINEAGE_BACKFILL_INTERVAL_SECS: u64 = 2;
 const LEGACY_TRACK_FETCH_SCAN_MULTIPLIER: usize = 16;
 const LEGACY_TRACK_CURSOR_SCAN_BATCH: usize = 4_096;
 const UNCLASSIFIED_JOB_TRACK: &str = "unclassified";
+// WP-0320: job-history retention purge. Localization job types are excluded by construction (an
+// explicit allow-list of purgeable types, not a deny-list) because `ON DELETE RESTRICT` foreign
+// keys reference them; when a job type is not obviously safe to purge, it stays off this list.
+const PURGEABLE_TERMINAL_JOB_TYPES: [JobType; 5] = [
+    JobType::DownloadDirectUrl,
+    JobType::YoutubeSubscriptionRefreshV1,
+    JobType::InstagramSubscriptionRefreshV1,
+    JobType::TiktokSubscriptionRefreshV1,
+    JobType::ImportLocal,
+];
+// Small chunks keep each delete's hold on the single writer lane short (WP-0321 S2).
+const PURGE_TERMINAL_HISTORY_CHUNK_SIZE: usize = 1_000;
+const PURGE_TERMINAL_HISTORY_CHUNK_RETRIES: u32 = 30;
+const TERMINAL_HISTORY_RETENTION_INTERVAL_SECS: u64 = 24 * 60 * 60;
+/// True while a runner-scheduled retention purge is still running on its own thread.
+static TERMINAL_HISTORY_RETENTION_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+// WP-0322 A: daily automatic subscription export. First run no earlier than one hour after the
+// runner starts (never at startup), then once every 24h.
+const SUBSCRIPTIONS_EXPORT_FIRST_DELAY_SECS: u64 = 60 * 60;
+const SUBSCRIPTIONS_EXPORT_INTERVAL_SECS: u64 = 24 * 60 * 60;
+/// True while a runner-scheduled subscription export is still running on its own thread.
+static SUBSCRIPTIONS_EXPORT_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
+const META_KEY_TERMINAL_JOB_RETENTION_DAYS: &str = "terminal_job_retention_days";
+// Off by default: automatic history deletion is opt-in through Options (WP-0320); the manual
+// backup-first purge remains available for an immediate, previewed cleanup.
+const DEFAULT_TERMINAL_JOB_RETENTION_DAYS: u32 = 0;
+const MAX_TERMINAL_JOB_RETENTION_DAYS: u32 = 3_650;
 
 // WP-0257 (#3/#4): operator-tunable anti-bot pacing. Bursting channel/subscription
 // enumerations is what trips YouTube anti-bot in the first place; these knobs space the
 // recurring lane out and trickle "Update all" instead of firing every subscription at once.
 const META_KEY_RECURRING_MIN_INTERVAL_SECS: &str = "antibot_recurring_min_interval_secs";
 const META_KEY_RECURRING_JITTER_SECS: &str = "antibot_recurring_jitter_secs";
-const META_KEY_ENUM_SLEEP_REQUESTS: &str = "antibot_enumeration_sleep_requests";
 const META_KEY_UPDATE_ALL_BATCH: &str = "antibot_update_all_batch_size";
-const META_KEY_RECURRING_DOWNLOAD_MIN_SLEEP: &str = "antibot_recurring_download_min_sleep_secs";
-const META_KEY_RECURRING_DOWNLOAD_MAX_SLEEP: &str = "antibot_recurring_download_max_sleep_secs";
-const META_KEY_ADAPTIVE_PROTECTION_ENABLED: &str = "antibot_adaptive_protection_enabled";
 static ANTIBOT_PACING_WRITE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 // Subtitle artifact publication is a two-resource operation: select the next database version,
 // publish three filesystem artifacts, then insert the track row. The database writer permit must
@@ -176,13 +200,8 @@ const META_KEY_INSTAGRAM_RECURRING_MIN_INTERVAL_SECS: &str =
     "antibot_instagram_recurring_min_interval_secs";
 const DEFAULT_INSTAGRAM_RECURRING_MIN_INTERVAL_SECS: u64 = 900;
 const MAX_INSTAGRAM_RECURRING_MIN_INTERVAL_SECS: u64 = 86_400;
-const DEFAULT_ENUM_SLEEP_REQUESTS: u32 = 2;
-const MAX_ENUM_SLEEP_REQUESTS: u32 = 60;
 const DEFAULT_UPDATE_ALL_BATCH: usize = 25;
 const MAX_UPDATE_ALL_BATCH: usize = 5000;
-const DEFAULT_RECURRING_DOWNLOAD_MIN_SLEEP_SECS: u32 = 5;
-const DEFAULT_RECURRING_DOWNLOAD_MAX_SLEEP_SECS: u32 = 10;
-const MAX_RECURRING_DOWNLOAD_SLEEP_SECS: u32 = 300;
 const YT_DLP_EXPAND_TIMEOUT_SECS: u64 = 900;
 const YT_DLP_DOWNLOAD_TIMEOUT_SECS: u64 = 7200;
 const YT_DLP_RETRIES: u32 = 3;
@@ -190,7 +209,7 @@ const YT_DLP_FRAGMENT_RETRIES: u32 = 3;
 const YT_DLP_ARCHIVE_THROTTLED_RATE: &str = "100K";
 const YT_DLP_ARCHIVE_CONCURRENT_FRAGMENTS_U32: u32 = 4;
 const YT_DLP_ARCHIVE_FILE_ACCESS_RETRIES_U32: u32 = 10;
-const YT_DLP_ARCHIVE_SUB_LANGS: &str = "en.*,en,ja.*,ja,ko.*,ko";
+const YT_DLP_ARCHIVE_SUB_LANGS: &str = "en.*,.*-orig";
 const DEFAULT_YOUTUBE_AUTH_PREFLIGHT_URL: &str = "https://youtu.be/wbpLhh3M6L4?si=8QuFih5T__tP1W8b";
 pub const DEFAULT_BROWSER_COOKIE_SOURCE: &str = "firefox";
 pub const SUPPORTED_BROWSER_COOKIE_SOURCES: &[&str] = &["firefox", "chrome", "edge", "opera"];
@@ -293,9 +312,8 @@ struct YoutubeAuthSuspectState {
 
 const YOUTUBE_AUTH_SUSPECT_THRESHOLD: usize = 3;
 const YOUTUBE_AUTH_SUSPECT_WINDOW_MS: i64 = 15 * 60_000;
-// Escalating auto-clear TTLs for a recorded block: 5m, 15m, 1h, 6h (capped).
-const YOUTUBE_AUTH_BLOCK_BACKOFF_MS: [i64; 4] =
-    [5 * 60_000, 15 * 60_000, 60 * 60_000, 6 * 60 * 60_000];
+// WP-0321 S4: one fixed auto-clear wait for a recorded auth block (was an escalating ladder).
+const YOUTUBE_AUTH_BLOCK_WAIT_MS: i64 = 60 * 60_000;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ClearTerminalJobsSearchSummary {
@@ -806,6 +824,14 @@ pub struct JobRow {
     /// Persisted canonical product scheduling track, or `unclassified` until bounded legacy
     /// backfill has stamped a pre-v24 row. This public field never reports an inferred value.
     pub track: String,
+    /// WP-0321 S6: attempt counter for the durable one-row-per-video download job model.
+    /// Defaults to 1 for job types and pre-v56 rows that do not carry this column.
+    #[serde(default = "default_job_attempt_no")]
+    pub attempt_no: u32,
+}
+
+fn default_job_attempt_no() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -906,6 +932,26 @@ pub struct JobCleanupSummary {
     pub skipped_external_output_dirs: usize,
     pub removed_cache_entries: usize,
     pub failed_paths: Vec<JobCleanupFailure>,
+}
+
+/// WP-0320: one `(job_type, status)` count in a terminal-history purge selection.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PurgeTerminalHistoryCountRow {
+    pub job_type: String,
+    pub status: String,
+    pub count: u64,
+}
+
+/// WP-0320: backup-first job-history retention purge receipt. A dry run always has
+/// `backup_path: None` and `deleted: 0`; an execute run reports the backup written before the
+/// first delete and the actual number of rows removed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PurgeTerminalHistoryReceipt {
+    pub dry_run: bool,
+    pub counts_by_type_status: Vec<PurgeTerminalHistoryCountRow>,
+    pub total: u64,
+    pub backup_path: Option<String>,
+    pub deleted: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1834,6 +1880,14 @@ pub struct YoutubeSharedGateSnapshot {
     pub state: String,
     pub next_eligible_at_ms: Option<i64>,
     pub hold_reason: Option<String>,
+    /// WP-0320: the durable download-operation protection mode (`normal`, `cautious`,
+    /// `conservative`, `cooldown`, `hold`) for the current auth fingerprint/runtime epoch, or
+    /// `None` when adaptive protection is disabled or the policy state could not be read.
+    pub mode: Option<String>,
+    /// `cooldown_failed_probe_count + 1` while `mode == "cooldown"`, else `0`. This is the
+    /// operator-facing "attempt N" number, not the zero-based internal escalation counter.
+    pub cooldown_attempt: u32,
+    pub entered_at_ms: Option<i64>,
 }
 
 /// The sole public producer contract for Jobs controls, the agent bridge, and diagnostics.
@@ -1880,6 +1934,12 @@ fn job_row_from_query_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
     } else {
         UNCLASSIFIED_JOB_TRACK.to_string()
     };
+    // WP-0321 S6: attempt_no is a v58 column; older/unmigrated queries fall back to 1.
+    let attempt_no: u32 = if column_count > 16 {
+        row.get::<_, Option<i64>>(16)?.unwrap_or(1).max(1) as u32
+    } else {
+        1
+    };
     Ok(JobRow {
         id: row.get(0)?,
         item_id: row.get(1)?,
@@ -1911,6 +1971,7 @@ fn job_row_from_query_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<JobRow> {
             None
         },
         track,
+        attempt_no,
     })
 }
 
@@ -1945,7 +2006,8 @@ SELECT
   target_title,
   retry_of_job_id,
   retry_replacement_job_id,
-  track
+  track,
+  attempt_no
 FROM job
 WHERE type=?1 AND status IN (?2, ?3)
 ORDER BY created_at_ms ASC
@@ -4350,6 +4412,13 @@ fn youtube_auth_circuit_open(paths: &AppPaths) -> bool {
     true
 }
 
+/// WP-0321 S4: expiry of the currently open YouTube auth circuit, for the gate snapshot's
+/// `next_eligible_at_ms` projection. `None` when the circuit is not open.
+fn youtube_auth_circuit_expires_at_ms(paths: &AppPaths) -> Option<i64> {
+    let state = load_youtube_auth_block(paths).ok().flatten()?;
+    (now_ms() < state.expires_at_ms).then_some(state.expires_at_ms)
+}
+
 fn youtube_auth_block_message(state: &YoutubeAuthBlockState) -> String {
     format!(
         "YouTube auth is blocked for the current saved/browser session because YouTube rejected it at {}. {} Open Options > YouTube sign-in, run Connect and test (or import fresh YouTube-only cookies), then retry.",
@@ -4373,13 +4442,12 @@ fn record_youtube_auth_block(
     url: Option<String>,
     job_id: Option<String>,
 ) -> Result<()> {
-    // WP-0257: escalate the auto-clear TTL when the same cookie key keeps getting rejected.
+    // WP-0321 S4: one fixed auto-clear wait; backoff_count is kept for deserialization only.
     let prev_backoff = load_youtube_auth_block(paths)?
         .filter(|s| s.auth_key == auth_key)
         .map(|s| s.backoff_count)
         .unwrap_or(0);
     let backoff_count = prev_backoff.saturating_add(1);
-    let ttl_idx = (backoff_count as usize - 1).min(YOUTUBE_AUTH_BLOCK_BACKOFF_MS.len() - 1);
     let now = now_ms();
     let state = YoutubeAuthBlockState {
         auth_key,
@@ -4388,7 +4456,7 @@ fn record_youtube_auth_block(
         reason,
         url,
         job_id,
-        expires_at_ms: now + YOUTUBE_AUTH_BLOCK_BACKOFF_MS[ttl_idx],
+        expires_at_ms: now + YOUTUBE_AUTH_BLOCK_WAIT_MS,
         backoff_count,
     };
     save_youtube_auth_block(paths, &state)?;
@@ -4523,6 +4591,10 @@ fn enqueue_download_targets_batch_with_subscription(
         .collect::<Vec<_>>();
     let preflight_rows = library::preflight_download_urls(paths, &identity_urls)?;
     let mut jobs: Vec<JobRow> = Vec::with_capacity(targets.len());
+    // WP-0321 S6: parallel to `jobs`, true when that row is a reopened terminal row rather than a
+    // freshly inserted one, so a mid-batch rollback cancels instead of deletes it (a reopened row
+    // is still the durable one-per-video identity; deleting it would orphan history/associations).
+    let mut reopened_flags: Vec<bool> = Vec::with_capacity(targets.len());
     for (target, preflight) in targets.into_iter().zip(preflight_rows) {
         // Classify before the URL is moved into serialized job params.
         let identity_url = target
@@ -4554,7 +4626,23 @@ fn enqueue_download_targets_batch_with_subscription(
             .library_item_id
             .as_ref()
             .is_some_and(|item_id| approved_operator_deleted_item_ids.contains(item_id));
-        let job_id = Uuid::new_v4().to_string();
+        // WP-0321 S6: one durable row per video. `target_key` identifies the video across
+        // attempts; a live (queued/running) owner is Active, a terminal owner is reopened in
+        // place instead of inserting a new row, and only an untargetable/unparseable URL still
+        // gets a plain new row (target_key stays NULL, matching pre-S6 behavior).
+        let target_key = job_target_migration::download_target_key(
+            &target.url,
+            target.canonical_source_url.as_deref(),
+        );
+        let reopen_target = match target_key.as_deref() {
+            Some(key) => existing_job_for_target_key(paths, key)?,
+            None => None,
+        };
+        let (job_id, reopen_existing) = match reopen_target {
+            Some((_id, status)) if status == "queued" || status == "running" => continue,
+            Some((id, _terminal_status)) => (id, true),
+            None => (Uuid::new_v4().to_string(), false),
+        };
         match library::claim_download_source(
             paths,
             identity_url,
@@ -4606,34 +4694,139 @@ fn enqueue_download_targets_batch_with_subscription(
         // playlist/channel is foreground `youtube_single`; only subscription-originated work is
         // background `youtube_recurring`. This avoids a URL-shape heuristic moving an operator's
         // explicit batch behind the subscription fleet.
-        let job = match enqueue_with_type_item_batch_track_and_id(
-            paths,
-            JobType::DownloadDirectUrl,
-            params_json,
-            None,
-            batch_id.clone(),
-            track,
-            job_id.clone(),
-        ) {
-            Ok(job) => job,
-            Err(err) => {
+        let job = if reopen_existing {
+            let mut conn = db::write_context(paths)?;
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // WP-0321 S6: capture the row's pre-reopen (batch_id, subscription_id) so we can
+            // refresh the OLD batch's subscription rollup after the move below, in case it
+            // belongs to a different (or no) subscription than the new batch.
+            let old_params_json: Option<String> = tx
+                .query_row("SELECT params_json FROM job WHERE id=?1", [&job_id], |row| {
+                    row.get(0)
+                })
+                .optional()
+                .unwrap_or(None);
+            let old_subscription_id = old_params_json.as_deref().and_then(|json| {
+                serde_json::from_str::<DownloadDirectUrlParams>(json)
+                    .ok()
+                    .and_then(|params| params.subscription_id)
+            });
+            let changed = match reopen_terminal_download_conn(
+                &tx,
+                &job_id,
+                &params_json,
+                batch_id.as_deref(),
+                track,
+                track.legacy_lane().as_str(),
+            ) {
+                Ok(changed) => changed,
+                Err(err) => {
+                    let _ = library::release_download_source_claim(paths, &job_id, None, None);
+                    return Err(err);
+                }
+            };
+            if !changed {
+                // Raced with a worker/other enqueue that claimed this row between our read and
+                // this write; treat exactly like a pre-read Active hit.
+                let _ = tx.commit();
+                drop(conn);
                 let _ = library::release_download_source_claim(paths, &job_id, None, None);
-                return Err(err);
+                continue;
+            }
+            if let Err(err) = tx.commit() {
+                drop(conn);
+                let _ = library::release_download_source_claim(paths, &job_id, None, None);
+                return Err(EngineError::Database(err));
+            }
+            drop(conn);
+            // WP-0321 S6: this reopen may have moved the row into a different batch (a new
+            // manual/subscription submission for a previously-terminal video). Refresh both the
+            // new subscription (this job's current state) and, if it differs, the old
+            // subscription's rollup so it stops counting a job that just moved away.
+            let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, &job_id);
+            if let Some(old_subscription_id) = old_subscription_id.filter(|value| {
+                !value.trim().is_empty() && Some(value.as_str()) != subscription_id.as_deref()
+            }) {
+                let _ = subscriptions::refresh_subscription_activity_rollup_for_subscription_id(
+                    paths,
+                    &old_subscription_id,
+                );
+            }
+            match get_job(paths, &job_id) {
+                Ok(Some(job)) => job,
+                Ok(None) => {
+                    let _ = library::release_download_source_claim(paths, &job_id, None, None);
+                    return Err(EngineError::InstallFailed(format!(
+                        "reopened job {job_id} vanished before it could be read back"
+                    )));
+                }
+                Err(err) => {
+                    let _ = library::release_download_source_claim(paths, &job_id, None, None);
+                    return Err(err);
+                }
+            }
+        } else {
+            let conn = match db::write_context(paths) {
+                Ok(conn) => conn,
+                Err(err) => {
+                    let _ = library::release_download_source_claim(paths, &job_id, None, None);
+                    return Err(err);
+                }
+            };
+            match enqueue_with_type_item_batch_track_id_and_target_key_conn(
+                &conn,
+                paths,
+                JobType::DownloadDirectUrl,
+                params_json,
+                None,
+                batch_id.clone(),
+                track,
+                job_id.clone(),
+                target_key.clone(),
+            ) {
+                Ok(job) => job,
+                Err(err) if is_target_key_unique_violation(&err) => {
+                    // Another thread inserted a row for the same video between our target_key
+                    // read and this insert. Treat it exactly like a pre-read Active hit.
+                    let _ = library::release_download_source_claim(paths, &job_id, None, None);
+                    continue;
+                }
+                Err(err) => {
+                    let _ = library::release_download_source_claim(paths, &job_id, None, None);
+                    return Err(err);
+                }
             }
         };
 
         if let Some(cookie) = auth_cookie.as_deref() {
             if let Err(err) = write_job_cookie_secret(paths, &job.id, cookie) {
-                let _ = delete_job_by_id(paths, &job.id);
+                if reopen_existing {
+                    cancel_reopened_job_after_enqueue_failure(
+                        paths,
+                        &job.id,
+                        "batch enqueue rolled back after cookie secret write failure",
+                    );
+                } else {
+                    let _ = delete_job_by_id(paths, &job.id);
+                }
                 let _ = library::release_download_source_claim(paths, &job.id, None, None);
-                for queued in &jobs {
-                    let _ = delete_job_by_id(paths, &queued.id);
+                for (queued, queued_reopened) in jobs.iter().zip(reopened_flags.iter()) {
+                    if *queued_reopened {
+                        cancel_reopened_job_after_enqueue_failure(
+                            paths,
+                            &queued.id,
+                            "batch enqueue rolled back after cookie secret write failure",
+                        );
+                    } else {
+                        let _ = delete_job_by_id(paths, &queued.id);
+                    }
                     let _ = remove_job_cookie_secret(paths, &queued.id);
                     let _ = library::release_download_source_claim(paths, &queued.id, None, None);
                 }
                 return Err(err);
             }
         }
+        reopened_flags.push(reopen_existing);
         jobs.push(job);
     }
 
@@ -5119,6 +5312,64 @@ pub fn enqueue_download_image_batch(
     Ok(job)
 }
 
+/// Stable keyset pagination over the canonical failed recurring video set, never UI rows.
+pub fn failed_subscription_downloads(paths: &AppPaths, since: i64, until: i64, after: &str, limit: usize) -> Result<serde_json::Value> {
+    let conn = db::open_readonly(paths)?;
+    let limit = limit.clamp(1, 200);
+    let mut stmt = conn.prepare("SELECT j.id,j.target_title,json_extract(j.params_json,'$.subscription_id') FROM job j WHERE j.type='download_direct_url' AND j.status='failed' AND j.retry_replacement_job_id IS NULL AND j.finished_at_ms>=?1 AND j.finished_at_ms<=?2 AND j.id>?3 AND json_valid(j.params_json) AND json_extract(j.params_json,'$.subscription_id') IS NOT NULL AND j.track IN ('youtube_recurring','instagram_recurring','tiktok_recurring') ORDER BY j.id LIMIT ?4")?;
+    let rows = stmt.query_map(params![since,until,after,limit as i64], |r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,Option<String>>(1)?,"subscription_id":r.get::<_,String>(2)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(serde_json::json!({"next_after_id":rows.last().map(|r|r["id"].clone()),"jobs":rows,"limit":limit,"scope":"canonical_failed_subscription_downloads","since_ms":since,"until_ms":until}))
+}
+
+/// Canonical paged operator activity. No history scans on the default active view.
+pub fn operator_activity_page(paths: &AppPaths, source: &str, view: &str, offset: usize, limit: usize) -> Result<serde_json::Value> {
+    let tracks = match source {
+        "all" => "1=1",
+        "youtube" => "track IN ('youtube_single','youtube_recurring')",
+        "instagram" => "track IN ('instagram_single','instagram_recurring','instagram')",
+        "tiktok" => "track IN ('tiktok_single','tiktok_recurring')",
+        "other" => "track='other_video'",
+        "images" => "track='image_archive'",
+        "localization" => "track='localization'",
+        _ => return Err(EngineError::InstallFailed("Unknown activity source".into())),
+    };
+    let statuses = match view {
+        "now" => "status IN ('running','queued')",
+        "attention" => "status='failed' AND retry_replacement_job_id IS NULL",
+        "history" => "status IN ('succeeded','failed','canceled')",
+        _ => return Err(EngineError::InstallFailed("Unknown activity view".into())),
+    };
+    let offset = offset.min(1_000_000);
+    let limit = limit.clamp(1, 50);
+    let conn = db::open_readonly(paths)?;
+    let tx = conn.unchecked_transaction()?;
+    let total: i64 = tx.query_row(&format!("SELECT COUNT(*) FROM job WHERE {tracks} AND {statuses}"), [], |r| r.get(0))?;
+    let mut stmt = tx.prepare(&format!("SELECT id,item_id,batch_id,type,status,progress,error,created_at_ms,started_at_ms,finished_at_ms,logs_path,params_json,target_title,retry_of_job_id,retry_replacement_job_id,track,attempt_no FROM job WHERE {tracks} AND {statuses} ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,created_at_ms DESC,id DESC LIMIT ?1 OFFSET ?2"))?;
+    let mut rows = stmt.query_map(params![limit as i64, offset as i64], job_row_from_query_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    hydrate_job_target_titles(&tx, &mut rows)?;
+    for row in &mut rows {
+        if row.target_title.as_ref().is_some_and(|s| !s.trim().is_empty()) { continue; }
+        let table = match row.job_type.as_str() {
+            "youtube_subscription_refresh_v1" => "youtube_subscription",
+            "instagram_subscription_refresh_v1" => "instagram_subscription",
+            "tiktok_subscription_refresh_v1" => "tiktok_subscription",
+            _ => continue,
+        };
+        let params: serde_json::Value = serde_json::from_str(&row.params_json).unwrap_or_default();
+        if let Some(id) = params["subscription_id"].as_str() {
+            row.target_title = tx.query_row(&format!("SELECT title FROM {table} WHERE id=?1"), [id], |r| r.get(0)).optional()?;
+        }
+    }
+    drop(stmt);
+    drop(tx);
+    drop(conn);
+    let jobs: Vec<_> = rows.into_iter().map(|row| {
+        let live = if row.status == JobStatus::Running { crate::job_activity::get(paths, &row.id) } else { None };
+        serde_json::json!({"quality":crate::archive_quality::read(paths, &row.id),"job": row, "live": live})
+    }).collect();
+    Ok(serde_json::json!({"jobs":jobs,"total":total,"offset":offset,"limit":limit,"has_more":offset+limit < total as usize,"generated_at_ms":now_ms()}))
+}
+
 pub fn list_jobs(paths: &AppPaths, limit: usize, offset: usize) -> Result<Vec<JobRow>> {
     // WP-0226: read-only connection bypasses job-runner write queue.
     let conn = db::open_readonly(paths)?;
@@ -5141,7 +5392,8 @@ SELECT
   target_title,
   retry_of_job_id,
   retry_replacement_job_id,
-  track
+  track,
+  attempt_no
 FROM job
 ORDER BY created_at_ms DESC
 LIMIT ?1 OFFSET ?2
@@ -5207,7 +5459,8 @@ SELECT
   target_title,
   retry_of_job_id,
   retry_replacement_job_id,
-  track
+  track,
+  attempt_no
 FROM job
 WHERE status IN (?1, ?2)
 ORDER BY created_at_ms DESC
@@ -5233,7 +5486,8 @@ SELECT
   target_title,
   retry_of_job_id,
   retry_replacement_job_id,
-  track
+  track,
+  attempt_no
 FROM job
 WHERE status IN (?1, ?2)
 ORDER BY created_at_ms DESC
@@ -5345,7 +5599,8 @@ SELECT
   target_title,
   retry_of_job_id,
   retry_replacement_job_id,
-  track
+  track,
+  attempt_no
 FROM job
 "#;
         let rows = match selected_track.as_deref() {
@@ -5536,7 +5791,7 @@ WHERE track=?1 AND status IN ('queued','running')
 SELECT
   id, item_id, batch_id, type, status, progress, error, created_at_ms,
   started_at_ms, finished_at_ms, logs_path, params_json, target_title,
-  retry_of_job_id, retry_replacement_job_id, track
+  retry_of_job_id, retry_replacement_job_id, track, attempt_no
 FROM job
 WHERE track=?1 AND status IN ('queued','running')
 ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END, created_at_ms DESC
@@ -5586,7 +5841,7 @@ pub fn jobs_progress_many(paths: &AppPaths, job_ids: &[String]) -> Result<Vec<Jo
 SELECT
   id, item_id, batch_id, type, status, progress, error, created_at_ms,
   started_at_ms, finished_at_ms, logs_path, params_json, target_title,
-  retry_of_job_id, retry_replacement_job_id, track
+  retry_of_job_id, retry_replacement_job_id, track, attempt_no
 FROM job
 WHERE id IN ({placeholders})
 "#
@@ -5666,7 +5921,8 @@ SELECT
   j.target_title,
   j.retry_of_job_id,
   j.retry_replacement_job_id,
-  j.track
+  j.track,
+  j.attempt_no
 FROM job j
 WHERE
   (
@@ -5723,7 +5979,8 @@ SELECT
   j.target_title,
   j.retry_of_job_id,
   j.retry_replacement_job_id,
-  j.track
+  j.track,
+  j.attempt_no
 FROM job j
 WHERE
   ?4 = 'all'
@@ -5748,7 +6005,8 @@ SELECT
   target_title,
   retry_of_job_id,
   retry_replacement_job_id,
-  track
+  track,
+  attempt_no
 FROM recent
 WHERE
   id LIKE ?1
@@ -5807,7 +6065,8 @@ SELECT
   target_title,
   retry_of_job_id,
   retry_replacement_job_id,
-  track
+  track,
+  attempt_no
 FROM job
 WHERE id=?1
 "#,
@@ -6734,7 +6993,8 @@ SELECT
   target_title,
   retry_of_job_id,
   retry_replacement_job_id,
-  track
+  track,
+  attempt_no
 FROM job
 WHERE item_id=?1
 ORDER BY created_at_ms DESC
@@ -7099,6 +7359,18 @@ pub fn flush_jobs_cache(
     let mut failed_paths: Vec<JobCleanupFailure> = Vec::new();
     let mut failed_job_ids: HashSet<String> = HashSet::new();
 
+    // WP-0320 red-team: delete the durable job rows before touching their on-disk log/artifact
+    // files. Files-before-rows left an interrupted run with rows pointing at already-deleted
+    // files (a silent desync); rows-first means a crash or error after this point leaves at
+    // worst orphaned files, which are inert and safely re-collectible by a later cleanup pass.
+    let removable_job_ids: Vec<String> = plan
+        .terminal_jobs
+        .iter()
+        .map(|job| job.job_id.clone())
+        .collect();
+    let removed_jobs = delete_terminal_jobs_by_ids(paths, &removable_job_ids)?;
+    let kept_jobs_due_to_failures = plan.terminal_jobs.len().saturating_sub(removed_jobs);
+
     let mut removed_log_files = 0_usize;
     for job in &plan.terminal_jobs {
         let log_path = PathBuf::from(&job.logs_path);
@@ -7146,18 +7418,6 @@ pub fn flush_jobs_cache(
     let removed_cache_entries =
         clear_dir_entries_detailed(&paths.cache_dir(), "cache_entry", &mut failed_paths)?;
 
-    let removable_job_ids: Vec<String> = plan
-        .terminal_jobs
-        .iter()
-        .filter(|job| !failed_job_ids.contains(&job.job_id))
-        .map(|job| job.job_id.clone())
-        .collect();
-    let kept_jobs_due_to_failures = plan
-        .terminal_jobs
-        .len()
-        .saturating_sub(removable_job_ids.len());
-    let removed_jobs = delete_terminal_jobs_by_ids(paths, &removable_job_ids)?;
-
     Ok(JobCleanupSummary {
         removed_jobs,
         kept_jobs_due_to_failures,
@@ -7178,6 +7438,287 @@ pub fn flush_jobs_cache(
         removed_cache_entries,
         failed_paths,
     })
+}
+
+/// WP-0320: backup-first purge of old terminal job-history rows, so the `job` table (and the
+/// diagnostics/queue queries that scale with it) does not grow unbounded forever. Localization
+/// job types are excluded by construction (`PURGEABLE_TERMINAL_JOB_TYPES` is an allow-list, not
+/// a deny-list) because their downstream tables use `ON DELETE RESTRICT`.
+///
+/// Selection: `status IN (failed, canceled[, succeeded])` AND `type IN` the purgeable allow-list
+/// AND `created_at_ms < now - older_than_days*86_400_000` (`older_than_days == 0` means "no age
+/// filter", i.e. every eligible terminal row regardless of age).
+///
+/// Execution order (never queued/running rows; never a localization row):
+/// 1. Read-only: compute `counts_by_type_status` and, unless `dry_run`, the exact `(id,
+///    logs_path)` selection. A dry run stops here and never opens a write connection.
+/// 2. Write the pre-purge backup via `VACUUM INTO` (see [`create_pre_purge_backup`]).
+/// 3. Delete the selected rows in chunks of at most [`PURGE_TERMINAL_HISTORY_CHUNK_SIZE`] ids,
+///    each chunk its own committed transaction (via the existing [`delete_terminal_jobs_by_ids`]).
+/// 4. Only after every chunk has committed, best-effort remove the log files and artifact dirs
+///    for the deleted ids (same helpers `flush_jobs_cache` uses), so a failure here can never
+///    leave a row pointing at a file that no longer exists, nor abort an already-committed purge.
+pub fn purge_terminal_job_history(
+    paths: &AppPaths,
+    older_than_days: u32,
+    include_succeeded: bool,
+    dry_run: bool,
+) -> Result<PurgeTerminalHistoryReceipt> {
+    let mut statuses: Vec<&'static str> =
+        vec![JobStatus::Failed.as_str(), JobStatus::Canceled.as_str()];
+    if include_succeeded {
+        statuses.push(JobStatus::Succeeded.as_str());
+    }
+    let cutoff_ms = if older_than_days == 0 {
+        i64::MAX
+    } else {
+        now_ms().saturating_sub(i64::from(older_than_days).saturating_mul(86_400_000))
+    };
+    let purgeable_types: Vec<&'static str> = PURGEABLE_TERMINAL_JOB_TYPES
+        .iter()
+        .map(|job_type| job_type.as_str())
+        .collect();
+    let type_placeholders = vec!["?"; purgeable_types.len()].join(",");
+    let status_placeholders = vec!["?"; statuses.len()].join(",");
+    let filter_params: Vec<&str> = purgeable_types
+        .iter()
+        .copied()
+        .chain(statuses.iter().copied())
+        .collect();
+
+    let (counts_by_type_status, matching_rows) = {
+        let conn = db::open_readonly(paths)?;
+        let count_sql = format!(
+            "SELECT type, status, COUNT(*) FROM job WHERE type IN ({type_placeholders}) \
+             AND status IN ({status_placeholders}) AND created_at_ms < {cutoff_ms} \
+             GROUP BY type, status"
+        );
+        let mut count_stmt = conn.prepare(&count_sql)?;
+        let counts = count_stmt
+            .query_map(rusqlite::params_from_iter(filter_params.iter()), |row| {
+                Ok(PurgeTerminalHistoryCountRow {
+                    job_type: row.get(0)?,
+                    status: row.get(1)?,
+                    count: row.get::<_, i64>(2)?.max(0) as u64,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(count_stmt);
+
+        let mut rows: Vec<(String, String)> = Vec::new();
+        if !dry_run {
+            let id_sql = format!(
+                "SELECT id, logs_path FROM job WHERE type IN ({type_placeholders}) \
+                 AND status IN ({status_placeholders}) AND created_at_ms < {cutoff_ms} \
+                 ORDER BY id"
+            );
+            let mut id_stmt = conn.prepare(&id_sql)?;
+            let mut query_rows =
+                id_stmt.query(rusqlite::params_from_iter(filter_params.iter()))?;
+            while let Some(row) = query_rows.next()? {
+                rows.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
+            }
+        }
+        (counts, rows)
+    };
+    let total: u64 = counts_by_type_status.iter().map(|row| row.count).sum();
+
+    if dry_run || matching_rows.is_empty() {
+        return Ok(PurgeTerminalHistoryReceipt {
+            dry_run,
+            counts_by_type_status,
+            total,
+            backup_path: None,
+            deleted: 0,
+        });
+    }
+
+    let backup_path = create_pre_purge_backup(paths)?;
+
+    let ids: Vec<String> = matching_rows.iter().map(|(id, _)| id.clone()).collect();
+    let mut deleted = 0_u64;
+    for chunk in ids.chunks(PURGE_TERMINAL_HISTORY_CHUNK_SIZE) {
+        // Each chunk is its own short write; when the writer lane is briefly busy (downloads,
+        // subscription sync), wait and retry the same chunk instead of abandoning the purge.
+        let mut attempt = 0_u32;
+        loop {
+            match delete_terminal_jobs_by_ids(paths, chunk) {
+                Ok(count) => {
+                    deleted += count as u64;
+                    break;
+                }
+                Err(error)
+                    if attempt < PURGE_TERMINAL_HISTORY_CHUNK_RETRIES
+                        && error.to_string().contains("writer_admission_timeout") =>
+                {
+                    attempt += 1;
+                    std::thread::sleep(Duration::from_secs(2));
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    // Best-effort file cleanup after every chunk has committed. Failures here are intentionally
+    // swallowed (mirroring `flush_jobs_cache`'s per-file failure tracking, minus the bookkeeping
+    // this call site has no receipt field for): the durable row truth is already committed, and
+    // a leftover file is inert and safely re-collectible by a later `flush_jobs_cache` pass.
+    let mut ignored_failed_paths: Vec<JobCleanupFailure> = Vec::new();
+    let mut ignored_failed_job_ids: HashSet<String> = HashSet::new();
+    for (job_id, logs_path) in &matching_rows {
+        let log_path = PathBuf::from(logs_path);
+        let _ = remove_job_log_files_detailed(
+            &log_path,
+            &mut ignored_failed_paths,
+            &mut ignored_failed_job_ids,
+            Some(job_id),
+        );
+        let artifacts_dir = paths.job_artifacts_dir(job_id);
+        if artifacts_dir.exists() {
+            let _ = remove_path_recursively(&artifacts_dir, "job_artifacts", &mut ignored_failed_paths);
+        }
+    }
+
+    Ok(PurgeTerminalHistoryReceipt {
+        dry_run,
+        counts_by_type_status,
+        total,
+        backup_path: Some(backup_path),
+        deleted,
+    })
+}
+
+/// Writes `<db_dir>/backups/pre_purge_<yyyymmdd_hhmmss>.sqlite` via `VACUUM INTO`, run through
+/// the app database runtime's bounded writer admission (the same serialized lane every other
+/// production write uses) rather than a raw ad-hoc connection, so a backup can never race a
+/// concurrent business write. `VACUUM INTO` manages its own internal transaction and must not be
+/// wrapped in an explicit `BEGIN`, so this uses the raw `write_context` connection directly
+/// instead of the `.write()` transaction-closure helper.
+fn create_pre_purge_backup(paths: &AppPaths) -> Result<String> {
+    let backups_dir = paths.db_dir().join("backups");
+    std::fs::create_dir_all(&backups_dir)?;
+    let backup_path = backups_dir.join(format!(
+        "pre_purge_{}.sqlite",
+        format_yyyymmdd_hhmmss_utc(now_ms())
+    ));
+    let backup_path_str = backup_path.to_string_lossy().to_string();
+    if backup_path.exists() {
+        std::fs::remove_file(&backup_path)?;
+    }
+    // `VACUUM INTO` only needs a read transaction. Taking it through the single writer lane held
+    // every other write (runner, subscription sync, the purge's own chunks) for the ~90 s a
+    // 1.2 GB copy takes, which failed them with `writer_admission_timeout` (live, 2026-09-23).
+    // The read context is opened SQLITE_OPEN_READ_ONLY *and* `query_only`; SQLite rejects
+    // `VACUUM INTO` under `query_only` even though it only writes the separate target file, so
+    // lift that pragma for this one statement. The read-only open flag still makes any write to
+    // the live database impossible.
+    let conn = db::open_readonly(paths)?;
+    conn.pragma_update(None, "query_only", "OFF")?;
+    let vacuum = conn.execute("VACUUM INTO ?1", params![backup_path_str]);
+    let restore = conn.pragma_update(None, "query_only", "ON");
+    vacuum?;
+    restore?;
+    drop(conn);
+    prune_pre_purge_backups(paths, &backups_dir, &backup_path);
+    Ok(backup_path_str)
+}
+
+/// WP-0321 S5: full-database backups accumulate forever otherwise (11 observed live). After a
+/// successful new backup, keep only the newest [`PRE_PURGE_BACKUP_RETENTION`] files that match
+/// this function's own naming pattern (`pre_purge_<yyyymmdd_hhmmss>.sqlite`) in `backups_dir`,
+/// deleting older ones. Anything that does not match the exact app-created pattern is left alone
+/// untouched, and the file just written is never a deletion candidate. Best-effort: a pruning
+/// failure must never fail the backup that already succeeded.
+const PRE_PURGE_BACKUP_RETENTION: usize = 3;
+
+fn is_pre_purge_backup_filename(file_name: &str) -> bool {
+    let Some(stamp) = file_name
+        .strip_prefix("pre_purge_")
+        .and_then(|rest| rest.strip_suffix(".sqlite"))
+    else {
+        return false;
+    };
+    // yyyymmdd_hhmmss: 8 digits, underscore, 6 digits.
+    let bytes = stamp.as_bytes();
+    bytes.len() == 15
+        && bytes[8] == b'_'
+        && bytes[..8].iter().all(u8::is_ascii_digit)
+        && bytes[9..].iter().all(u8::is_ascii_digit)
+}
+
+fn prune_pre_purge_backups(paths: &AppPaths, backups_dir: &Path, just_written: &Path) {
+    let entries = match std::fs::read_dir(backups_dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+    let mut candidates: Vec<(String, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == just_written {
+            continue;
+        }
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !is_pre_purge_backup_filename(file_name) {
+            continue;
+        }
+        candidates.push((file_name.to_string(), path));
+    }
+    // File names sort lexicographically in timestamp order (yyyymmdd_hhmmss), so a plain string
+    // sort orders oldest-first without touching the filesystem again.
+    candidates.sort_by(|a, b| a.0.cmp(&b.0));
+    let retained_slots = PRE_PURGE_BACKUP_RETENTION.saturating_sub(1); // the just-written file fills one slot
+    if candidates.len() <= retained_slots {
+        return;
+    }
+    let prune_count = candidates.len() - retained_slots;
+    let mut pruned: Vec<String> = Vec::new();
+    for (file_name, path) in candidates.into_iter().take(prune_count) {
+        if std::fs::remove_file(&path).is_ok() {
+            pruned.push(file_name);
+        }
+    }
+    if !pruned.is_empty() {
+        append_engine_diagnostics_trace_row_best_effort(
+            paths,
+            "pre_purge_backup_rotation_pruned",
+            "info",
+            serde_json::json!({
+                "retained": PRE_PURGE_BACKUP_RETENTION,
+                "pruned_count": pruned.len(),
+                "pruned_files": pruned,
+            }),
+        );
+    }
+}
+
+/// Self-contained UTC `yyyymmdd_hhmmss` formatter (no new date/time dependency, matching the
+/// existing `chrono_yyyymmdd_hhmmss` helper in `bin/voxvulgi_offline_bundle_prep.rs`).
+pub(crate) fn format_yyyymmdd_hhmmss_utc(now_ms: i64) -> String {
+    let secs = now_ms.max(0) / 1_000;
+    let days = secs / 86_400;
+    let seconds_of_day = secs % 86_400;
+    let (year, month, day) = civil_date_from_days_since_epoch(days);
+    let hour = seconds_of_day / 3_600;
+    let minute = (seconds_of_day % 3_600) / 60;
+    let second = seconds_of_day % 60;
+    format!("{year:04}{month:02}{day:02}_{hour:02}{minute:02}{second:02}")
+}
+
+// Howard Hinnant's civil-from-days (public domain), day 0 = 1970-01-01.
+fn civil_date_from_days_since_epoch(days: i64) -> (i64, i64, i64) {
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { y + 1 } else { y };
+    (year, month, day)
 }
 
 pub fn clear_failed_jobs_for_item(
@@ -7337,7 +7878,113 @@ fn build_job_cleanup_plan(paths: &AppPaths) -> Result<JobCleanupPlan> {
     })
 }
 
+
+static ACTIVE_DOWNLOAD_EXECUTIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+static DOWNLOAD_RESTART_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+struct DownloadExecutionGuard(String);
+impl Drop for DownloadExecutionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut active) = ACTIVE_DOWNLOAD_EXECUTIONS.get_or_init(Default::default).lock() {
+            active.remove(&self.0);
+        }
+    }
+}
+fn download_execution_key(paths: &AppPaths, job_id: &str) -> String {
+    format!("{}:{job_id}", paths.base_dir.display())
+}
+
+fn merge_download_pacing(value: &mut serde_json::Value, preset: &config::DownloadPreset) {
+    value["format_preference"] = "bv*+ba/b".into();
+    value["quality_preference"] = "best".into();
+    value["subtitle_mode"] = "auto".into();
+    value["yt_dlp_sleep_requests"] = preset.yt_dlp_sleep_requests.into();
+    value["yt_dlp_sleep_interval"] = preset.yt_dlp_sleep_interval.into();
+    value["yt_dlp_concurrent_fragments"] = preset.yt_dlp_concurrent_fragments.into();
+    value["yt_dlp_retries"] = preset.yt_dlp_retries.into();
+    value["yt_dlp_fragment_retries"] = preset.yt_dlp_fragment_retries.into();
+    value["yt_dlp_file_access_retries"] = preset.yt_dlp_file_access_retries.into();
+    value["yt_dlp_limit_rate"] = serde_json::json!(preset.yt_dlp_limit_rate);
+    value["yt_dlp_throttled_rate"] = serde_json::json!(preset.yt_dlp_throttled_rate);
+}
+
+pub fn current_download_pacing_params(paths: &AppPaths, params: &str) -> Result<String> {
+    let mut value: serde_json::Value = serde_json::from_str(params)?;
+    if !value.is_object() { return Err(EngineError::InstallFailed("download parameters must be an object".into())); }
+    let preset = resolve_download_preset(paths, value.get("preset_id").and_then(|v| v.as_str()))?;
+    merge_download_pacing(&mut value, &preset);
+    Ok(serde_json::to_string(&value)?)
+}
+
+/// WP-0321 S6: recoverable in-place restart of the current attempt. The job stays one durable
+/// row per video; there is no "replacement" row to return anymore.
+/// - Queued, never started: idempotent — rewrite pacing params in place, same attempt.
+/// - Running, owned by this process: cancel, wait for the worker to drain, then reopen (new
+///   attempt) via `retry_job`.
+/// - Failed/canceled: reopen (new attempt) via `retry_job`.
+/// - Succeeded: refused.
+/// This only interrupts workers owned by this process; a foreign/stale running row is refused.
+pub fn restart_download_current(paths: &AppPaths, job_id: &str) -> Result<JobRow> {
+    let _guard = DOWNLOAD_RESTART_LOCK.get_or_init(|| Mutex::new(())).lock()
+        .map_err(|_| EngineError::InstallFailed("download recovery lock poisoned".into()))?;
+    let original = get_job(paths, job_id)?.ok_or_else(|| EngineError::InstallFailed("job not found".into()))?;
+    if original.job_type != "download_direct_url" {
+        return Err(EngineError::InstallFailed("restart_current supports direct video downloads only".into()));
+    }
+    if original.status == JobStatus::Succeeded {
+        return Err(EngineError::InstallFailed("completed downloads are not restarted".into()));
+    }
+    let updated = current_download_pacing_params(paths, &original.params_json)?;
+    if let Some(key) = youtube_auth_key_from_download_params_json(paths, &updated)? {
+        ensure_youtube_auth_not_blocked(paths, Some(&key))?;
+    }
+
+    if original.status == JobStatus::Queued {
+        // Idempotent: never started, so there is nothing to cancel/drain and no new attempt is
+        // needed. Rewrite the pacing params for the same queued row and return it unchanged
+        // otherwise (identity, attempt_no, created_at_ms all stay put).
+        let conn = db::write_context(paths)?;
+        conn.execute(
+            "UPDATE job SET params_json=?2 WHERE id=?1 AND status='queued'",
+            params![job_id, &updated],
+        )?;
+        drop(conn);
+        return get_job(paths, job_id)?
+            .ok_or_else(|| EngineError::InstallFailed("job not found".into()));
+    }
+
+    let execution_key = download_execution_key(paths, job_id);
+    if original.status == JobStatus::Running {
+        let owned = ACTIVE_DOWNLOAD_EXECUTIONS.get_or_init(Default::default).lock()
+            .map_err(|_| EngineError::InstallFailed("execution registry unavailable".into()))?
+            .contains(&execution_key);
+        if !owned { return Err(EngineError::InstallFailed("running worker ownership is unverified; no job stopped".into())); }
+        cancel_job(paths, job_id)?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let active = ACTIVE_DOWNLOAD_EXECUTIONS.get_or_init(Default::default).lock()
+                .map_err(|_| EngineError::InstallFailed("execution registry unavailable".into()))?
+                .contains(&execution_key);
+            if !active { break; }
+            if std::time::Instant::now() >= deadline {
+                return Err(EngineError::InstallFailed("original canceled; worker still draining; repeat restart_current for this original to finish recovery".into()));
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    }
+    // Failed/canceled (including just-drained running): reopen in place as a new attempt.
+    retry_job(paths, job_id)
+}
+
 pub fn retry_job(paths: &AppPaths, job_id: &str) -> Result<JobRow> {
+    retry_job_internal(paths, job_id).map(|(row, _reopened)| row)
+}
+
+/// WP-0321 S6: like `retry_job`, but also reports whether the returned row is a same-row reopen
+/// (download) rather than a freshly enqueued linked replacement (every other job type). Batch
+/// retry accounting needs this so a reopened row is counted as newly queued instead of "active
+/// already reused", since it never appears in `active_before`/`retryable` as a distinct id.
+fn retry_job_internal(paths: &AppPaths, job_id: &str) -> Result<(JobRow, bool)> {
     let conn = db::open_readonly(paths)?;
 
     let (type_str, status_str, params_json, batch_id, persisted_track, legacy_lane): (
@@ -7378,24 +8025,109 @@ pub fn retry_job(paths: &AppPaths, job_id: &str) -> Result<JobRow> {
 
     if matches!(status, JobStatus::Queued | JobStatus::Running) {
         if let Some(job) = get_job(paths, job_id)? {
-            return Ok(job);
-        }
-    }
-
-    if matches!(job_type, JobType::DownloadDirectUrl) {
-        if let Some(auth_key) = youtube_auth_key_from_download_params_json(paths, &params_json)? {
-            ensure_youtube_auth_not_blocked(paths, Some(&auth_key))?;
-        }
-        if let Some(key) = direct_download_retry_key_from_params(&params_json) {
-            if let Some(active) = active_direct_download_retry_for_key(&conn, job_id, &key)? {
-                drop(conn);
-                link_retry_jobs(paths, job_id, &active.id, false)?;
-                return Ok(active);
-            }
+            return Ok((job, false));
         }
     }
     drop(conn);
 
+    // WP-0321 S6: `download_direct_url` is one durable row per video. Retry reopens this exact
+    // row in place instead of inserting a linked replacement, so it stays keyed by the same
+    // `target_key` and keeps the same identity across attempts.
+    if matches!(job_type, JobType::DownloadDirectUrl) {
+        if let Some(auth_key) = youtube_auth_key_from_download_params_json(paths, &params_json)? {
+            ensure_youtube_auth_not_blocked(paths, Some(&auth_key))?;
+        }
+        let execution_key = download_execution_key(paths, job_id);
+        let draining = ACTIVE_DOWNLOAD_EXECUTIONS
+            .get_or_init(Default::default)
+            .lock()
+            .map_err(|_| EngineError::InstallFailed("execution registry unavailable".into()))?
+            .contains(&execution_key);
+        if draining {
+            return Err(EngineError::InstallFailed(
+                "a worker is still draining this download; retry again once it finishes"
+                    .to_string(),
+            ));
+        }
+        // Same canonical claim as the pre-S6 retry and every fresh submission: a retry must never
+        // bypass duplicate prevention, missing-file approval, or an operator deletion (WP-0284).
+        let direct: DownloadDirectUrlParams = serde_json::from_str(&params_json)?;
+        match library::claim_download_source(
+            paths,
+            &direct.url,
+            job_id,
+            true,
+            false,
+            if direct.subscription_id.is_some() {
+                "subscription"
+            } else {
+                "single"
+            },
+            direct.subscription_id.as_deref(),
+        )? {
+            library::DownloadSourceClaim::Claimed => {}
+            library::DownloadSourceClaim::Active(active_job_id) => {
+                if let Some(active) = get_job(paths, &active_job_id)? {
+                    return Ok((active, false));
+                }
+                return Err(EngineError::InstallFailed(
+                    "the canonical source is already being claimed for download".to_string(),
+                ));
+            }
+            library::DownloadSourceClaim::Present(item_id) => {
+                return Err(EngineError::InstallFailed(format!(
+                    "duplicate prevented: canonical media is already present in library item {item_id}"
+                )));
+            }
+            library::DownloadSourceClaim::Missing(_) => {
+                return Err(EngineError::InstallFailed(
+                    "the missing canonical media requires explicit redownload approval".to_string(),
+                ));
+            }
+            library::DownloadSourceClaim::OperatorDeleted(_) => {
+                return Err(EngineError::InstallFailed(
+                    "operator-deleted media requires an explicit selected-item redownload"
+                        .to_string(),
+                ));
+            }
+        }
+        let reopen_params_json = current_download_pacing_params(paths, &params_json)?;
+        let mut reopen_conn = db::write_context(paths)?;
+        let tx = reopen_conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = reopen_terminal_download_conn(
+            &tx,
+            job_id,
+            &reopen_params_json,
+            batch_id.as_deref(),
+            track,
+            track.legacy_lane().as_str(),
+        )?;
+        if !changed {
+            tx.commit()?;
+            drop(reopen_conn);
+            // The claim above was taken for a row that did not reopen; give it back.
+            let _ = library::release_download_source_claim(paths, job_id, None, None);
+            return Err(EngineError::InstallFailed(
+                "job is no longer terminal; another process already retried or claimed it"
+                    .to_string(),
+            ));
+        }
+        tx.commit()?;
+        drop(reopen_conn);
+        let row = get_job(paths, job_id)?.ok_or_else(|| {
+            EngineError::InstallFailed(format!(
+                "reopened job {job_id} vanished before it could be read back"
+            ))
+        })?;
+        return Ok((row, true));
+    }
+
+    // A retry uses current pacing, while preserving source, destination and media choices.
+    let params_json = if matches!(job_type, JobType::DownloadDirectUrl) {
+        current_download_pacing_params(paths, &params_json)?
+    } else {
+        params_json
+    };
     let item_id = match job_type {
         JobType::AsrLocal => serde_json::from_str::<AsrLocalParams>(&params_json)
             .ok()
@@ -7452,53 +8184,10 @@ pub fn retry_job(paths: &AppPaths, job_id: &str) -> Result<JobRow> {
         _ => None,
     };
 
-    // Re-enqueue with identical params and the source's persisted/canonical track. Direct media
-    // retries participate in the same canonical claim as fresh single/subscription submissions;
-    // otherwise a retry button could bypass duplicate prevention while another ingress owned it.
+    // Re-enqueue with identical params and the source's persisted/canonical track. `download_direct_url`
+    // always returns above via the reopen path, so `job_type` here is never `DownloadDirectUrl`
+    // and this insert+link path stays the retry semantics for every other job type.
     let retry_id = Uuid::new_v4().to_string();
-    if matches!(job_type, JobType::DownloadDirectUrl) {
-        let direct: DownloadDirectUrlParams = serde_json::from_str(&params_json)?;
-        match library::claim_download_source(
-            paths,
-            &direct.url,
-            &retry_id,
-            true,
-            false,
-            if direct.subscription_id.is_some() {
-                "subscription"
-            } else {
-                "single"
-            },
-            direct.subscription_id.as_deref(),
-        )? {
-            library::DownloadSourceClaim::Claimed => {}
-            library::DownloadSourceClaim::Active(active_job_id) => {
-                if let Some(active) = get_job(paths, &active_job_id)? {
-                    link_retry_jobs(paths, job_id, &active.id, false)?;
-                    return Ok(active);
-                }
-                return Err(EngineError::InstallFailed(
-                    "the canonical source is already being claimed for download".to_string(),
-                ));
-            }
-            library::DownloadSourceClaim::Present(item_id) => {
-                return Err(EngineError::InstallFailed(format!(
-                    "duplicate prevented: canonical media is already present in library item {item_id}"
-                )));
-            }
-            library::DownloadSourceClaim::Missing(_) => {
-                return Err(EngineError::InstallFailed(
-                    "the missing canonical media requires explicit redownload approval".to_string(),
-                ));
-            }
-            library::DownloadSourceClaim::OperatorDeleted(_) => {
-                return Err(EngineError::InstallFailed(
-                    "operator-deleted media requires an explicit selected-item redownload"
-                        .to_string(),
-                ));
-            }
-        }
-    }
     let mut retry = match enqueue_with_type_item_batch_track_and_id(
         paths,
         job_type,
@@ -7516,7 +8205,7 @@ pub fn retry_job(paths: &AppPaths, job_id: &str) -> Result<JobRow> {
     };
     link_retry_jobs(paths, job_id, &retry.id, true)?;
     retry.retry_of_job_id = Some(job_id.to_string());
-    Ok(retry)
+    Ok((retry, false))
 }
 
 fn link_retry_jobs(
@@ -7692,9 +8381,14 @@ pub fn retry_failed_jobs_for_batch(
         if index > 0 && index % BATCH_RETRY_CHUNK_SIZE == 0 {
             thread::sleep(Duration::from_millis(BATCH_RETRY_CHUNK_YIELD_MS));
         }
-        match retry_job(paths, job_id) {
-            Ok(row) => {
-                if active_before.contains(&row.id)
+        match retry_job_internal(paths, job_id) {
+            Ok((row, reopened)) => {
+                // WP-0321 S6: a reopened download keeps its original id, which is always in
+                // `retryable` (it is the row being retried). That must count as newly queued, not
+                // as "already active/reused" — it was terminal a moment ago.
+                if reopened {
+                    queued_jobs += 1;
+                } else if active_before.contains(&row.id)
                     || returned_ids.contains(&row.id)
                     || retryable.contains(&row.id)
                 {
@@ -7729,9 +8423,12 @@ pub fn retry_failed_jobs_for_batch(
 }
 
 fn resolve_job_batch_id(conn: &rusqlite::Connection, batch_id_or_prefix: &str) -> Result<String> {
+    // WP-0321 S6: a batch whose downloads have all been reopened into a newer batch only
+    // survives in `job_attempt` history, so both tables name valid batches.
     let exact = conn
         .query_row(
-            "SELECT batch_id FROM job WHERE batch_id=?1 LIMIT 1",
+            "SELECT batch_id FROM job WHERE batch_id=?1 \
+             UNION ALL SELECT batch_id FROM job_attempt WHERE batch_id=?1 LIMIT 1",
             [batch_id_or_prefix],
             |row| row.get::<_, String>(0),
         )
@@ -7743,9 +8440,13 @@ fn resolve_job_batch_id(conn: &rusqlite::Connection, batch_id_or_prefix: &str) -
     let like = format!("{batch_id_or_prefix}%");
     let mut stmt = conn.prepare(
         r#"
-SELECT DISTINCT batch_id
-FROM job
-WHERE batch_id IS NOT NULL AND TRIM(batch_id) <> '' AND batch_id LIKE ?1
+SELECT batch_id FROM (
+  SELECT batch_id FROM job
+  WHERE batch_id IS NOT NULL AND TRIM(batch_id) <> '' AND batch_id LIKE ?1
+  UNION
+  SELECT batch_id FROM job_attempt
+  WHERE batch_id IS NOT NULL AND TRIM(batch_id) <> '' AND batch_id LIKE ?1
+)
 ORDER BY batch_id ASC
 LIMIT 3
 "#,
@@ -7815,57 +8516,6 @@ fn youtube_direct_download_is_held(paths: &AppPaths, params_json: &str) -> bool 
         .unwrap_or(false)
 }
 
-fn active_direct_download_retry_for_key(
-    conn: &rusqlite::Connection,
-    source_job_id: &str,
-    key: &str,
-) -> Result<Option<JobRow>> {
-    let mut stmt = conn.prepare(
-        r#"
-SELECT
-  id,
-  item_id,
-  batch_id,
-  type,
-  status,
-  progress,
-  error,
-  created_at_ms,
-  started_at_ms,
-  finished_at_ms,
-  logs_path,
-  params_json,
-  target_title,
-  retry_of_job_id,
-  retry_replacement_job_id,
-  track
-FROM job
-WHERE type=?1 AND id<>?2 AND status IN (?3, ?4)
-ORDER BY created_at_ms ASC
-"#,
-    )?;
-    let rows = stmt
-        .query_map(
-            params![
-                JobType::DownloadDirectUrl.as_str(),
-                source_job_id,
-                JobStatus::Queued.as_str(),
-                JobStatus::Running.as_str()
-            ],
-            job_row_from_query_row,
-        )?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-
-    for mut row in rows {
-        if direct_download_retry_key_from_params(&row.params_json).as_deref() == Some(key) {
-            hydrate_job_target_titles(conn, std::slice::from_mut(&mut row))?;
-            return Ok(Some(row));
-        }
-    }
-
-    Ok(None)
-}
-
 fn job_rows_for_batch_conn(conn: &rusqlite::Connection, batch_id: &str) -> Result<Vec<JobRow>> {
     let mut stmt = conn.prepare(
         r#"
@@ -7885,10 +8535,93 @@ SELECT
   target_title,
   retry_of_job_id,
   retry_replacement_job_id,
-  track
+  track,
+  attempt_no
 FROM job
 WHERE batch_id=?1
 ORDER BY created_at_ms ASC
+"#,
+    )?;
+    let mut rows = stmt
+        .query_map([batch_id], job_row_from_query_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    hydrate_job_target_titles(conn, &mut rows)?;
+    Ok(rows)
+}
+
+/// WP-0321 S6: all historical attempts for one job id, regardless of which batch each attempt ran
+/// under. Used by job-detail (as opposed to batch-detail, which scopes history to one batch_id).
+fn job_attempt_history_rows_for_job_conn(
+    conn: &rusqlite::Connection,
+    job_id: &str,
+) -> Result<Vec<JobRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+SELECT
+  ja.job_id,
+  j.item_id,
+  ja.batch_id,
+  j.type,
+  ja.status,
+  0.0,
+  ja.error,
+  ja.created_at_ms,
+  ja.started_at_ms,
+  ja.finished_at_ms,
+  ja.logs_path,
+  j.params_json,
+  j.target_title,
+  NULL,
+  NULL,
+  ja.track,
+  ja.attempt_no
+FROM job_attempt ja
+JOIN job j ON j.id = ja.job_id
+WHERE ja.job_id=?1
+ORDER BY ja.created_at_ms ASC
+"#,
+    )?;
+    let mut rows = stmt
+        .query_map([job_id], job_row_from_query_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    hydrate_job_target_titles(conn, &mut rows)?;
+    Ok(rows)
+}
+
+/// WP-0321 S6: historical attempts for a batch now live in `job_attempt`, keyed by the
+/// `batch_id` each attempt ran under (which can differ from the job's *current* `batch_id` once
+/// a later attempt reopened the row into a different batch — see the "fanout" case in the S6
+/// design). Synthesizes a `JobRow` per attempt from durable per-job fields (`params_json`,
+/// `item_id`, `target_title`, `type`) joined with that attempt's own outcome fields; lineage
+/// fields do not apply to a same-row attempt so they are always `None`.
+fn job_attempt_history_rows_for_batch_conn(
+    conn: &rusqlite::Connection,
+    batch_id: &str,
+) -> Result<Vec<JobRow>> {
+    let mut stmt = conn.prepare(
+        r#"
+SELECT
+  ja.job_id,
+  j.item_id,
+  ja.batch_id,
+  j.type,
+  ja.status,
+  0.0,
+  ja.error,
+  ja.created_at_ms,
+  ja.started_at_ms,
+  ja.finished_at_ms,
+  ja.logs_path,
+  j.params_json,
+  j.target_title,
+  NULL,
+  NULL,
+  ja.track,
+  ja.attempt_no
+FROM job_attempt ja
+JOIN job j ON j.id = ja.job_id
+WHERE ja.batch_id=?1
+ORDER BY ja.created_at_ms ASC
 "#,
     )?;
     let mut rows = stmt
@@ -7920,7 +8653,8 @@ SELECT
   target_title,
   retry_of_job_id,
   retry_replacement_job_id,
-  track
+  track,
+  attempt_no
 FROM job
 WHERE id=?1
 "#,
@@ -7960,9 +8694,38 @@ SELECT
   target_title,
   retry_of_job_id,
   retry_replacement_job_id,
-  track
+  track,
+  attempt_no
 FROM job
 WHERE batch_id=?1
+ORDER BY created_at_ms ASC
+"#,
+        )?
+    } else if canonical_key.starts_with("download_direct_url:") {
+        // WP-0321 S6: this shape is the target_key identity, which is indexed. Skip the
+        // full-table scan the string-match retain below needs for every other key shape.
+        conn.prepare(
+            r#"
+SELECT
+  id,
+  item_id,
+  batch_id,
+  type,
+  status,
+  progress,
+  error,
+  created_at_ms,
+  started_at_ms,
+  finished_at_ms,
+  logs_path,
+  params_json,
+  target_title,
+  retry_of_job_id,
+  retry_replacement_job_id,
+  track,
+  attempt_no
+FROM job
+WHERE target_key=?1
 ORDER BY created_at_ms ASC
 "#,
         )?
@@ -7985,7 +8748,8 @@ SELECT
   target_title,
   retry_of_job_id,
   retry_replacement_job_id,
-  track
+  track,
+  attempt_no
 FROM job
 ORDER BY created_at_ms ASC
 "#,
@@ -7994,16 +8758,34 @@ ORDER BY created_at_ms ASC
     let mut rows = if let Some(batch_id) = batch_id {
         stmt.query_map([batch_id], job_row_from_query_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?
+    } else if canonical_key.starts_with("download_direct_url:") {
+        stmt.query_map([canonical_key], job_row_from_query_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?
     } else {
         stmt.query_map([], job_row_from_query_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
-    rows.retain(|row| job_canonical_key(row) == canonical_key);
+    if batch_id.is_some() || !canonical_key.starts_with("download_direct_url:") {
+        rows.retain(|row| job_canonical_key(row) == canonical_key);
+    }
     hydrate_job_target_titles(conn, &mut rows)?;
     Ok(rows)
 }
 
 fn job_canonical_key(job: &JobRow) -> String {
+    // WP-0321 S6: `download_direct_url` now has a durable per-video identity key. Prefer it over
+    // the older ad hoc `youtube:<id>` / `url:<url>` grouping key so canonical-key lookups line up
+    // with the same partial-unique-index identity the row itself is claimed under.
+    if job.job_type == JobType::DownloadDirectUrl.as_str() {
+        if let Ok(parsed) = serde_json::from_str::<DownloadDirectUrlParams>(&job.params_json) {
+            if let Some(key) = job_target_migration::download_target_key(
+                &parsed.url,
+                parsed.canonical_source_url.as_deref(),
+            ) {
+                return key;
+            }
+        }
+    }
     if let Some(key) = direct_download_retry_key_from_params(&job.params_json) {
         return key;
     }
@@ -8125,9 +8907,12 @@ fn job_status_label(job: &JobRow, is_current_attempt: bool) -> String {
     if !is_current_attempt && matches!(job.status, JobStatus::Failed | JobStatus::Canceled) {
         return "Historical failure".to_string();
     }
+    // WP-0321 S6: a download's retry is a same-row reopen (attempt_no > 1), not a linked
+    // replacement row (retry_of_job_id). Treat either as "this is a retry" for labeling.
+    let is_retry = job.retry_of_job_id.is_some() || job.attempt_no > 1;
     match (
         &job.status,
-        job.retry_of_job_id.is_some(),
+        is_retry,
         is_youtube_auth_blocked_error(job.error.as_deref()),
     ) {
         (JobStatus::Queued, true, _) => "Current retry queued".to_string(),
@@ -8157,8 +8942,19 @@ fn build_attempt_rows(
         by_key.entry(job_canonical_key(&row)).or_default().push(row);
     }
     let mut current_by_key: HashMap<String, String> = HashMap::new();
+    // WP-0321 S6: within one canonical key, every attempt of a `download_direct_url` job now
+    // shares the same row id (it is the same row across attempts). `current_attempt_id_for_group`
+    // still correctly picks *which id* is current (trivial when the group is one id), but among
+    // rows sharing that id, the highest `attempt_no` is the live one — every lower attempt_no is
+    // a `job_attempt` history snapshot. For every pre-S6 job type each row still has its own
+    // unique id and attempt_no is always 1, so this reduces to the old id-only comparison.
+    let mut max_attempt_no_by_key: HashMap<String, u32> = HashMap::new();
     for (key, group_rows) in &by_key {
         current_by_key.insert(key.clone(), current_attempt_id_for_group(group_rows));
+        max_attempt_no_by_key.insert(
+            key.clone(),
+            group_rows.iter().map(|row| row.attempt_no).max().unwrap_or(1),
+        );
     }
 
     let mut out = Vec::new();
@@ -8168,7 +8964,12 @@ fn build_attempt_rows(
             .get(&canonical_key)
             .cloned()
             .unwrap_or_else(|| row.id.clone());
-        let is_current_attempt = row.id == current_attempt_job_id;
+        let is_current_attempt = row.id == current_attempt_job_id
+            && row.attempt_no
+                == max_attempt_no_by_key
+                    .get(&canonical_key)
+                    .copied()
+                    .unwrap_or(1);
         let item_ctx = library_item_context_conn(conn, row.item_id.as_deref())?;
         let (item_title, item_source_uri, item_media_path) = item_ctx
             .clone()
@@ -8196,9 +8997,13 @@ fn build_attempt_rows(
             .and_then(filename_from_path)
             .or_else(|| source_path.as_deref().and_then(filename_from_path));
         let has_output = has_job_output(&row, output_path.as_deref());
+        // WP-0321 S6: a historical download attempt shares its id with the live row, so acting on
+        // that id always acts on the current attempt. Only the current-attempt entry may be
+        // deleted/retried; every pre-S6 job type keeps distinct ids per attempt and is unaffected.
+        let actionable = is_current_attempt || row.job_type != JobType::DownloadDirectUrl.as_str();
         out.push(JobAttemptInspectionRow {
-            can_delete: matches!(row.status, JobStatus::Failed | JobStatus::Canceled),
-            can_retry: matches!(row.status, JobStatus::Failed | JobStatus::Canceled),
+            can_delete: actionable && matches!(row.status, JobStatus::Failed | JobStatus::Canceled),
+            can_retry: actionable && matches!(row.status, JobStatus::Failed | JobStatus::Canceled),
             blocked_by_youtube_auth: is_youtube_auth_blocked_error(row.error.as_deref()),
             has_output,
             source_title,
@@ -8310,15 +9115,20 @@ fn build_batch_health(
             .filter(|row| row.source_title.as_deref().unwrap_or("").trim().is_empty())
             .count(),
         no_output_jobs: attempts.iter().filter(|row| !row.has_output).count(),
+        // WP-0321 S6: a download's retry bumps attempt_no on the same row instead of setting
+        // retry_of_job_id on a new one; count either signal as "this attempt was a retry".
         retried_jobs: attempts
             .iter()
-            .filter(|row| row.job.retry_of_job_id.is_some())
+            .filter(|row| row.job.retry_of_job_id.is_some() || row.job.attempt_no > 1)
             .count(),
+        // WP-0321 S6: downloads never set retry_replacement_job_id anymore (there is no
+        // replacement row). "Unretried failed" is simply the current attempt sitting in a
+        // terminal failure state; a historical attempt already has a successor by definition.
         unretried_failed_jobs: attempts
             .iter()
             .filter(|row| {
-                matches!(row.job.status, JobStatus::Failed | JobStatus::Canceled)
-                    && row.job.retry_replacement_job_id.is_none()
+                row.is_current_attempt
+                    && matches!(row.job.status, JobStatus::Failed | JobStatus::Canceled)
             })
             .count(),
     }
@@ -8327,7 +9137,28 @@ fn build_batch_health(
 pub fn get_batch_detail(paths: &AppPaths, batch_id_or_prefix: &str) -> Result<JobBatchDetail> {
     let conn = db::open_readonly(paths)?;
     let batch_id = resolve_job_batch_id(&conn, batch_id_or_prefix.trim())?;
-    let rows = job_rows_for_batch_conn(&conn, &batch_id)?;
+    let mut rows = job_rows_for_batch_conn(&conn, &batch_id)?;
+    // WP-0321 S6: a reopened download can move to a different batch than the one an earlier
+    // attempt ran under ("fanout"). The current-row query above only finds jobs whose *current*
+    // batch_id matches; pull in the bounded attempt history that ran under this batch too, plus
+    // (once) the current row for any id that has since moved elsewhere, so this batch's history
+    // stays visible even after the row moved on.
+    let history_rows = job_attempt_history_rows_for_batch_conn(&conn, &batch_id)?;
+    let mut known_ids: HashSet<String> = rows.iter().map(|row| row.id.clone()).collect();
+    let moved_ids: HashSet<String> = history_rows
+        .iter()
+        .map(|row| row.id.clone())
+        .filter(|id| !known_ids.contains(id))
+        .collect();
+    if !moved_ids.is_empty() {
+        let moved_ids: Vec<String> = moved_ids.into_iter().collect();
+        for row in job_rows_by_ids_conn(&conn, &moved_ids)? {
+            if known_ids.insert(row.id.clone()) {
+                rows.push(row);
+            }
+        }
+    }
+    rows.extend(history_rows);
     let attempts = build_attempt_rows(&conn, rows)?;
     let health = build_batch_health(&batch_id, &attempts);
     Ok(JobBatchDetail { health, attempts })
@@ -8349,6 +9180,9 @@ pub fn get_job_detail(paths: &AppPaths, job_id: &str) -> Result<JobDetail> {
         job_rows_for_canonical_key_conn(&conn, &canonical_key, selected.batch_id.as_deref())?;
     if rows.is_empty() {
         rows = job_rows_by_ids_conn(&conn, &ids)?;
+    }
+    if selected.job_type == JobType::DownloadDirectUrl.as_str() {
+        rows.extend(job_attempt_history_rows_for_job_conn(&conn, &selected.id)?);
     }
     let attempts = build_attempt_rows(&conn, rows)?;
     let current_attempt_job_id = attempts
@@ -9059,6 +9893,26 @@ fn enqueue_with_type_item_batch_track_and_id_conn(
     track: JobTrack,
     id: String,
 ) -> Result<JobRow> {
+    enqueue_with_type_item_batch_track_id_and_target_key_conn(
+        conn, paths, job_type, params_json, item_id, batch_id, track, id, None,
+    )
+}
+
+/// WP-0321 S6: like `enqueue_with_type_item_batch_track_and_id_conn`, but callers that own a
+/// `download_direct_url` target identity (see `job_target_migration::download_target_key`) can
+/// stamp `target_key` so the partial unique index enforces one live/terminal-most-recent row per
+/// video. All other job types pass `None` and behave exactly as before.
+fn enqueue_with_type_item_batch_track_id_and_target_key_conn(
+    conn: &rusqlite::Connection,
+    paths: &AppPaths,
+    job_type: JobType,
+    params_json: String,
+    item_id: Option<String>,
+    batch_id: Option<String>,
+    track: JobTrack,
+    id: String,
+    target_key: Option<String>,
+) -> Result<JobRow> {
     let created_at_ms = now_ms();
     let logs_path = paths
         .job_logs_dir()
@@ -9082,8 +9936,10 @@ INSERT INTO job (
   finished_at_ms,
   logs_path,
   lane,
-  track
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
+  track,
+  target_key,
+  attempt_no
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 1)
 "#,
         params![
             &id,
@@ -9099,7 +9955,8 @@ INSERT INTO job (
             Option::<i64>::None,
             &logs_path,
             track.legacy_lane().as_str(),
-            track.as_str()
+            track.as_str(),
+            &target_key
         ],
     )?;
     Ok(JobRow {
@@ -9121,7 +9978,103 @@ INSERT INTO job (
         retry_of_job_id: None,
         retry_replacement_job_id: None,
         track: track.as_str().to_string(),
+        attempt_no: 1,
     })
+}
+
+/// WP-0321 S6: a mid-batch rollback must not delete a reopened terminal row back to nothing (that
+/// would orphan the identity/association rows this design keeps 1:1 with `target_key`). Mark it
+/// canceled with a diagnostic error instead; the row, its history, and its target_key survive.
+fn cancel_reopened_job_after_enqueue_failure(paths: &AppPaths, job_id: &str, reason: &str) {
+    if let Ok(conn) = db::write_context(paths) {
+        let _ = conn.execute(
+            "UPDATE job SET status='canceled', error=?2, finished_at_ms=?3 WHERE id=?1 AND status='queued'",
+            params![job_id, reason, now_ms()],
+        );
+    }
+}
+
+/// WP-0321 S6: read the current owner (id, status) of a `download_direct_url` target key, if any.
+fn existing_job_for_target_key(paths: &AppPaths, target_key: &str) -> Result<Option<(String, String)>> {
+    let conn = db::open_readonly(paths)?;
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT id, status FROM job WHERE target_key=?1",
+            params![target_key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    Ok(row)
+}
+
+/// WP-0321 S6: true when `err` is the partial unique index on `job.target_key` rejecting a
+/// concurrent insert for a video another thread just claimed. Callers treat this exactly like the
+/// pre-read Active case.
+fn is_target_key_unique_violation(err: &EngineError) -> bool {
+    matches!(
+        err,
+        EngineError::Database(rusqlite::Error::SqliteFailure(inner, _))
+            if inner.code == ErrorCode::ConstraintViolation
+    )
+}
+
+/// WP-0321 S6: reopen a terminal `download_direct_url` row in place for a new attempt instead of
+/// inserting a new row. Archives the current row state into `job_attempt` (trimmed to
+/// `db::JOB_ATTEMPT_HISTORY_LIMIT`, newest kept), then rewrites the row to `queued` with a fresh
+/// attempt. Returns `false` (no row changed) when the row was not terminal at write time (e.g. a
+/// worker claimed it between the caller's read and this write); the caller must treat that as
+/// Active, not as a successful reopen.
+fn reopen_terminal_download_conn(
+    conn: &rusqlite::Connection,
+    id: &str,
+    params_json: &str,
+    batch_id: Option<&str>,
+    track: JobTrack,
+    lane: &str,
+) -> Result<bool> {
+    conn.execute(
+        r#"
+INSERT INTO job_attempt (
+  job_id, attempt_no, legacy_job_id, batch_id, track, status, error,
+  created_at_ms, started_at_ms, finished_at_ms, logs_path
+)
+SELECT id, attempt_no, NULL, batch_id, track, status, error,
+       created_at_ms, started_at_ms, finished_at_ms, logs_path
+FROM job
+WHERE id=?1 AND status IN ('succeeded','failed','canceled')
+"#,
+        params![id],
+    )?;
+    conn.execute(
+        r#"
+DELETE FROM job_attempt
+WHERE job_id=?1 AND attempt_no NOT IN (
+  SELECT attempt_no FROM job_attempt WHERE job_id=?1 ORDER BY attempt_no DESC LIMIT ?2
+)
+"#,
+        params![id, db::JOB_ATTEMPT_HISTORY_LIMIT as i64],
+    )?;
+    let changed = conn.execute(
+        r#"
+UPDATE job
+SET status='queued',
+    progress=0.0,
+    error=NULL,
+    started_at_ms=NULL,
+    finished_at_ms=NULL,
+    created_at_ms=?2,
+    params_json=?3,
+    batch_id=?4,
+    track=?5,
+    lane=?6,
+    attempt_no=attempt_no+1,
+    retry_of_job_id=NULL,
+    retry_replacement_job_id=NULL
+WHERE id=?1 AND status IN ('succeeded','failed','canceled')
+"#,
+        params![id, now_ms(), params_json, batch_id, track.as_str(), lane],
+    )?;
+    Ok(changed == 1)
 }
 
 fn enqueue_import_child_if_parent_active(
@@ -9783,13 +10736,154 @@ fn update_youtube_gate_runtime(
 
 fn youtube_gate_snapshot(paths: &AppPaths) -> YoutubeSharedGateSnapshot {
     let runtime_state = job_track_runtime_state(paths);
-    let runtime = runtime_state
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let (state, next_eligible_at_ms, hold_reason) = {
+        let runtime = runtime_state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        (
+            runtime.youtube_gate.state.to_string(),
+            runtime.youtube_gate.next_eligible_at_ms,
+            runtime.youtube_gate.hold_reason.map(str::to_string),
+        )
+    };
+    let policy = youtube_policy_gate_fields(paths);
+    // The runner only observes the gate while trying to dispatch YouTube work, so with an empty
+    // queue (or right after start) the runtime gate still reads "ready" during a cooldown or an
+    // open auth circuit. Project the durable policy state instead so the operator sees the pause
+    // and the next attempt time before enqueueing anything (WP-0320, simplified WP-0321 S4: only
+    // "normal"/"cooldown" modes remain; the auth circuit is projected separately).
+    let (state, next_eligible_at_ms, hold_reason) = match policy.mode.as_deref() {
+        Some("cooldown") if state == "ready" => {
+            let probe_due = policy
+                .next_eligible_probe_at_ms
+                .is_some_and(|at| at <= now_ms());
+            (
+                if probe_due { "waiting".to_string() } else { "held".to_string() },
+                policy.next_eligible_probe_at_ms,
+                Some(
+                    if probe_due {
+                        "adaptive_youtube_canary_pending"
+                    } else {
+                        "adaptive_youtube_cooldown"
+                    }
+                    .to_string(),
+                ),
+            )
+        }
+        _ => (state, next_eligible_at_ms, hold_reason),
+    };
+    let (state, next_eligible_at_ms, hold_reason) =
+        match youtube_auth_circuit_expires_at_ms(paths) {
+            Some(expires_at_ms) => (
+                "held".to_string(),
+                Some(expires_at_ms),
+                Some("youtube_auth_circuit_open".to_string()),
+            ),
+            None => (state, next_eligible_at_ms, hold_reason),
+        };
     YoutubeSharedGateSnapshot {
-        state: runtime.youtube_gate.state.to_string(),
-        next_eligible_at_ms: runtime.youtube_gate.next_eligible_at_ms,
-        hold_reason: runtime.youtube_gate.hold_reason.map(str::to_string),
+        state,
+        next_eligible_at_ms,
+        hold_reason,
+        mode: policy.mode,
+        cooldown_attempt: policy.cooldown_attempt,
+        entered_at_ms: policy.entered_at_ms,
+    }
+}
+
+/// Read-only projection of the durable download-operation policy state for the Jobs/bridge gate
+/// snapshot (WP-0320). Loads the same state the scheduler and worker consult through the
+/// existing `load_policy_state` helper; it never writes and never guesses a mode the runtime has
+/// not actually observed, so adaptive protection disabled or a lookup failure both surface as
+/// `mode: None` rather than a fabricated value.
+/// Durable download-policy facts the gate snapshot needs: mode, cooldown attempt, entry time,
+/// and the next probe time (so a cooldown is visible even when the runner has not tried to
+/// dispatch anything yet).
+#[derive(Clone)]
+struct YoutubePolicyGateFields {
+    mode: Option<String>,
+    cooldown_attempt: u32,
+    entered_at_ms: Option<i64>,
+    next_eligible_probe_at_ms: Option<i64>,
+}
+
+/// Several surfaces poll the gate snapshot; the policy epoch hashes runtime files, so the
+/// projected fields are reused for a short window. Protection transitions still surface within
+/// this window plus the UI poll interval.
+const YOUTUBE_POLICY_GATE_FIELDS_TTL: Duration = Duration::from_secs(15);
+
+type YoutubePolicyGateFieldsCache =
+    Mutex<HashMap<PathBuf, (std::time::Instant, YoutubePolicyGateFields)>>;
+
+fn youtube_policy_gate_fields_cache() -> &'static YoutubePolicyGateFieldsCache {
+    static CACHE: OnceLock<YoutubePolicyGateFieldsCache> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Operator actions that change protection state must be visible on the very next poll.
+fn invalidate_youtube_policy_gate_fields(paths: &AppPaths) {
+    youtube_policy_gate_fields_cache()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .remove(&paths.base_dir);
+}
+
+fn youtube_policy_gate_fields(paths: &AppPaths) -> YoutubePolicyGateFields {
+    let cache = youtube_policy_gate_fields_cache();
+    if let Some((at, fields)) = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(&paths.base_dir)
+    {
+        if at.elapsed() < YOUTUBE_POLICY_GATE_FIELDS_TTL {
+            return fields.clone();
+        }
+    }
+    let fields = load_youtube_policy_gate_fields(paths);
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .insert(paths.base_dir.clone(), (std::time::Instant::now(), fields.clone()));
+    fields
+}
+
+fn load_youtube_policy_gate_fields(paths: &AppPaths) -> YoutubePolicyGateFields {
+    let none = YoutubePolicyGateFields {
+        mode: None,
+        cooldown_attempt: 0,
+        entered_at_ms: None,
+        next_eligible_probe_at_ms: None,
+    };
+    let Ok(auth_fingerprint) = current_youtube_protection_auth_fingerprint(paths) else {
+        return none;
+    };
+    let runtime_epoch = youtube_protection::runtime_epoch_for_paths(paths);
+    // WP-0321 S4: one shared policy-state row for download AND enumeration.
+    let Ok(state) = youtube_protection::load_policy_state(
+        paths,
+        youtube_protection::PROVIDER_YOUTUBE,
+        youtube_protection::POLICY_STATE_OPERATION,
+        &auth_fingerprint,
+        &runtime_epoch,
+    ) else {
+        return none;
+    };
+    let cooldown_attempt = if state.mode == youtube_protection::DownloaderPolicyMode::Cooldown {
+        state.cooldown_failed_probe_count.saturating_add(1)
+    } else {
+        0
+    };
+    // A missing durable row is synthesized with `entered_at_ms = now`, so two reads a few
+    // milliseconds apart would disagree; only report an entry time the runtime actually
+    // recorded (a non-normal mode or observed evidence).
+    let entered_at_ms = (state.mode != youtube_protection::DownloaderPolicyMode::Normal
+        || state.last_evidence_at_ms.is_some())
+    .then_some(state.entered_at_ms);
+    YoutubePolicyGateFields {
+        mode: Some(state.mode.as_str().to_string()),
+        cooldown_attempt,
+        entered_at_ms,
+        next_eligible_probe_at_ms: state.next_eligible_probe_at_ms,
     }
 }
 
@@ -9829,16 +10923,9 @@ impl YoutubeStartGate {
         }
     }
 
-    fn record_start(
-        &mut self,
-        paths: &AppPaths,
-        job_id: &str,
-        track: JobTrack,
-        adaptive_min_interval_secs: u64,
-    ) -> u64 {
+    fn record_start(&mut self, paths: &AppPaths, job_id: &str, track: JobTrack) -> u64 {
         self.last_start = Some(std::time::Instant::now());
-        self.next_after_secs =
-            (recurring_download_sleep_secs(paths, job_id) as u64).max(adaptive_min_interval_secs);
+        self.next_after_secs = youtube_lane_start_interval_secs(paths, track, job_id);
         self.next_eligible_at_ms = Some(
             now_ms().saturating_add(
                 self.next_after_secs
@@ -9978,6 +11065,36 @@ fn runner_loop(
     let mut youtube_start_gate = YoutubeStartGate::new();
     let mut legacy_track_cursors = LegacyTrackFallbackCursors::default();
     let mut youtube_gate_trace_gate = YoutubeGateTraceGate::default();
+    // Never purge at startup: the first automatic retention run happens no earlier than one
+    // full interval after the runner starts, so a fresh launch can only ever be read-only until
+    // the operator has had a chance to preview the manual purge.
+    let mut last_terminal_history_retention = std::time::Instant::now();
+    // WP-0322 A: same never-at-startup shape as the retention purge above, but the first
+    // automatic export is due after one hour, not a full 24h interval.
+    let mut last_subscriptions_export = std::time::Instant::now();
+    let mut subscriptions_export_first_run_done = false;
+
+    // WP-0321 S4: one-time (idempotent) migration of legacy per-mode YouTube pacing/tuning
+    // settings into the simplified per-lane policy, before the first dispatch.
+    match youtube_protection::migrate_legacy_youtube_pacing(&paths) {
+        Ok(Some(receipt)) => {
+            append_engine_diagnostics_trace_row_best_effort(
+                &paths,
+                "youtube_legacy_pacing_migrated",
+                "info",
+                serde_json::json!({ "receipt": receipt }),
+            );
+        }
+        Ok(None) => {}
+        Err(error) => {
+            append_engine_diagnostics_trace_row_best_effort(
+                &paths,
+                "youtube_legacy_pacing_migration_failed",
+                "warn",
+                serde_json::json!({ "error": error.to_string() }),
+            );
+        }
+    }
 
     while !stop.load(Ordering::SeqCst) {
         reap_finished_worker_handles(&paths, &worker_joins);
@@ -10035,6 +11152,113 @@ fn runner_loop(
                         "remaining_candidates": state.remaining_candidates,
                     }),
                 );
+            }
+        }
+
+        // WP-0320: bounded, at-most-once-per-24h terminal job-history retention purge. This is
+        // the same periodic-housekeeping shape as the backfill blocks above (an elapsed-time
+        // gate, not true idle detection), applied here because that is where existing
+        // non-urgent runner maintenance already lives.
+        if last_terminal_history_retention.elapsed()
+            >= Duration::from_secs(TERMINAL_HISTORY_RETENTION_INTERVAL_SECS)
+        {
+            last_terminal_history_retention = std::time::Instant::now();
+            let retention_days = get_terminal_job_retention_days(&paths).unwrap_or(0);
+            // The purge backs up the whole database and can delete hundreds of thousands of
+            // rows on its first run, so it must never block dispatch: run it on its own
+            // thread and skip the tick while a previous run is still in flight.
+            if retention_days > 0
+                && !TERMINAL_HISTORY_RETENTION_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::SeqCst)
+            {
+                let paths = paths.clone();
+                std::thread::Builder::new()
+                    .name("vv-terminal-history-retention".to_string())
+                    .spawn(move || {
+                        match purge_terminal_job_history(&paths, retention_days, true, false) {
+                            Ok(receipt) => {
+                                append_engine_diagnostics_trace_row_best_effort(
+                                    &paths,
+                                    "terminal_history_retention_applied",
+                                    "info",
+                                    serde_json::json!({
+                                        "retention_days": retention_days,
+                                        "receipt": receipt,
+                                    }),
+                                );
+                            }
+                            Err(error) => {
+                                append_engine_diagnostics_trace_row_best_effort(
+                                    &paths,
+                                    "terminal_history_retention_failed",
+                                    "warn",
+                                    serde_json::json!({
+                                        "retention_days": retention_days,
+                                        "error": error.to_string(),
+                                    }),
+                                );
+                            }
+                        }
+                        TERMINAL_HISTORY_RETENTION_IN_FLIGHT
+                            .store(false, std::sync::atomic::Ordering::SeqCst);
+                    })
+                    .map(|_| ())
+                    .unwrap_or_else(|_| {
+                        TERMINAL_HISTORY_RETENTION_IN_FLIGHT
+                            .store(false, std::sync::atomic::Ordering::SeqCst);
+                    });
+            }
+        }
+
+        // WP-0322 A: daily automatic subscription export. Same periodic-housekeeping shape as
+        // the retention purge above (own thread, in-flight flag so a slow export never piles up,
+        // never blocks dispatch); first run waits `SUBSCRIPTIONS_EXPORT_FIRST_DELAY_SECS` after
+        // the runner starts, every run after that waits the full
+        // `SUBSCRIPTIONS_EXPORT_INTERVAL_SECS`.
+        let subscriptions_export_due = if subscriptions_export_first_run_done {
+            last_subscriptions_export.elapsed()
+                >= Duration::from_secs(SUBSCRIPTIONS_EXPORT_INTERVAL_SECS)
+        } else {
+            last_subscriptions_export.elapsed()
+                >= Duration::from_secs(SUBSCRIPTIONS_EXPORT_FIRST_DELAY_SECS)
+        };
+        if subscriptions_export_due {
+            last_subscriptions_export = std::time::Instant::now();
+            subscriptions_export_first_run_done = true;
+            if !SUBSCRIPTIONS_EXPORT_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                let paths = paths.clone();
+                std::thread::Builder::new()
+                    .name("vv-subscriptions-export".to_string())
+                    .spawn(move || {
+                        match subscriptions::export_subscriptions_snapshot(&paths) {
+                            Ok(receipt) => {
+                                append_engine_diagnostics_trace_row_best_effort(
+                                    &paths,
+                                    "subscriptions_export_written",
+                                    "info",
+                                    serde_json::json!({
+                                        "path": receipt.path,
+                                        "count": receipt.count,
+                                        "providers": receipt.providers,
+                                    }),
+                                );
+                            }
+                            Err(error) => {
+                                append_engine_diagnostics_trace_row_best_effort(
+                                    &paths,
+                                    "subscriptions_export_failed",
+                                    "warn",
+                                    serde_json::json!({ "error": error.to_string() }),
+                                );
+                            }
+                        }
+                        SUBSCRIPTIONS_EXPORT_IN_FLIGHT
+                            .store(false, std::sync::atomic::Ordering::SeqCst);
+                    })
+                    .map(|_| ())
+                    .unwrap_or_else(|_| {
+                        SUBSCRIPTIONS_EXPORT_IN_FLIGHT
+                            .store(false, std::sync::atomic::Ordering::SeqCst);
+                    });
             }
         }
 
@@ -10172,10 +11396,6 @@ fn runner_loop(
                             continue;
                         }
                     }
-                    let adaptive_start_interval_secs = adaptive_scheduler_policy
-                        .as_ref()
-                        .map(|policy| policy.effective.aggregate_start_interval_secs as u64)
-                        .unwrap_or(0);
                     let canary_reserved = reserve_scheduler_canary(
                         &paths,
                         &job_id,
@@ -10210,12 +11430,7 @@ fn runner_loop(
                             youtube_protection::release_cooldown_canary_for_job(&paths, &job_id);
                     }
                     if spawned {
-                        youtube_start_gate.record_start(
-                            &paths,
-                            &job_id,
-                            track,
-                            adaptive_start_interval_secs,
-                        );
+                        youtube_start_gate.record_start(&paths, &job_id, track);
                         observe_youtube_gate(
                             &paths,
                             &runtime_state,
@@ -10296,7 +11511,7 @@ fn runner_loop(
                                     &mut youtube_gate_trace_gate,
                                     "held",
                                     policy.next_eligible_probe_at_ms,
-                                    Some("adaptive_youtube_enumeration_cooldown"),
+                                    Some("adaptive_youtube_cooldown"),
                                 );
                                 continue;
                             }
@@ -11123,6 +12338,34 @@ fn claim_and_spawn_for_track(
                 "span_id": envelope.span_id,
             }),
         );
+        // WP-0321 S6: every claim starts a fresh attempt on the same durable row. Clear stale
+        // live telemetry from a previous attempt before the new worker starts writing, and record
+        // which attempt this run is for diagnostics.
+        crate::job_activity::reset(paths, &job_id);
+        let attempt_no: u32 = db::open_readonly(paths)
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT attempt_no FROM job WHERE id=?1",
+                    [&job_id],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .ok()
+                .flatten()
+            })
+            .map(|value| value.max(1) as u32)
+            .unwrap_or(1);
+        append_engine_diagnostics_trace_row_best_effort(
+            paths,
+            "attempt_started",
+            "info",
+            serde_json::json!({
+                "job_id": job_id,
+                "track": track.as_str(),
+                "attempt_no": attempt_no,
+            }),
+        );
         let paths_worker = paths.clone();
         // Construct the guard before handing it to the worker. If OS thread creation panics,
         // unwinding drops the captured guard and cannot strand this job in the envelope map.
@@ -11139,7 +12382,36 @@ fn claim_and_spawn_for_track(
                 &envelope,
             );
             if let Err(e) = result {
-                let _ = set_failed(&paths_worker, &job_id, &e.to_string());
+                // WP-0322 B1: a background subscription refresh or direct download that fails
+                // only because the shared database writer/reader lane was briefly saturated
+                // must not surface as a real job failure. Requeue it (bounded) instead of
+                // marking it failed; only give up and record a real `app busy:` failure after
+                // APP_BUSY_MAX_ATTEMPTS.
+                let err_text = e.to_string();
+                let app_busy_eligible = matches!(
+                    job_type.as_str(),
+                    "youtube_subscription_refresh_v1" | "download_direct_url"
+                );
+                if app_busy_eligible && is_app_busy_error(&err_text) {
+                    match requeue_job_for_app_busy_or_exhausted(&paths_worker, &job_id) {
+                        Ok(true) => {
+                            // Requeued for a later attempt; the job row is already back to
+                            // `queued`, so no failure bookkeeping runs here.
+                        }
+                        Ok(false) => {
+                            let _ = set_failed(
+                                &paths_worker,
+                                &job_id,
+                                &format!("app busy: {err_text}"),
+                            );
+                        }
+                        Err(_) => {
+                            let _ = set_failed(&paths_worker, &job_id, &err_text);
+                        }
+                    }
+                } else {
+                    let _ = set_failed(&paths_worker, &job_id, &err_text);
+                }
             }
         });
         worker_joins
@@ -12342,6 +13614,13 @@ fn execute_job(
     params_json: &str,
     envelope: &JobCausalEnvelope,
 ) -> Result<()> {
+    let _download_execution = if type_str == "download_direct_url" {
+        let key = download_execution_key(paths, job_id);
+        ACTIVE_DOWNLOAD_EXECUTIONS.get_or_init(Default::default).lock()
+            .map_err(|_| EngineError::InstallFailed("execution registry unavailable".into()))?
+            .insert(key.clone());
+        Some(DownloadExecutionGuard(key))
+    } else { None };
     let verification_demand_consumer = format!("job-start:{job_id}");
     let verification_demand_generation = now_ms().max(0) as u64;
     let _ = crate::tools::set_youtube_po_provider_verification_foreground_demand(
@@ -12585,7 +13864,9 @@ fn execute_job(
         }
         JobType::DownloadDirectUrl => {
             set_progress(paths, job_id, 0.05)?;
-            let p: DownloadDirectUrlParams = serde_json::from_str(params_json)?;
+            // Already-queued work must not retain obsolete pacing or archive choices.
+            let current_params = current_download_pacing_params(paths, params_json)?;
+            let p: DownloadDirectUrlParams = serde_json::from_str(&current_params)?;
             let subscription_id = p.subscription_id.clone();
             let mut url = normalize_direct_url(&p.url)?;
             let canonical_source_url = p
@@ -12595,17 +13876,27 @@ fn execute_job(
                 .transpose()?
                 .unwrap_or_else(|| url.clone());
             let mut provider = effective_download_provider(&p.provider, &url);
-            // Every YouTube direct download uses the proven recurring-safe profile. The queue
-            // track controls admission/fairness; it must not weaken the yt-dlp sleep, fragment,
-            // retry, throttle, or auth-circuit behavior for a foreground paste/playlist.
-            let (mut effective_sleep_interval, mut effective_concurrent_fragments) =
-                effective_direct_download_profile(
-                    paths,
-                    &url,
-                    job_id,
-                    p.yt_dlp_sleep_interval,
-                    p.yt_dlp_concurrent_fragments,
-                );
+            // Every YouTube direct download uses the proven recurring-safe profile, floored by
+            // the operator's WP-0320 lane policy for this job's track. The queue track controls
+            // admission/fairness and now also the lane floor; it must not weaken the yt-dlp
+            // sleep, fragment, retry, throttle, or auth-circuit behavior for a foreground
+            // paste/playlist below the single-lane floor, nor the recurring lane below its own.
+            let execution_track =
+                JobTrack::for_direct_download(&canonical_source_url, subscription_id.as_deref());
+            let direct_download_profile = effective_direct_download_profile(
+                paths,
+                &url,
+                execution_track,
+                p.yt_dlp_sleep_interval,
+                p.yt_dlp_concurrent_fragments,
+                p.yt_dlp_sleep_requests,
+                p.yt_dlp_limit_rate.clone(),
+            );
+            let mut effective_sleep_interval = direct_download_profile.sleep_interval_secs;
+            let effective_sleep_jitter = direct_download_profile.sleep_jitter_secs;
+            let mut effective_concurrent_fragments = direct_download_profile.concurrent_fragments;
+            let effective_sleep_requests = direct_download_profile.sleep_requests_secs;
+            let effective_limit_rate = direct_download_profile.limit_rate;
             // WP-0263: Instagram operations resolve auth with Instagram precedence
             // (explicit per-job/per-subscription cookie -> global Instagram cookie ->
             // browser-cookie fallback) rather than the YouTube global cookie, so a saved
@@ -12704,9 +13995,8 @@ fn execute_job(
                 None
             };
             ensure_youtube_auth_not_blocked(paths, youtube_auth_key.as_deref())?;
-            let adaptive_protection_enabled = get_antibot_pacing(paths)
-                .map(|settings| settings.adaptive_protection_enabled)
-                .unwrap_or(true);
+            // WP-0321 S4: protection is always on (the operator toggle was removed).
+            let adaptive_protection_enabled = true;
             let youtube_policy_context = if is_youtube_url(&canonical_source_url) {
                 let auth_fingerprint = youtube_auth_key
                     .clone()
@@ -12716,30 +14006,22 @@ fn execute_job(
                 let baseline = youtube_protection::DownloaderBaselinePolicy {
                     concurrent_fragments: effective_concurrent_fragments,
                     sleep_interval_secs: effective_sleep_interval,
-                    sleep_requests_secs: p.yt_dlp_sleep_requests,
+                    sleep_jitter_secs: effective_sleep_jitter,
+                    sleep_requests_secs: effective_sleep_requests,
                     update_tranche_size: 25,
-                    limit_rate: p.yt_dlp_limit_rate.clone(),
+                    limit_rate: effective_limit_rate.clone(),
                     throttled_rate: p.yt_dlp_throttled_rate.clone(),
                 };
+                // WP-0321 S4: one shared policy-state row for download AND enumeration.
                 let state = youtube_protection::load_policy_state(
                     paths,
                     youtube_protection::PROVIDER_YOUTUBE,
-                    youtube_protection::OPERATION_DOWNLOAD,
+                    youtube_protection::POLICY_STATE_OPERATION,
                     &auth_fingerprint,
                     &runtime_epoch,
                 )?;
-                let tuning = youtube_protection::get_tuning(paths)?;
-                let effective = if adaptive_protection_enabled {
-                    youtube_protection::effective_policy_with_tuning(
-                        &baseline,
-                        &state,
-                        now_ms(),
-                        &tuning,
-                    )
-                } else {
-                    youtube_protection::baseline_effective_policy(&baseline)
-                };
-                if adaptive_protection_enabled && !effective.eligible {
+                let effective = youtube_protection::effective_policy(&baseline, &state, now_ms());
+                if !effective.eligible {
                     return Err(EngineError::InstallFailed(format!(
                         "YouTube automatic protection is in {} mode for this session; next controlled probe is at {:?}",
                         effective.mode.as_str(),
@@ -12870,7 +14152,7 @@ fn execute_job(
                         runtime_epoch,
                         baseline,
                         effective,
-                        adaptive_enabled,
+                        _adaptive_enabled,
                     )) = youtube_policy_context.as_ref()
                     {
                         let class =
@@ -12896,11 +14178,7 @@ fn execute_job(
                             ),
                             occurred_at_ms: now_ms(),
                         };
-                        let _ = if *adaptive_enabled {
-                            youtube_protection::record_outcome(paths, observation)
-                        } else {
-                            youtube_protection::record_observation(paths, observation)
-                        };
+                        let _ = youtube_protection::record_outcome(paths, observation);
                     }
                     if let Some(auth_key) = youtube_auth_key {
                         if is_youtube_saved_cookie_rejection(&url, &err.to_string()) {
@@ -12921,7 +14199,7 @@ fn execute_job(
                     return Err(err);
                 }
             };
-            if let Some((auth_fingerprint, runtime_epoch, baseline, effective, adaptive_enabled)) =
+            if let Some((auth_fingerprint, runtime_epoch, baseline, effective, _adaptive_enabled)) =
                 youtube_policy_context.as_ref()
             {
                 let incident_id = job_incident_id(job_id);
@@ -12945,11 +14223,7 @@ fn execute_job(
                     ),
                     occurred_at_ms: now_ms(),
                 };
-                let _ = if *adaptive_enabled {
-                    youtube_protection::record_outcome(paths, observation)
-                } else {
-                    youtube_protection::record_observation(paths, observation)
-                };
+                let _ = youtube_protection::record_outcome(paths, observation);
             }
             set_progress(paths, job_id, 0.70)?;
 
@@ -13243,35 +14517,25 @@ fn execute_job(
                     subscription_browser_cookie_source.as_deref(),
                 )?;
                 ensure_youtube_auth_not_blocked(paths, youtube_auth_key.as_deref())?;
-                let adaptive_protection_enabled = get_antibot_pacing(paths)
-                    .map(|settings| settings.adaptive_protection_enabled)
-                    .unwrap_or(true);
+                // WP-0321 S4: protection is always on (the operator toggle was removed).
+                let adaptive_protection_enabled = true;
                 let youtube_policy_context = {
                     let auth_fingerprint = youtube_auth_key.clone().unwrap_or_else(|| {
                         youtube_protection::ANONYMOUS_AUTH_FINGERPRINT.to_string()
                     });
                     let _provider = tools::ensure_youtube_po_provider(paths)?;
                     let runtime_epoch = youtube_protection::runtime_epoch_for_paths(paths);
-                    let baseline = youtube_protection_baseline(paths)?;
+                    let baseline = youtube_protection_baseline(paths, JobTrack::YoutubeRecurring)?;
+                    // WP-0321 S4: one shared policy-state row for download AND enumeration.
                     let state = youtube_protection::load_policy_state(
                         paths,
                         youtube_protection::PROVIDER_YOUTUBE,
-                        youtube_protection::OPERATION_ENUMERATION,
+                        youtube_protection::POLICY_STATE_OPERATION,
                         &auth_fingerprint,
                         &runtime_epoch,
                     )?;
-                    let tuning = youtube_protection::get_tuning(paths)?;
-                    let effective = if adaptive_protection_enabled {
-                        youtube_protection::effective_policy_with_tuning(
-                            &baseline,
-                            &state,
-                            now_ms(),
-                            &tuning,
-                        )
-                    } else {
-                        youtube_protection::baseline_effective_policy(&baseline)
-                    };
-                    if adaptive_protection_enabled && !effective.eligible {
+                    let effective = youtube_protection::effective_policy(&baseline, &state, now_ms());
+                    if !effective.eligible {
                         return Err(EngineError::InstallFailed(format!(
                             "YouTube automatic protection is in {} mode for subscription checks; next controlled probe is at {:?}",
                             effective.mode.as_str(),
@@ -13325,7 +14589,7 @@ fn execute_job(
                         claim_youtube_controlled_canary(
                             paths,
                             job_id,
-                            youtube_protection::OPERATION_ENUMERATION,
+                            youtube_protection::POLICY_STATE_OPERATION,
                             auth_fingerprint,
                             runtime_epoch,
                             effective,
@@ -13334,7 +14598,7 @@ fn execute_job(
                     record_youtube_effective_command_receipt(
                         paths,
                         job_id,
-                        youtube_protection::OPERATION_ENUMERATION,
+                        youtube_protection::POLICY_STATE_OPERATION,
                         runtime_epoch,
                         effective,
                     )?;
@@ -13344,7 +14608,7 @@ fn execute_job(
                         YoutubeLaunchPolicyContextGuard::install(
                             job_id,
                             YoutubeLaunchPolicyContext {
-                                operation: youtube_protection::OPERATION_ENUMERATION.to_string(),
+                                operation: youtube_protection::POLICY_STATE_OPERATION.to_string(),
                                 auth_fingerprint: auth_fingerprint.clone(),
                                 runtime_epoch: runtime_epoch.clone(),
                                 baseline: baseline.clone(),
@@ -13392,14 +14656,14 @@ fn execute_job(
                             runtime_epoch,
                             baseline,
                             effective,
-                            adaptive_enabled,
+                            _adaptive_enabled,
                         )) = youtube_policy_context.as_ref()
                         {
                             let error_text = err.to_string();
                             let incident_id = job_incident_id(job_id);
                             let observation = youtube_protection::RecordDownloaderOutcome {
                                 provider: youtube_protection::PROVIDER_YOUTUBE,
-                                operation: youtube_protection::OPERATION_ENUMERATION,
+                                operation: youtube_protection::POLICY_STATE_OPERATION,
                                 canonical_target: &sub.source_url,
                                 auth_fingerprint,
                                 runtime_epoch,
@@ -13420,11 +14684,7 @@ fn execute_job(
                                 ),
                                 occurred_at_ms: now_ms(),
                             };
-                            let _ = if *adaptive_enabled {
-                                youtube_protection::record_outcome(paths, observation)
-                            } else {
-                                youtube_protection::record_observation(paths, observation)
-                            };
+                            let _ = youtube_protection::record_outcome(paths, observation);
                         }
                         if let Some(auth_key) = youtube_auth_key {
                             if is_youtube_saved_cookie_rejection(&sub.source_url, &err.to_string())
@@ -13452,13 +14712,13 @@ fn execute_job(
                     runtime_epoch,
                     baseline,
                     effective,
-                    adaptive_enabled,
+                    _adaptive_enabled,
                 )) = youtube_policy_context.as_ref()
                 {
                     let incident_id = job_incident_id(job_id);
                     let observation = youtube_protection::RecordDownloaderOutcome {
                         provider: youtube_protection::PROVIDER_YOUTUBE,
-                        operation: youtube_protection::OPERATION_ENUMERATION,
+                        operation: youtube_protection::POLICY_STATE_OPERATION,
                         canonical_target: &sub.source_url,
                         auth_fingerprint,
                         runtime_epoch,
@@ -13476,11 +14736,7 @@ fn execute_job(
                         ),
                         occurred_at_ms: now_ms(),
                     };
-                    let _ = if *adaptive_enabled {
-                        youtube_protection::record_outcome(paths, observation)
-                    } else {
-                        youtube_protection::record_observation(paths, observation)
-                    };
+                    let _ = youtube_protection::record_outcome(paths, observation);
                 }
                 set_progress(paths, job_id, 0.40)?;
 
@@ -13687,26 +14943,44 @@ fn execute_job(
                 }
                 Err(err) => {
                     remove_job_cookie_secret(paths, job_id);
+                    let err_text = err.to_string();
+                    // WP-0322 B1: a database-contention error is not the subscription's fault —
+                    // the outer dispatch closure will requeue this job attempt (bounded), so
+                    // skip subscription failure bookkeeping unless this was the bounded-out
+                    // final attempt (in which case it is recorded below with an `app busy:`
+                    // prefix so the operator sees why).
+                    let app_busy = is_app_busy_error(&err_text);
+                    let app_busy_will_requeue =
+                        app_busy && job_app_busy_attempts(paths, job_id) < APP_BUSY_MAX_ATTEMPTS;
                     // WP-0261: external-monitor visibility for a failed refresh.
                     append_engine_diagnostics_trace_row_best_effort(
                         paths,
-                        "subscription_refresh_failed",
+                        if app_busy_will_requeue {
+                            "subscription_refresh_app_busy"
+                        } else {
+                            "subscription_refresh_failed"
+                        },
                         "warn",
                         serde_json::json!({
                             "subscription_id": p.subscription_id,
-                            "error": err.to_string(),
+                            "error": err_text,
                         }),
                     );
                     // WP-0257: do NOT pin a subscription in per-sub backoff when it merely hit
                     // the shared auth block — that would keep it failing even after the operator
                     // re-authenticates. The global block is the single source of truth there.
-                    if !is_youtube_auth_blocked_error(Some(&err.to_string())) {
+                    if !app_busy_will_requeue && !is_youtube_auth_blocked_error(Some(&err_text)) {
                         // WP-0264: persist the raw error so the subscription panel + Jobs can
                         // classify it (handle-not-found vs sign-in vs rate-limit vs busy).
+                        let message = if app_busy {
+                            format!("app busy: {err_text}")
+                        } else {
+                            err_text.clone()
+                        };
                         let _ = subscriptions::record_subscription_refresh_failure_with_error(
                             paths,
                             &p.subscription_id,
-                            Some(&err.to_string()),
+                            Some(&message),
                         );
                     }
                     return Err(err);
@@ -15848,17 +17122,12 @@ if __name__ == "__main__":
             );
             py_cmd.env(
                 "HF_HOME",
-                paths
-                    .cache_dir()
-                    .join("huggingface")
-                    .to_string_lossy()
-                    .to_string(),
+                paths.huggingface_cache_dir().to_string_lossy().to_string(),
             );
             py_cmd.env(
                 "HUGGINGFACE_HUB_CACHE",
                 paths
-                    .cache_dir()
-                    .join("huggingface")
+                    .huggingface_cache_dir()
                     .join("hub")
                     .to_string_lossy()
                     .to_string(),
@@ -16634,17 +17903,12 @@ if __name__ == "__main__":
                 );
                 py_cmd.env(
                     "HF_HOME",
-                    paths
-                        .cache_dir()
-                        .join("huggingface")
-                        .to_string_lossy()
-                        .to_string(),
+                    paths.huggingface_cache_dir().to_string_lossy().to_string(),
                 );
                 py_cmd.env(
                     "HUGGINGFACE_HUB_CACHE",
                     paths
-                        .cache_dir()
-                        .join("huggingface")
+                        .huggingface_cache_dir()
                         .join("hub")
                         .to_string_lossy()
                         .to_string(),
@@ -19733,6 +20997,86 @@ fn set_succeeded(paths: &AppPaths, job_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// WP-0322 B1: true when `message` is a transient app-busy/database-contention error rather
+/// than a real job failure. Matched substrings mirror the ones the database runtime actually
+/// produces (`DatabaseRuntime` errors surface as `writer_admission_timeout`/
+/// `read_admission_timeout`; SQLite itself can also report `database is locked`).
+pub(crate) fn is_app_busy_error(message: &str) -> bool {
+    message.contains("writer_admission_timeout")
+        || message.contains("read_admission_timeout")
+        || message.contains("database is locked")
+}
+
+/// WP-0322 B1: bounded number of silent app-busy requeues before the job is recorded as a real
+/// (`app busy: ...`) failure.
+const APP_BUSY_MAX_ATTEMPTS: i64 = 5;
+/// WP-0322 B1: short delay before an app-busy-requeued job becomes eligible for dispatch again,
+/// so it does not immediately re-contend with whatever is currently holding the writer/reader
+/// lane. Sleeping happens on this job's own dedicated worker thread, never the runner loop.
+const APP_BUSY_REQUEUE_DELAY_SECS: u64 = 15;
+
+/// WP-0322 B1: reads the job's current app-busy attempt count without mutating it. Used by
+/// failure-recording call sites (e.g. subscription refresh) to decide whether this attempt will
+/// end up requeued (and must therefore skip recording a real failure) or is the bounded-out
+/// final attempt.
+fn job_app_busy_attempts(paths: &AppPaths, job_id: &str) -> i64 {
+    db::open_readonly(paths)
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT app_busy_attempts FROM job WHERE id=?1",
+                [job_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+        })
+        .unwrap_or(0)
+}
+
+/// WP-0322 B1: increments the job's app-busy attempt counter. If the bound has not been
+/// exceeded, resets the job back to `queued` (clearing `started_at_ms`/`error`) so the runner
+/// dispatches it again on a later tick, sleeps a short delay on this job's own worker thread,
+/// and returns `Ok(true)`. If the bound has been exceeded, only stamps the counter and returns
+/// `Ok(false)` so the caller records a real `app busy: ...` failure instead.
+fn requeue_job_for_app_busy_or_exhausted(paths: &AppPaths, job_id: &str) -> Result<bool> {
+    let conn = db::write_context(paths)?;
+    let attempts: i64 = conn
+        .query_row(
+            "SELECT app_busy_attempts FROM job WHERE id=?1",
+            [job_id],
+            |row| row.get(0),
+        )
+        .unwrap_or(0);
+    let next = attempts.saturating_add(1);
+    if next > APP_BUSY_MAX_ATTEMPTS {
+        let _ = conn.execute(
+            "UPDATE job SET app_busy_attempts=?1 WHERE id=?2",
+            params![next, job_id],
+        );
+        return Ok(false);
+    }
+    conn.execute(
+        "UPDATE job SET status=?1, started_at_ms=NULL, finished_at_ms=NULL, error=NULL, \
+         app_busy_attempts=?2 WHERE id=?3",
+        params![JobStatus::Queued.as_str(), next, job_id],
+    )?;
+    drop(conn);
+    append_engine_diagnostics_trace_row_best_effort(
+        paths,
+        "job_app_busy_requeued",
+        "info",
+        serde_json::json!({ "job_id": job_id, "attempt": next }),
+    );
+    // Tests exercise the bounded-attempt/requeue decision itself and must not pay the real
+    // production delay (5 attempts * 15s would make the suite slow for no added coverage).
+    if !cfg!(test) {
+        std::thread::sleep(Duration::from_secs(APP_BUSY_REQUEUE_DELAY_SECS));
+    }
+    Ok(true)
+}
+
 fn set_failed(paths: &AppPaths, job_id: &str, error: &str) -> Result<()> {
     let conn = db::write_context(paths)?;
     let changed = conn.execute(
@@ -19895,6 +21239,12 @@ pub fn get_job_tracks_runtime_snapshot(paths: &AppPaths) -> Result<JobTracksRunt
             add_job_track_status_total(&mut unclassified, &status, count);
         }
     }
+    // Release the read slot before the gate projection: it hashes runtime files for the policy
+    // epoch and opens its own read connection, and must never do either while holding one of
+    // the bounded read slots (VV-DBRUNTIME-003; WP-0320 regression seen as
+    // `read_admission_timeout` on other pages).
+    drop(stmt);
+    drop(conn);
 
     let youtube_gate = youtube_gate_snapshot(paths);
     let tracks = JobTrack::ALL
@@ -19986,17 +21336,14 @@ pub fn set_job_track_runtime_settings(
     Ok(persisted)
 }
 
-// WP-0257 (#3/#4): operator-tunable anti-bot pacing settings (Options -> Anti-bot pacing).
+// WP-0257 (#3/#4), simplified WP-0321 S4: operator-tunable recurring/enumeration pacing
+// (Options -> Anti-bot pacing). YouTube download pacing now lives entirely in the per-lane
+// `ProviderTransferSettings` (config.rs); this struct only covers subscription enumeration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AntiBotPacingSettings {
-    #[serde(default = "default_true")]
-    pub adaptive_protection_enabled: bool,
     pub recurring_min_interval_secs: u64,
     pub recurring_jitter_secs: u64,
-    pub enumeration_sleep_requests: u32,
     pub update_all_batch_size: usize,
-    pub recurring_download_min_sleep_secs: u32,
-    pub recurring_download_max_sleep_secs: u32,
 }
 
 fn meta_u64_conn(conn: &rusqlite::Connection, key: &str, default: u64) -> u64 {
@@ -20020,8 +21367,6 @@ fn upsert_meta_conn(conn: &rusqlite::Connection, key: &str, value: &str) -> Resu
 
 fn antibot_pacing_from_conn(conn: &rusqlite::Connection) -> AntiBotPacingSettings {
     AntiBotPacingSettings {
-        adaptive_protection_enabled: meta_u64_conn(conn, META_KEY_ADAPTIVE_PROTECTION_ENABLED, 1)
-            != 0,
         recurring_min_interval_secs: meta_u64_conn(
             conn,
             META_KEY_RECURRING_MIN_INTERVAL_SECS,
@@ -20034,30 +21379,12 @@ fn antibot_pacing_from_conn(conn: &rusqlite::Connection) -> AntiBotPacingSetting
             DEFAULT_RECURRING_JITTER_SECS,
         )
         .min(MAX_RECURRING_JITTER_SECS),
-        enumeration_sleep_requests: (meta_u64_conn(
-            conn,
-            META_KEY_ENUM_SLEEP_REQUESTS,
-            DEFAULT_ENUM_SLEEP_REQUESTS as u64,
-        ) as u32)
-            .min(MAX_ENUM_SLEEP_REQUESTS),
         update_all_batch_size: (meta_u64_conn(
             conn,
             META_KEY_UPDATE_ALL_BATCH,
             DEFAULT_UPDATE_ALL_BATCH as u64,
         ) as usize)
             .clamp(1, MAX_UPDATE_ALL_BATCH),
-        recurring_download_min_sleep_secs: (meta_u64_conn(
-            conn,
-            META_KEY_RECURRING_DOWNLOAD_MIN_SLEEP,
-            DEFAULT_RECURRING_DOWNLOAD_MIN_SLEEP_SECS as u64,
-        ) as u32)
-            .min(MAX_RECURRING_DOWNLOAD_SLEEP_SECS),
-        recurring_download_max_sleep_secs: (meta_u64_conn(
-            conn,
-            META_KEY_RECURRING_DOWNLOAD_MAX_SLEEP,
-            DEFAULT_RECURRING_DOWNLOAD_MAX_SLEEP_SECS as u64,
-        ) as u32)
-            .min(MAX_RECURRING_DOWNLOAD_SLEEP_SECS),
     }
 }
 
@@ -20096,36 +21423,16 @@ fn set_antibot_pacing_internal(
         youtube_protection::claim_mutation_generation_conn(&tx, "pacing", generation, false)?;
     }
     let clamped = AntiBotPacingSettings {
-        adaptive_protection_enabled: settings.adaptive_protection_enabled,
         recurring_min_interval_secs: settings
             .recurring_min_interval_secs
             .min(MAX_RECURRING_MIN_INTERVAL_SECS),
         recurring_jitter_secs: settings
             .recurring_jitter_secs
             .min(MAX_RECURRING_JITTER_SECS),
-        enumeration_sleep_requests: settings
-            .enumeration_sleep_requests
-            .min(MAX_ENUM_SLEEP_REQUESTS),
         update_all_batch_size: settings
             .update_all_batch_size
             .clamp(1, MAX_UPDATE_ALL_BATCH),
-        recurring_download_min_sleep_secs: settings
-            .recurring_download_min_sleep_secs
-            .min(MAX_RECURRING_DOWNLOAD_SLEEP_SECS),
-        recurring_download_max_sleep_secs: settings
-            .recurring_download_max_sleep_secs
-            .max(settings.recurring_download_min_sleep_secs)
-            .min(MAX_RECURRING_DOWNLOAD_SLEEP_SECS),
     };
-    upsert_meta_conn(
-        &tx,
-        META_KEY_ADAPTIVE_PROTECTION_ENABLED,
-        if clamped.adaptive_protection_enabled {
-            "1"
-        } else {
-            "0"
-        },
-    )?;
     upsert_meta_conn(
         &tx,
         META_KEY_RECURRING_MIN_INTERVAL_SECS,
@@ -20138,24 +21445,34 @@ fn set_antibot_pacing_internal(
     )?;
     upsert_meta_conn(
         &tx,
-        META_KEY_ENUM_SLEEP_REQUESTS,
-        &clamped.enumeration_sleep_requests.to_string(),
-    )?;
-    upsert_meta_conn(
-        &tx,
         META_KEY_UPDATE_ALL_BATCH,
         &clamped.update_all_batch_size.to_string(),
     )?;
-    upsert_meta_conn(
-        &tx,
-        META_KEY_RECURRING_DOWNLOAD_MIN_SLEEP,
-        &clamped.recurring_download_min_sleep_secs.to_string(),
-    )?;
-    upsert_meta_conn(
-        &tx,
-        META_KEY_RECURRING_DOWNLOAD_MAX_SLEEP,
-        &clamped.recurring_download_max_sleep_secs.to_string(),
-    )?;
+    tx.commit()?;
+    Ok(clamped)
+}
+
+/// WP-0320: how many days of terminal job history the runner idle tick keeps before purging.
+/// `0` disables automatic retention purging entirely.
+pub fn get_terminal_job_retention_days(paths: &AppPaths) -> Result<u32> {
+    let conn = db::open_readonly(paths)?;
+    Ok(terminal_job_retention_days_conn(&conn))
+}
+
+fn terminal_job_retention_days_conn(conn: &rusqlite::Connection) -> u32 {
+    (meta_u64_conn(
+        conn,
+        META_KEY_TERMINAL_JOB_RETENTION_DAYS,
+        DEFAULT_TERMINAL_JOB_RETENTION_DAYS as u64,
+    ) as u32)
+        .min(MAX_TERMINAL_JOB_RETENTION_DAYS)
+}
+
+pub fn set_terminal_job_retention_days(paths: &AppPaths, days: u32) -> Result<u32> {
+    let clamped = days.min(MAX_TERMINAL_JOB_RETENTION_DAYS);
+    let mut conn = db::write_context(paths)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    upsert_meta_conn(&tx, META_KEY_TERMINAL_JOB_RETENTION_DAYS, &clamped.to_string())?;
     tx.commit()?;
     Ok(clamped)
 }
@@ -20187,72 +21504,41 @@ pub fn get_youtube_protection_snapshot(
     let auth_fingerprint = current_youtube_protection_auth_fingerprint(paths)?;
     let runtime_capabilities = youtube_protection::runtime_capabilities(paths);
     let runtime_epoch = runtime_capabilities.epoch.clone();
-    let presets = config::load_download_presets_config(paths)?;
-    let preset = presets
-        .default_preset_id
-        .as_deref()
-        .and_then(|id| presets.presets.iter().find(|preset| preset.id == id))
-        .or_else(|| presets.presets.first())
-        .cloned()
-        .unwrap_or_else(|| {
-            config::DownloadPresetsConfig::default()
-                .presets
-                .into_iter()
-                .next()
-                .expect("default download preset")
-        });
+    // WP-0321 S4: download uses the single lane, enumeration uses the recurring lane; both read
+    // the same shared `POLICY_STATE_OPERATION` state/history row.
+    let download_baseline = youtube_protection_baseline(paths, JobTrack::YoutubeSingle)?;
+    let enumeration_baseline = youtube_protection_baseline(paths, JobTrack::YoutubeRecurring)?;
 
     let mut conn = db::open_readonly(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
-    let pacing = antibot_pacing_from_conn(&tx);
-    let baseline = youtube_protection::DownloaderBaselinePolicy {
-        concurrent_fragments: preset.yt_dlp_concurrent_fragments.max(1),
-        sleep_interval_secs: preset.yt_dlp_sleep_interval,
-        sleep_requests_secs: preset.yt_dlp_sleep_requests,
-        update_tranche_size: pacing.update_all_batch_size.clamp(1, u32::MAX as usize) as u32,
-        limit_rate: preset.yt_dlp_limit_rate,
-        throttled_rate: preset.yt_dlp_throttled_rate,
-    };
-    let tuning = youtube_protection::load_tuning_conn(&tx)?;
-    let status_for = |operation: &str| -> Result<YoutubeProtectionStatus> {
+    let status_for = |baseline: &youtube_protection::DownloaderBaselinePolicy| -> Result<YoutubeProtectionStatus> {
         let state = youtube_protection::load_policy_state_conn(
             &tx,
             youtube_protection::PROVIDER_YOUTUBE,
-            operation,
+            youtube_protection::POLICY_STATE_OPERATION,
             &auth_fingerprint,
             &runtime_epoch,
         )?;
-        let effective = if pacing.adaptive_protection_enabled {
-            youtube_protection::effective_policy_with_tuning(&baseline, &state, now_ms(), &tuning)
-        } else {
-            youtube_protection::baseline_effective_policy(&baseline)
-        };
+        let effective = youtube_protection::effective_policy(baseline, &state, now_ms());
         Ok(YoutubeProtectionStatus {
-            automatic_protection_enabled: pacing.adaptive_protection_enabled,
+            automatic_protection_enabled: true,
             runtime_capabilities: runtime_capabilities.clone(),
             state,
             baseline: baseline.clone(),
             effective,
         })
     };
-    let download = status_for(youtube_protection::OPERATION_DOWNLOAD)?;
-    let enumeration = status_for(youtube_protection::OPERATION_ENUMERATION)?;
+    let download = status_for(&download_baseline)?;
+    let enumeration = status_for(&enumeration_baseline)?;
     let download_history = youtube_protection::policy_history_conn(
         &tx,
         youtube_protection::PROVIDER_YOUTUBE,
-        youtube_protection::OPERATION_DOWNLOAD,
+        youtube_protection::POLICY_STATE_OPERATION,
         &auth_fingerprint,
         &runtime_epoch,
         history_limit,
     )?;
-    let enumeration_history = youtube_protection::policy_history_conn(
-        &tx,
-        youtube_protection::PROVIDER_YOUTUBE,
-        youtube_protection::OPERATION_ENUMERATION,
-        &auth_fingerprint,
-        &runtime_epoch,
-        history_limit,
-    )?;
+    let enumeration_history = download_history.clone();
     tx.commit()?;
     Ok(YoutubeProtectionSnapshotProjection {
         download,
@@ -20274,8 +21560,12 @@ pub struct YoutubeProtectionHistoryExportReceipt {
     pub full_export: bool,
 }
 
+/// WP-0321 S4: baseline reads the operator's saved per-track lane (`youtube_single` /
+/// `youtube_recurring`) instead of the download preset; only `throttled_rate` (not part of the
+/// lane contract) still comes from the preset.
 fn youtube_protection_baseline(
     paths: &AppPaths,
+    track: JobTrack,
 ) -> Result<youtube_protection::DownloaderBaselinePolicy> {
     let presets = config::load_download_presets_config(paths)?;
     let preset = presets
@@ -20291,14 +21581,30 @@ fn youtube_protection_baseline(
                 .next()
                 .expect("default download preset")
         });
+    let lane = config::load_provider_transfer_settings(paths)
+        .ok()
+        .and_then(|settings| settings.policy_for_track(track.as_str()).cloned());
     let pacing = get_antibot_pacing(paths)?;
-    Ok(youtube_protection::DownloaderBaselinePolicy {
-        concurrent_fragments: preset.yt_dlp_concurrent_fragments.max(1),
-        sleep_interval_secs: preset.yt_dlp_sleep_interval,
-        sleep_requests_secs: preset.yt_dlp_sleep_requests,
-        update_tranche_size: pacing.update_all_batch_size.clamp(1, u32::MAX as usize) as u32,
-        limit_rate: preset.yt_dlp_limit_rate,
-        throttled_rate: preset.yt_dlp_throttled_rate,
+    let update_tranche_size = pacing.update_all_batch_size.clamp(1, u32::MAX as usize) as u32;
+    Ok(match lane {
+        Some(lane) => youtube_protection::DownloaderBaselinePolicy {
+            concurrent_fragments: lane.concurrent_fragments.max(1),
+            sleep_interval_secs: lane.sleep_interval_secs,
+            sleep_jitter_secs: lane.sleep_jitter_secs,
+            sleep_requests_secs: lane.sleep_requests_secs,
+            update_tranche_size,
+            limit_rate: lane.limit_rate,
+            throttled_rate: preset.yt_dlp_throttled_rate,
+        },
+        None => youtube_protection::DownloaderBaselinePolicy {
+            concurrent_fragments: preset.yt_dlp_concurrent_fragments.max(1),
+            sleep_interval_secs: preset.yt_dlp_sleep_interval,
+            sleep_jitter_secs: 0,
+            sleep_requests_secs: preset.yt_dlp_sleep_requests,
+            update_tranche_size,
+            limit_rate: preset.yt_dlp_limit_rate,
+            throttled_rate: preset.yt_dlp_throttled_rate,
+        },
     })
 }
 
@@ -20311,34 +21617,25 @@ pub fn get_youtube_protection_status(
     paths: &AppPaths,
     operation: Option<&str>,
 ) -> Result<YoutubeProtectionStatus> {
-    let operation = match operation.map(str::trim) {
-        Some(youtube_protection::OPERATION_ENUMERATION) => {
-            youtube_protection::OPERATION_ENUMERATION
-        }
-        _ => youtube_protection::OPERATION_DOWNLOAD,
+    let track = match operation.map(str::trim) {
+        Some(youtube_protection::OPERATION_ENUMERATION) => JobTrack::YoutubeRecurring,
+        _ => JobTrack::YoutubeSingle,
     };
     let auth_fingerprint = current_youtube_protection_auth_fingerprint(paths)?;
     let runtime_capabilities = youtube_protection::runtime_capabilities(paths);
     let runtime_epoch = runtime_capabilities.epoch.clone();
-    let baseline = youtube_protection_baseline(paths)?;
+    let baseline = youtube_protection_baseline(paths, track)?;
+    // WP-0321 S4: one shared policy-state row for download AND enumeration.
     let state = youtube_protection::load_policy_state(
         paths,
         youtube_protection::PROVIDER_YOUTUBE,
-        operation,
+        youtube_protection::POLICY_STATE_OPERATION,
         &auth_fingerprint,
         &runtime_epoch,
     )?;
-    let pacing = get_antibot_pacing(paths)?;
-    let effective = if pacing.adaptive_protection_enabled {
-        let tuning = youtube_protection::get_tuning(paths)?;
-        youtube_protection::effective_policy_with_tuning(&baseline, &state, now_ms(), &tuning)
-    } else {
-        // The status projection must describe the command that will actually run. Turning
-        // adaptation off preserves observation history but executes the persisted baseline.
-        youtube_protection::baseline_effective_policy(&baseline)
-    };
+    let effective = youtube_protection::effective_policy(&baseline, &state, now_ms());
     Ok(YoutubeProtectionStatus {
-        automatic_protection_enabled: pacing.adaptive_protection_enabled,
+        automatic_protection_enabled: true,
         runtime_capabilities,
         state,
         baseline,
@@ -20346,11 +21643,19 @@ pub fn get_youtube_protection_status(
     })
 }
 
+pub fn request_youtube_controlled_probe(paths: &AppPaths) -> Result<youtube_protection::DownloaderPolicySnapshot> {
+    let auth = current_youtube_protection_auth_fingerprint(paths)?;
+    let epoch = youtube_protection::runtime_epoch_for_paths(paths);
+    let result = youtube_protection::request_controlled_download_probe(paths, &auth, &epoch);
+    invalidate_youtube_policy_gate_fields(paths);
+    result
+}
+
 pub fn return_youtube_protection_to_baseline(
     paths: &AppPaths,
     operation: Option<&str>,
 ) -> Result<YoutubeProtectionStatus> {
-    let operation = match operation.map(str::trim) {
+    let display_operation = match operation.map(str::trim) {
         Some(youtube_protection::OPERATION_ENUMERATION) => {
             youtube_protection::OPERATION_ENUMERATION
         }
@@ -20358,26 +21663,22 @@ pub fn return_youtube_protection_to_baseline(
     };
     let auth_fingerprint = current_youtube_protection_auth_fingerprint(paths)?;
     let runtime_epoch = youtube_protection::runtime_epoch_for_paths(paths);
+    // WP-0321 S4: one shared policy-state row for download AND enumeration.
     youtube_protection::return_to_baseline(
         paths,
         youtube_protection::PROVIDER_YOUTUBE,
-        operation,
+        youtube_protection::POLICY_STATE_OPERATION,
         &auth_fingerprint,
         &runtime_epoch,
     )?;
-    get_youtube_protection_status(paths, Some(operation))
+    invalidate_youtube_policy_gate_fields(paths);
+    get_youtube_protection_status(paths, Some(display_operation))
 }
 
 pub fn youtube_update_all_effective_batch_size(paths: &AppPaths) -> usize {
     let baseline = get_antibot_pacing(paths)
         .map(|settings| settings.update_all_batch_size)
         .unwrap_or(DEFAULT_UPDATE_ALL_BATCH);
-    let adaptive_enabled = get_antibot_pacing(paths)
-        .map(|settings| settings.adaptive_protection_enabled)
-        .unwrap_or(true);
-    if !adaptive_enabled {
-        return baseline;
-    }
     get_youtube_protection_status(paths, Some(youtube_protection::OPERATION_ENUMERATION))
         .map(|status| status.effective.update_tranche_size.max(1) as usize)
         .unwrap_or(baseline)
@@ -20385,19 +21686,14 @@ pub fn youtube_update_all_effective_batch_size(paths: &AppPaths) -> usize {
 
 pub fn get_youtube_protection_history(
     paths: &AppPaths,
-    operation: Option<&str>,
+    _operation: Option<&str>,
     limit: usize,
 ) -> Result<youtube_protection::DownloaderPolicyHistory> {
-    let operation = match operation.map(str::trim) {
-        Some(youtube_protection::OPERATION_ENUMERATION) => {
-            youtube_protection::OPERATION_ENUMERATION
-        }
-        _ => youtube_protection::OPERATION_DOWNLOAD,
-    };
+    // WP-0321 S4: download and enumeration share one policy-state/history row.
     youtube_protection::policy_history(
         paths,
         youtube_protection::PROVIDER_YOUTUBE,
-        operation,
+        youtube_protection::POLICY_STATE_OPERATION,
         &current_youtube_protection_auth_fingerprint(paths)?,
         &youtube_protection::runtime_epoch_for_paths(paths),
         limit,
@@ -20406,56 +21702,39 @@ pub fn get_youtube_protection_history(
 
 pub fn replay_youtube_protection_history(
     paths: &AppPaths,
-    operation: Option<&str>,
+    _operation: Option<&str>,
     _limit: usize,
 ) -> Result<youtube_protection::DownloaderPolicyReplayReceipt> {
-    let operation = match operation.map(str::trim) {
-        Some(youtube_protection::OPERATION_ENUMERATION) => {
-            youtube_protection::OPERATION_ENUMERATION
-        }
-        _ => youtube_protection::OPERATION_DOWNLOAD,
-    };
     youtube_protection::replay_policy_history_from_store(
         paths,
         youtube_protection::PROVIDER_YOUTUBE,
-        operation,
+        youtube_protection::POLICY_STATE_OPERATION,
         &current_youtube_protection_auth_fingerprint(paths)?,
         &youtube_protection::runtime_epoch_for_paths(paths),
     )
 }
 
+// WP-0321 S4: tuning/ladder replaced by a single cooldown base/cap wait pair; the Tauri command
+// names (`youtube_protection_tuning_get/set/reset`) are kept, only the payload type changed.
 pub fn get_youtube_protection_tuning(
     paths: &AppPaths,
-) -> Result<youtube_protection::YoutubeProtectionTuning> {
-    youtube_protection::get_tuning(paths)
-}
-
-pub fn set_youtube_protection_tuning(
-    paths: &AppPaths,
-    tuning: youtube_protection::YoutubeProtectionTuning,
-) -> Result<youtube_protection::YoutubeProtectionTuning> {
-    youtube_protection::set_tuning(paths, tuning)
+) -> Result<youtube_protection::YoutubeCooldownSettings> {
+    youtube_protection::get_cooldown_settings(paths)
 }
 
 pub fn set_youtube_protection_tuning_with_generation(
     paths: &AppPaths,
-    tuning: youtube_protection::YoutubeProtectionTuning,
+    settings: youtube_protection::YoutubeCooldownSettings,
     mutation_generation: u64,
-) -> Result<youtube_protection::YoutubeProtectionTuning> {
-    youtube_protection::set_tuning_with_generation(paths, tuning, mutation_generation)
-}
-
-pub fn reset_youtube_protection_tuning(
-    paths: &AppPaths,
-) -> Result<youtube_protection::YoutubeProtectionTuning> {
-    youtube_protection::reset_tuning(paths)
+) -> Result<youtube_protection::YoutubeCooldownSettings> {
+    youtube_protection::set_cooldown_settings_with_generation(paths, settings, mutation_generation)
 }
 
 pub fn reset_youtube_protection_tuning_with_generation(
     paths: &AppPaths,
     mutation_generation: u64,
-) -> Result<youtube_protection::YoutubeProtectionTuning> {
-    youtube_protection::reset_tuning_with_generation(paths, mutation_generation)
+) -> Result<youtube_protection::YoutubeCooldownSettings> {
+    youtube_protection::reset_cooldown_settings_with_generation(paths, mutation_generation)
 }
 
 pub fn export_youtube_protection_history(
@@ -20473,12 +21752,12 @@ pub fn export_youtube_protection_history(
     let history_summary = youtube_protection::policy_history(
         paths,
         youtube_protection::PROVIDER_YOUTUBE,
-        operation,
+        youtube_protection::POLICY_STATE_OPERATION,
         &auth_fingerprint,
         &status.state.runtime_epoch,
         1,
     )?;
-    let tuning = youtube_protection::get_tuning(paths)?;
+    let tuning = youtube_protection::get_cooldown_settings(paths)?;
     let export_dir = paths.logs_dir().join("youtube_protection_exports");
     std::fs::create_dir_all(&export_dir)?;
     let export_path = export_dir.join(format!(
@@ -20509,7 +21788,7 @@ pub fn export_youtube_protection_history(
             let page = youtube_protection::policy_outcomes_page(
                 paths,
                 youtube_protection::PROVIDER_YOUTUBE,
-                operation,
+                youtube_protection::POLICY_STATE_OPERATION,
                 &auth_fingerprint,
                 &status.state.runtime_epoch,
                 outcome_cursor.as_ref(),
@@ -20536,7 +21815,7 @@ pub fn export_youtube_protection_history(
             let page = youtube_protection::policy_transitions_page(
                 paths,
                 youtube_protection::PROVIDER_YOUTUBE,
-                operation,
+                youtube_protection::POLICY_STATE_OPERATION,
                 &auth_fingerprint,
                 &status.state.runtime_epoch,
                 transition_cursor.as_ref(),
@@ -20597,18 +21876,13 @@ pub fn export_youtube_protection_history(
 
 pub fn reset_youtube_protection_history(
     paths: &AppPaths,
-    operation: Option<&str>,
+    _operation: Option<&str>,
 ) -> Result<youtube_protection::DownloaderHistoryResetReceipt> {
-    let operation = match operation {
-        Some(youtube_protection::OPERATION_ENUMERATION) => {
-            youtube_protection::OPERATION_ENUMERATION
-        }
-        _ => youtube_protection::OPERATION_DOWNLOAD,
-    };
+    // WP-0321 S4: one shared policy-state/history row for download AND enumeration.
     youtube_protection::reset_policy_history(
         paths,
         youtube_protection::PROVIDER_YOUTUBE,
-        operation,
+        youtube_protection::POLICY_STATE_OPERATION,
         &current_youtube_protection_auth_fingerprint(paths)?,
         &youtube_protection::runtime_epoch_for_paths(paths),
     )
@@ -20616,19 +21890,13 @@ pub fn reset_youtube_protection_history(
 
 pub fn reset_youtube_protection_history_with_generation(
     paths: &AppPaths,
-    operation: Option<&str>,
+    _operation: Option<&str>,
     mutation_generation: u64,
 ) -> Result<youtube_protection::DownloaderHistoryResetReceipt> {
-    let operation = match operation {
-        Some(youtube_protection::OPERATION_ENUMERATION) => {
-            youtube_protection::OPERATION_ENUMERATION
-        }
-        _ => youtube_protection::OPERATION_DOWNLOAD,
-    };
     youtube_protection::reset_policy_history_with_generation(
         paths,
         youtube_protection::PROVIDER_YOUTUBE,
-        operation,
+        youtube_protection::POLICY_STATE_OPERATION,
         &current_youtube_protection_auth_fingerprint(paths)?,
         &youtube_protection::runtime_epoch_for_paths(paths),
         mutation_generation,
@@ -20650,56 +21918,78 @@ fn bounded_runtime_jitter(max_inclusive: u64, salt: &str) -> u64 {
 
 fn recurring_dispatch_interval_secs(paths: &AppPaths, salt: &str) -> u64 {
     let pacing = get_antibot_pacing(paths).unwrap_or(AntiBotPacingSettings {
-        adaptive_protection_enabled: true,
         recurring_min_interval_secs: DEFAULT_RECURRING_MIN_INTERVAL_SECS,
         recurring_jitter_secs: DEFAULT_RECURRING_JITTER_SECS,
-        enumeration_sleep_requests: DEFAULT_ENUM_SLEEP_REQUESTS,
         update_all_batch_size: DEFAULT_UPDATE_ALL_BATCH,
-        recurring_download_min_sleep_secs: DEFAULT_RECURRING_DOWNLOAD_MIN_SLEEP_SECS,
-        recurring_download_max_sleep_secs: DEFAULT_RECURRING_DOWNLOAD_MAX_SLEEP_SECS,
     });
     pacing
         .recurring_min_interval_secs
         .saturating_add(bounded_runtime_jitter(pacing.recurring_jitter_secs, salt))
 }
 
-fn recurring_download_sleep_secs(paths: &AppPaths, job_id: &str) -> u32 {
-    let pacing = get_antibot_pacing(paths).unwrap_or(AntiBotPacingSettings {
-        adaptive_protection_enabled: true,
-        recurring_min_interval_secs: DEFAULT_RECURRING_MIN_INTERVAL_SECS,
-        recurring_jitter_secs: DEFAULT_RECURRING_JITTER_SECS,
-        enumeration_sleep_requests: DEFAULT_ENUM_SLEEP_REQUESTS,
-        update_all_batch_size: DEFAULT_UPDATE_ALL_BATCH,
-        recurring_download_min_sleep_secs: DEFAULT_RECURRING_DOWNLOAD_MIN_SLEEP_SECS,
-        recurring_download_max_sleep_secs: DEFAULT_RECURRING_DOWNLOAD_MAX_SLEEP_SECS,
-    });
-    let min = pacing
-        .recurring_download_min_sleep_secs
-        .min(MAX_RECURRING_DOWNLOAD_SLEEP_SECS);
-    let max = pacing
-        .recurring_download_max_sleep_secs
-        .max(min)
-        .min(MAX_RECURRING_DOWNLOAD_SLEEP_SECS);
-    min.saturating_add(bounded_runtime_jitter((max - min) as u64, job_id) as u32)
+/// WP-0321 S4: spaces the next YouTube start by a random value in `base..=base+jitter` of the
+/// lane that just started (replaces the old aggregate-mode start interval).
+fn youtube_lane_start_interval_secs(paths: &AppPaths, track: JobTrack, salt: &str) -> u64 {
+    let lane = config::load_provider_transfer_settings(paths)
+        .ok()
+        .and_then(|settings| settings.policy_for_track(track.as_str()).cloned());
+    let (base, jitter) = lane
+        .map(|policy| (policy.sleep_interval_secs as u64, policy.sleep_jitter_secs as u64))
+        .unwrap_or((0, 0));
+    base.saturating_add(bounded_runtime_jitter(jitter, salt))
 }
 
-/// The safe download profile is service-based, never origin-based. A direct YouTube URL pasted
-/// by the operator receives the same low-fragment, randomized-sleep behavior as a subscription
-/// child; the queue track only changes scheduling priority and does not create an anti-bot hole.
+/// Per-lane transfer profile for one direct-download execution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectDownloadProfile {
+    sleep_interval_secs: u32,
+    sleep_jitter_secs: u32,
+    concurrent_fragments: u32,
+    sleep_requests_secs: u32,
+    limit_rate: Option<String>,
+}
+
+/// WP-0321 S4: the operator's saved `youtube_single` / `youtube_recurring` lane policy for this
+/// job's track is authoritative for every YouTube download (no floor merge with the download
+/// preset's pacing fields). Non-YouTube sites keep using their requested preset values verbatim.
 fn effective_direct_download_profile(
     paths: &AppPaths,
     url: &str,
-    job_id: &str,
+    track: JobTrack,
     requested_sleep_interval: u32,
     requested_concurrent_fragments: u32,
-) -> (u32, u32) {
-    if is_youtube_url(url) {
-        (
-            requested_sleep_interval.max(recurring_download_sleep_secs(paths, job_id)),
-            1,
-        )
-    } else {
-        (requested_sleep_interval, requested_concurrent_fragments)
+    requested_sleep_requests: u32,
+    requested_limit_rate: Option<String>,
+) -> DirectDownloadProfile {
+    if !is_youtube_url(url) {
+        return DirectDownloadProfile {
+            sleep_interval_secs: requested_sleep_interval,
+            sleep_jitter_secs: 0,
+            concurrent_fragments: requested_concurrent_fragments,
+            sleep_requests_secs: requested_sleep_requests,
+            limit_rate: requested_limit_rate,
+        };
+    }
+    let lane_policy = config::load_provider_transfer_settings(paths)
+        .ok()
+        .and_then(|settings| settings.policy_for_track(track.as_str()).cloned());
+    match lane_policy {
+        Some(policy) => DirectDownloadProfile {
+            sleep_interval_secs: policy.sleep_interval_secs,
+            sleep_jitter_secs: policy.sleep_jitter_secs,
+            concurrent_fragments: policy.concurrent_fragments.max(1),
+            sleep_requests_secs: policy.sleep_requests_secs,
+            limit_rate: policy.limit_rate,
+        },
+        // No configured lane for this track (should not happen for a YouTube URL): keep the
+        // historical single-fragment safety floor rather than trusting an unfloored preset.
+        None => DirectDownloadProfile {
+            sleep_interval_secs: requested_sleep_interval,
+            sleep_jitter_secs: 0,
+            concurrent_fragments: 1,
+            sleep_requests_secs: requested_sleep_requests,
+            limit_rate: requested_limit_rate,
+        },
     }
 }
 
@@ -20724,11 +22014,7 @@ fn effective_youtube_scheduler_policy(
 ) -> Result<Option<YoutubeSchedulerPolicy>> {
     let params: DownloadDirectUrlParams = serde_json::from_str(params_json)?;
     let url = normalize_direct_url(&params.url)?;
-    if !is_youtube_url(&url)
-        || !get_antibot_pacing(paths)
-            .map(|settings| settings.adaptive_protection_enabled)
-            .unwrap_or(true)
-    {
+    if !is_youtube_url(&url) {
         return Ok(None);
     }
 
@@ -20747,51 +22033,42 @@ fn effective_youtube_scheduler_policy(
     )?
     .unwrap_or_else(|| youtube_protection::ANONYMOUS_AUTH_FINGERPRINT.to_string());
     let runtime_epoch = youtube_protection::runtime_epoch_for_paths(paths);
-    let (sleep_interval_secs, concurrent_fragments) = effective_direct_download_profile(
+    let execution_track =
+        JobTrack::for_direct_download(&url, params.subscription_id.as_deref());
+    let profile = effective_direct_download_profile(
         paths,
         &url,
-        job_id,
+        execution_track,
         params.yt_dlp_sleep_interval,
         params.yt_dlp_concurrent_fragments,
+        params.yt_dlp_sleep_requests,
+        params.yt_dlp_limit_rate,
     );
     let baseline = youtube_protection::DownloaderBaselinePolicy {
-        concurrent_fragments,
-        sleep_interval_secs,
-        sleep_requests_secs: params.yt_dlp_sleep_requests,
+        concurrent_fragments: profile.concurrent_fragments,
+        sleep_interval_secs: profile.sleep_interval_secs,
+        sleep_jitter_secs: profile.sleep_jitter_secs,
+        sleep_requests_secs: profile.sleep_requests_secs,
         update_tranche_size: 25,
-        limit_rate: params.yt_dlp_limit_rate,
+        limit_rate: profile.limit_rate,
         throttled_rate: params.yt_dlp_throttled_rate,
     };
+    // WP-0321 S4: one shared policy-state row for download AND enumeration eligibility.
     let state = youtube_protection::load_policy_state(
         paths,
         youtube_protection::PROVIDER_YOUTUBE,
-        youtube_protection::OPERATION_DOWNLOAD,
+        youtube_protection::POLICY_STATE_OPERATION,
         &auth_fingerprint,
         &runtime_epoch,
     )?;
-    let tuning = youtube_protection::get_tuning(paths)?;
-    let effective =
-        youtube_protection::effective_policy_with_tuning(&baseline, &state, now_ms(), &tuning);
+    let effective = youtube_protection::effective_policy(&baseline, &state, now_ms());
     Ok(Some(YoutubeSchedulerPolicy {
         effective,
         next_eligible_probe_at_ms: state.next_eligible_probe_at_ms,
-        operation: youtube_protection::OPERATION_DOWNLOAD,
+        operation: youtube_protection::POLICY_STATE_OPERATION,
         auth_fingerprint,
         runtime_epoch,
     }))
-}
-
-#[cfg(test)]
-fn effective_youtube_start_interval_secs(
-    paths: &AppPaths,
-    job_id: &str,
-    params_json: &str,
-) -> Result<u64> {
-    Ok(
-        effective_youtube_scheduler_policy(paths, job_id, params_json)?
-            .map(|policy| policy.effective.aggregate_start_interval_secs as u64)
-            .unwrap_or(0),
-    )
 }
 
 fn effective_youtube_enumeration_scheduler_policy(
@@ -20799,12 +22076,6 @@ fn effective_youtube_enumeration_scheduler_policy(
     job_id: &str,
     params_json: &str,
 ) -> Result<Option<YoutubeSchedulerPolicy>> {
-    if !get_antibot_pacing(paths)
-        .map(|settings| settings.adaptive_protection_enabled)
-        .unwrap_or(true)
-    {
-        return Ok(None);
-    }
     let params: YoutubeSubscriptionRefreshV1Params = serde_json::from_str(params_json)?;
     let subscription =
         subscriptions::get_youtube_subscription_by_id(paths, &params.subscription_id)?.ok_or_else(
@@ -20830,21 +22101,20 @@ fn effective_youtube_enumeration_scheduler_policy(
     )?
     .unwrap_or_else(|| youtube_protection::ANONYMOUS_AUTH_FINGERPRINT.to_string());
     let runtime_epoch = youtube_protection::runtime_epoch_for_paths(paths);
-    let baseline = youtube_protection_baseline(paths)?;
+    let baseline = youtube_protection_baseline(paths, JobTrack::YoutubeRecurring)?;
+    // WP-0321 S4: one shared policy-state row for download AND enumeration eligibility.
     let state = youtube_protection::load_policy_state(
         paths,
         youtube_protection::PROVIDER_YOUTUBE,
-        youtube_protection::OPERATION_ENUMERATION,
+        youtube_protection::POLICY_STATE_OPERATION,
         &auth_fingerprint,
         &runtime_epoch,
     )?;
-    let tuning = youtube_protection::get_tuning(paths)?;
-    let effective =
-        youtube_protection::effective_policy_with_tuning(&baseline, &state, now_ms(), &tuning);
+    let effective = youtube_protection::effective_policy(&baseline, &state, now_ms());
     Ok(Some(YoutubeSchedulerPolicy {
         effective,
         next_eligible_probe_at_ms: state.next_eligible_probe_at_ms,
-        operation: youtube_protection::OPERATION_ENUMERATION,
+        operation: youtube_protection::POLICY_STATE_OPERATION,
         auth_fingerprint,
         runtime_epoch,
     }))
@@ -21330,6 +22600,7 @@ fn log_line(
     event: &str,
     data: serde_json::Value,
 ) -> Result<()> {
+    crate::job_activity::note(paths, job_id, &event.replace('_', " "));
     let line = serde_json::json!({
         "ts_ms": now_ms(),
         "job_id": job_id,
@@ -22433,29 +23704,13 @@ fn run_yt_dlp_with_browser_cookie_retry(
     args: &[String],
     job_id: Option<&str>,
     timeout_secs: u64,
-    using_browser_cookies: bool,
+    _using_browser_cookies: bool,
     expected_path_root: Option<&Path>,
 ) -> Result<std::process::Output> {
-    match run_yt_dlp(paths, args, job_id, timeout_secs, expected_path_root) {
-        Ok(output) => Ok(output),
-        Err(first_err) => {
-            if !using_browser_cookies {
-                return Err(first_err);
-            }
-
-            let mut retry_args = args.to_vec();
-            if !strip_browser_cookie_args(&mut retry_args) {
-                return Err(first_err);
-            }
-
-            match run_yt_dlp(paths, &retry_args, job_id, timeout_secs, expected_path_root) {
-                Ok(output) => Ok(output),
-                Err(second_err) => Err(EngineError::InstallFailed(format!(
-                    "{first_err}; retry without browser cookies failed: {second_err}"
-                ))),
-            }
-        }
-    }
+    // Keep the selected session and its original error. An unrelated subtitle or
+    // local-tool failure is not permission to retry anonymously, and combining the
+    // anonymous login error would falsely poison the authenticated policy state.
+    run_yt_dlp(paths, args, job_id, timeout_secs, expected_path_root)
 }
 
 fn cookie_json_to_netscape(raw_json: &str) -> Option<String> {
@@ -22942,6 +24197,7 @@ fn append_yt_dlp_runtime_args(
     args.push(
         paths
             .youtube_po_provider_plugin_dir()
+            .parent().expect("provider plugin has a parent")
             .to_string_lossy()
             .to_string(),
     );
@@ -23291,6 +24547,13 @@ fn kill_child_process_tree(child: &mut std::process::Child) {
 }
 
 fn yt_dlp_progress_fraction(line: &str) -> Option<f32> {
+    if let Some(raw) = line.trim().strip_prefix("VV_ACTIVITY:") {
+        let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+        let p = &value["progress"];
+        let total = p["total_bytes"].as_f64().or_else(|| p["total_bytes_estimate"].as_f64())?;
+        let received = p["downloaded_bytes"].as_f64()?;
+        return (total > 0.0 && received >= 0.0).then(|| (received / total).clamp(0.0, 1.0) as f32);
+    }
     let marker = "VV_PROGRESS:";
     let raw = line
         .split_once(marker)?
@@ -23326,6 +24589,23 @@ fn read_command_pipe_with_progress<R: Read>(
             continue;
         };
         let text = String::from_utf8_lossy(&line);
+        crate::job_activity::provider_line(&paths, id, &text);
+        if text.starts_with("VV_MEDIA_PRE:") {
+            // Publish authoritative metadata before transfer, including failed/partial attempts.
+            let _ = ingest_ytdlp_download_metadata(&paths, &line, id, "");
+            if let Ok(info) = serde_json::from_slice::<serde_json::Value>(&line[b"VV_MEDIA_PRE:".len()..]) {
+                if let Ok(receipt) = crate::archive_quality::selection(&info) {
+                    let _ = crate::archive_quality::save(&paths, id, &receipt);
+                }
+            }
+        }
+        if text.starts_with("WARNING:") || text.starts_with("ERROR:") {
+            if let Some(activity) = crate::job_activity::get(&paths, id) {
+                if let Some(message) = activity.lines.back() {
+                    let _ = log_line(&paths, id, "warn", "downloader_message", serde_json::json!({"message":message}));
+                }
+            }
+        }
         let Some(fraction) = yt_dlp_progress_fraction(&text) else {
             continue;
         };
@@ -23452,59 +24732,17 @@ fn run_command_output_with_control_inner(
     }
 }
 
-fn bundled_yt_dlp_path(paths: &AppPaths) -> PathBuf {
-    let mut path = paths.tools_dir().join("yt-dlp").join("yt-dlp");
-    if cfg!(windows) {
-        path.set_extension("exe");
-    }
-    path
-}
-
-fn ensure_bundled_yt_dlp(paths: &AppPaths) -> Result<Option<PathBuf>> {
-    let bundled = bundled_yt_dlp_path(paths);
-    if bundled.exists() {
-        return Ok(Some(bundled));
-    }
-
-    let _ = paths;
-    Ok(None)
-}
-
-fn verify_protected_youtube_runtime(paths: &AppPaths, provider_required: bool) -> Result<PathBuf> {
-    let bundled = bundled_yt_dlp_path(paths);
-    let pin = &crate::pinned_dependency_manifest::manifest().yt_dlp_windows;
-    let metadata = std::fs::metadata(&bundled).map_err(|_| {
-        EngineError::InstallFailed(
-            "the exact bundled yt-dlp runtime is missing; protected YouTube work is held"
-                .to_string(),
-        )
+fn verify_protected_youtube_runtime(
+    paths: &AppPaths,
+    provider_required: bool,
+) -> Result<crate::download_engines::ResolvedDownloadEngine> {
+    let engine = crate::download_engines::resolve_selected_engine(paths).map_err(|error| {
+        EngineError::InstallFailed(format!(
+            "the selected download engine failed integrity validation; protected YouTube work is held: {error}"
+        ))
     })?;
-    if metadata.len() != pin.file_bytes {
-        return Err(EngineError::InstallFailed(format!(
-            "the bundled yt-dlp runtime failed its pinned size check; protected YouTube work is held (expected={}, actual={})",
-            pin.file_bytes,
-            metadata.len()
-        )));
-    }
-    let mut file = std::fs::File::open(&bundled)?;
-    let mut hasher = Sha256::new();
-    let mut buffer = [0_u8; 128 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-    let actual = hex::encode_upper(hasher.finalize());
-    if !actual.eq_ignore_ascii_case(&pin.sha256_hex) {
-        return Err(EngineError::InstallFailed(
-            "the bundled yt-dlp runtime failed its pinned hash check; protected YouTube work is held"
-                .to_string(),
-        ));
-    }
     if provider_required {
-        let provider = crate::tools::youtube_po_provider_install_status(paths);
+        let provider = crate::tools::youtube_po_provider_execution_status(paths);
         if !provider.installed {
             return Err(EngineError::InstallFailed(
                 provider.readiness_error.unwrap_or_else(|| {
@@ -23514,7 +24752,7 @@ fn verify_protected_youtube_runtime(paths: &AppPaths, provider_required: bool) -
             ));
         }
     }
-    Ok(bundled)
+    Ok(engine)
 }
 
 fn emit_downloader_causal_event(
@@ -23863,6 +25101,7 @@ fn record_youtube_launch_command_receipt(
         return;
     }
     let identity = youtube_protection::runtime_identity_for_paths(paths);
+    let selected_engine = crate::download_engines::resolve_selected_engine(paths).ok();
     let policy = youtube_launch_policy_contexts()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -23879,7 +25118,16 @@ fn record_youtube_launch_command_receipt(
         object.insert("event_schema".to_string(), serde_json::json!(1));
         object.insert(
             "candidate_provenance".to_string(),
-            serde_json::json!("bundled_pinned"),
+            serde_json::json!(selected_engine
+                .as_ref()
+                .map(|engine| match engine.kind {
+                    crate::download_engines::DownloadEngineKind::PackagedYtDlp => "packaged_pinned",
+                    crate::download_engines::DownloadEngineKind::ManagedYtDlp =>
+                        "managed_generation",
+                    crate::download_engines::DownloadEngineKind::CustomExecutable =>
+                        "custom_generation",
+                })
+                .unwrap_or("unresolved")),
         );
         object.insert(
             "attempt_index".to_string(),
@@ -23891,11 +25139,17 @@ fn record_youtube_launch_command_receipt(
         );
         object.insert(
             "yt_dlp_version".to_string(),
-            serde_json::json!(identity.yt_dlp_version),
+            serde_json::json!(selected_engine
+                .as_ref()
+                .map(|engine| engine.version.as_str())
+                .or(identity.yt_dlp_version.as_deref())),
         );
         object.insert(
             "yt_dlp_sha256_hex".to_string(),
-            serde_json::json!(identity.yt_dlp_sha256_hex),
+            serde_json::json!(selected_engine
+                .as_ref()
+                .map(|engine| engine.sha256_hex.as_str())
+                .or(identity.yt_dlp_sha256_hex.as_deref())),
         );
         object.insert(
             "provider_version".to_string(),
@@ -23988,45 +25242,34 @@ fn run_yt_dlp(
     launch_args.push("--ignore-config".to_string());
     launch_args.extend(args.iter().cloned());
     let mut failures: Vec<String> = Vec::new();
-    let mut candidates: Vec<(String, Vec<String>)> = Vec::new();
+    let mut candidates: Vec<(crate::download_engines::ResolvedDownloadEngine, Vec<String>)> =
+        Vec::new();
     let protected_youtube = args.iter().any(|arg| is_youtube_url(arg))
         || args.iter().any(|arg| arg.contains("youtubepot-bgutilhttp"));
     let provider_required = args.iter().any(|arg| arg.contains("youtubepot-bgutilhttp"));
-    let bundled_result = if protected_youtube {
-        verify_protected_youtube_runtime(paths, provider_required).map(Some)
+    let selected_result = if protected_youtube {
+        verify_protected_youtube_runtime(paths, provider_required)
     } else {
-        ensure_bundled_yt_dlp(paths)
+        crate::download_engines::resolve_selected_engine(paths)
     };
-    match bundled_result {
-        Ok(Some(bundled)) if bundled.exists() => {
-            candidates.push((bundled.to_string_lossy().to_string(), Vec::new()));
+    match selected_result {
+        Ok(engine) => {
+            candidates.push((engine, Vec::new()));
         }
-        Ok(_) => {}
         Err(err) => {
-            failures.push(format!("bundled yt-dlp bootstrap failed: {err}"));
+            failures.push(format!("selected download engine is unavailable: {err}"));
         }
-    }
-    if !protected_youtube {
-        candidates.push(("yt-dlp".to_string(), Vec::new()));
-        candidates.push((
-            "python".to_string(),
-            vec!["-m".to_string(), "yt_dlp".to_string()],
-        ));
-        candidates.push((
-            "python3".to_string(),
-            vec!["-m".to_string(), "yt_dlp".to_string()],
-        ));
     }
 
-    for (candidate_index, (program, prefix)) in candidates.into_iter().enumerate() {
-        let program_label = if protected_youtube {
-            "bundled_pinned_yt_dlp"
-        } else if program == "python" || program == "python3" {
-            "python_yt_dlp"
-        } else {
-            "yt_dlp"
+    for (candidate_index, (engine, prefix)) in candidates.into_iter().enumerate() {
+        let program_label = match engine.kind {
+            crate::download_engines::DownloadEngineKind::PackagedYtDlp => "packaged_yt_dlp",
+            crate::download_engines::DownloadEngineKind::ManagedYtDlp => "managed_yt_dlp",
+            crate::download_engines::DownloadEngineKind::CustomExecutable => {
+                "custom_download_engine"
+            }
         };
-        let mut cmd = cmd::command(&program);
+        let mut cmd = cmd::command(&engine.program);
         cmd.args(&prefix);
         cmd.args(&launch_args);
         if protected_youtube {
@@ -24165,11 +25408,10 @@ fn run_yt_dlp(
     }
 
     Err(EngineError::InstallFailed(if protected_youtube {
-        "the exact bundled yt-dlp runtime is required for protected YouTube work; unverified PATH/Python fallbacks are disabled"
+        "a verified selected download engine is required for protected YouTube work; unverified PATH/Python fallbacks are disabled"
             .to_string()
     } else {
-        "yt-dlp is required for this webpage video link. Install the pinned VoxVulgi tooling payload."
-            .to_string()
+        "a verified selected download engine is required for this webpage video link".to_string()
     }))
 }
 
@@ -24301,14 +25543,12 @@ fn expand_yt_dlp_entries_structured_with_sleep(
         url.to_string(),
     ];
 
-    // WP-0257 (#3): pace API page requests during enumeration to reduce anti-bot exposure.
-    // This is the dominant anti-bot surface (a channel/playlist enumeration issues many API
-    // page requests). Operator-tunable in Options -> Anti-bot pacing; 0 disables.
-    let sleep_requests = sleep_requests_override.unwrap_or_else(|| {
-        get_antibot_pacing(paths)
-            .map(|s| s.enumeration_sleep_requests)
-            .unwrap_or(DEFAULT_ENUM_SLEEP_REQUESTS)
-    });
+    // WP-0257 (#3), WP-0321 S4: pace API page requests during enumeration to reduce anti-bot
+    // exposure. This is the dominant anti-bot surface (a channel/playlist enumeration issues many
+    // API page requests). The caller normally supplies the `youtube_recurring` lane's
+    // `sleep_requests_secs`; this fallback only applies when no override was given.
+    const FALLBACK_ENUM_SLEEP_REQUESTS: u32 = 2;
+    let sleep_requests = sleep_requests_override.unwrap_or(FALLBACK_ENUM_SLEEP_REQUESTS);
     if sleep_requests > 0 {
         args.push("--sleep-requests".to_string());
         args.push(sleep_requests.to_string());
@@ -25299,8 +26539,11 @@ fn build_yt_dlp_output_template_for_attempt(
     // Keep the legacy channel/uploader naming signal, but only as part of the single staging
     // basename. No saved path template is allowed to choose directories inside or outside the
     // engine-owned attempt root.
+    // Exactly "." means use the resolved subscription destination, not a path component.
     let path_template = normalize_non_empty(output_path_template)
-        .map(|value| managed_ytdlp_template_basename_fragment(&value, "output path template"))
+        .map(|value| if value == "." { Ok(String::new()) } else {
+            managed_ytdlp_template_basename_fragment(&value, "output path template")
+        })
         .transpose()?
         .unwrap_or_else(|| "%(channel,uploader|misc)s".to_string());
 
@@ -25318,7 +26561,8 @@ fn build_yt_dlp_output_template_for_attempt(
         .filter(|value| !value.is_empty())
         .map(|value| format!("_vvattempt-{value}"))
         .unwrap_or_default();
-    let template = format!("{path_template}_{file_template}_{suffix}{attempt_suffix}.%(ext)s");
+    let prefix = if path_template.is_empty() { String::new() } else { format!("{path_template}_") };
+    let template = format!("{prefix}{file_template}_{suffix}{attempt_suffix}.%(ext)s");
     validate_managed_ytdlp_output_basename(&template)?;
     Ok(template)
 }
@@ -25988,12 +27232,18 @@ fn atomic_publish_no_replace(staging: &Path, destination: &Path) -> Result<()> {
     {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::Storage::FileSystem::{MoveFileExW, MOVEFILE_WRITE_THROUGH};
-        let source_wide = staging
+        // canonicalize supplies extended-length Windows paths, including UNC roots.
+        // The final destination need not exist; resolve only its existing parent.
+        let source = std::fs::canonicalize(staging)?;
+        let parent = destination.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        let name = destination.file_name().ok_or_else(|| EngineError::InstallFailed("managed output destination has no filename".into()))?;
+        let target = std::fs::canonicalize(parent)?.join(name);
+        let source_wide = source
             .as_os_str()
             .encode_wide()
             .chain(std::iter::once(0))
             .collect::<Vec<_>>();
-        let destination_wide = destination
+        let destination_wide = target
             .as_os_str()
             .encode_wide()
             .chain(std::iter::once(0))
@@ -26121,7 +27371,7 @@ impl ManagedOutputGuard {
     fn publish(&self, staging: &Path) -> Result<()> {
         atomic_publish_no_replace(staging, &self.destination).map_err(|error| {
             EngineError::InstallFailed(format!(
-                "managed output publish refused to replace an existing destination ({}): {error}",
+                "managed output publication failed; existing destinations are never replaced ({}): {error}",
                 self.destination.to_string_lossy()
             ))
         })
@@ -26797,12 +28047,14 @@ fn download_yt_dlp_url_to_library(
         yt_dlp_retries.to_string(),
         "--fragment-retries".to_string(),
         yt_dlp_fragment_retries.to_string(),
-        "--no-warnings".to_string(),
-        "--ignore-errors".to_string(),
+        "--abort-on-error".to_string(),
         "--restrict-filenames".to_string(),
         "--newline".to_string(),
+        "--progress".to_string(),
         "--progress-template".to_string(),
-        "download:VV_PROGRESS:%(progress._percent_str)s".to_string(),
+        "download:VV_ACTIVITY:{\"title\":%(info.title)j,\"progress\":%(progress)j}".to_string(),
+        "--progress-template".to_string(),
+        "postprocess:VV_POSTPROCESS:%(progress)j".to_string(),
         "--print".to_string(),
         "before_dl:VV_MEDIA_PRE:%()j".to_string(),
         "--print".to_string(),
@@ -26816,20 +28068,14 @@ fn download_yt_dlp_url_to_library(
         url.to_string(),
     ];
 
-    if let Some(format_value) = normalize_non_empty(format_preference)
-        .map(|value| neutralize_managed_video_format_selector(&value))
-        .filter(|value| !value.trim().is_empty())
-    {
-        args.push("-f".to_string());
-        args.push(format_value);
-    }
-
-    if let Some(quality_value) = normalize_non_empty(quality_preference) {
-        if let Some(limit) = parse_quality_limit(&quality_value) {
-            args.push("-S".to_string());
-            args.push(format!("res:{limit}"));
-        }
-    }
+    // Archive policy supersedes legacy queued format/quality/subtitle preferences.
+    let _ = (format_preference, quality_preference, subtitle_mode);
+    let subtitle_mode = Some("auto");
+    args.extend(["-f", "bv*+ba/b", "-S", "res,fps,hdr:12,quality"].map(str::to_string));
+    let policy_plugin = crate::archive_quality::install_plugin(&attempt_output_dir)?;
+    args.extend(["--plugin-dirs".to_string(), policy_plugin.to_string_lossy().to_string(),
+        "--use-postprocessor".to_string(), "VoxVulgiArchivePolicy:when=pre_process".to_string(),
+        "--use-postprocessor".to_string(), "VoxVulgiArchiveMetadata:when=after_move".to_string()]);
 
     append_yt_dlp_archive_download_options(
         &mut args,
@@ -26898,32 +28144,6 @@ fn download_yt_dlp_url_to_library(
         using_browser_cookies,
         Some(&attempt_output_dir),
     );
-    let output_res = match output_res {
-        Err(first_err)
-            if normalize_non_empty(format_preference).is_some()
-                && yt_dlp_should_retry_without_format(url, &first_err) =>
-        {
-            let mut retry_args = args.clone();
-            if !strip_yt_dlp_option_with_value(&mut retry_args, "-f") {
-                Err(first_err)
-            } else {
-                match run_yt_dlp_with_browser_cookie_retry(
-                    paths,
-                    &retry_args,
-                    Some(job_id),
-                    YT_DLP_DOWNLOAD_TIMEOUT_SECS,
-                    using_browser_cookies,
-                    Some(&attempt_output_dir),
-                ) {
-                    Ok(output) => Ok(output),
-                    Err(second_err) => Err(EngineError::InstallFailed(format!(
-                        "{first_err}; retry without explicit format failed: {second_err}"
-                    ))),
-                }
-            }
-        }
-        other => other,
-    };
     let output_res = run_yt_dlp_with_dependency_refresh_retry(
         paths,
         &args,
@@ -26971,24 +28191,7 @@ fn download_yt_dlp_url_to_library(
             );
             error
         })?;
-    let downloaded = stdout
-        .lines()
-        .map(str::trim)
-        .filter(|line| {
-            !line.is_empty()
-                && !line.contains("VV_PROGRESS:")
-                && !line.starts_with("VV_MEDIA_PRE:")
-                && !line.starts_with("VV_MEDIA_POST:")
-                && !line.starts_with("VV_MEDIA_INFO:")
-        })
-        .last()
-        .map(PathBuf::from)
-        .ok_or_else(|| {
-            EngineError::InstallFailed(format!(
-                "yt-dlp did not report an output file for {}",
-                redact_url_for_log(url)
-            ))
-        })?;
+    let downloaded = yt_dlp_reported_output_path(&stdout)?;
 
     let downloaded = if downloaded.is_absolute() {
         downloaded
@@ -27024,6 +28227,8 @@ fn download_yt_dlp_url_to_library(
             );
             error
         })?;
+    let quality_receipt = crate::archive_quality::validate_output(&output.stdout, &probe)?;
+    crate::archive_quality::save(paths, job_id, &quality_receipt)?;
     let removed_sidecars = remove_proven_embedded_subtitle_sidecars(
         paths,
         &downloaded,
@@ -27807,6 +29012,128 @@ fn detected_image_extension(content_type: &str, bytes: &[u8]) -> Option<&'static
     None
 }
 
+/// WP-0322 B2: one audio stream that needs its language (and, when yt-dlp reported one, its
+/// title) written back into an already-muxed managed MKV output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AudioLanguageRetag {
+    /// `ffmpeg`'s per-type stream index (`s:a:<stream_index>`), i.e. the position within
+    /// `probe.audio_streams`, not the absolute container stream index.
+    stream_index: usize,
+    language: String,
+    title: Option<String>,
+}
+
+/// WP-0322 B2: decides whether an audio-track validation failure is retaggable in place or a
+/// real mismatch that must still fail the download. Reuses the same greedy positional-match
+/// rule as [`validate_stream_expectations`] (language + title) to first pair off every expected
+/// track that already fully matches; any expected track left over is retaggable only when it
+/// wants a language, and exactly one still-unmatched observed track has no language tag but a
+/// matching title (yt-dlp reported the language; the app's own mux just failed to write it).
+/// Any other kind of leftover (title mismatch, wrong count, or an observed track that already
+/// carries a different language) is a real mismatch and returns `None`.
+fn plan_audio_language_retag(
+    expected: &[StreamExpectation],
+    actual: &[StreamExpectation],
+) -> Option<Vec<AudioLanguageRetag>> {
+    if expected.len() != actual.len() {
+        return None;
+    }
+    let mut consumed = vec![false; actual.len()];
+    let mut plan = Vec::new();
+    for wanted in expected {
+        let exact = actual.iter().enumerate().position(|(index, observed)| {
+            !consumed[index]
+                && match (wanted.language.as_deref(), observed.language.as_deref()) {
+                    (Some(w), Some(o)) => subtitle_languages_match(w, o),
+                    (Some(_), None) => false,
+                    (None, _) => true,
+                }
+                && metadata_value_matches(&wanted.title, &observed.title)
+        });
+        if let Some(index) = exact {
+            consumed[index] = true;
+            continue;
+        }
+        let language = wanted
+            .language
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())?;
+        let retag_candidate = actual.iter().enumerate().position(|(index, observed)| {
+            !consumed[index]
+                && observed.language.is_none()
+                && metadata_value_matches(&wanted.title, &observed.title)
+        });
+        let index = retag_candidate?;
+        consumed[index] = true;
+        plan.push(AudioLanguageRetag {
+            stream_index: index,
+            language: language.to_string(),
+            title: wanted.title.clone(),
+        });
+    }
+    (!plan.is_empty()).then_some(plan)
+}
+
+/// WP-0322 B2: stream-copy remux that only writes `-metadata:s:a:<i>` language/title tags for
+/// the planned audio streams, then atomically replaces `output_path` (temp file in the same
+/// directory + rename, so the replace is atomic on the same volume on both Windows and POSIX).
+fn retag_audio_language_in_place(
+    paths: &AppPaths,
+    output_path: &Path,
+    plan: &[AudioLanguageRetag],
+) -> Result<()> {
+    let parent = output_path.parent().ok_or_else(|| {
+        EngineError::InstallFailed(format!(
+            "managed MKV output has no parent directory to retag: {}",
+            output_path.to_string_lossy()
+        ))
+    })?;
+    let file_name = output_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("output.mkv");
+    let temp_path = parent.join(format!(
+        "{file_name}.retag-{}.mkv",
+        Uuid::new_v4().simple()
+    ));
+
+    let mut ff = cmd::command(paths.ffmpeg_cmd());
+    ff.args(["-nostdin", "-y"])
+        .arg("-i")
+        .arg(output_path)
+        .args(["-map", "0", "-c", "copy"]);
+    for retag in plan {
+        ff.arg(format!("-metadata:s:a:{}", retag.stream_index))
+            .arg(format!("language={}", retag.language));
+        if let Some(title) = retag
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            ff.arg(format!("-metadata:s:a:{}", retag.stream_index))
+                .arg(format!("title={title}"));
+        }
+    }
+    ff.arg(&temp_path);
+    let output = ffmpeg::run_output(&mut ff, "ffmpeg")?;
+    if !output.status.success() {
+        let _ = std::fs::remove_file(&temp_path);
+        return Err(EngineError::ExternalToolFailed {
+            tool: "ffmpeg".to_string(),
+            code: output.status.code(),
+            stderr: format!(
+                "managed MKV audio-language retag remux failed; original retained at {}: {}",
+                output_path.to_string_lossy(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+        });
+    }
+    std::fs::rename(&temp_path, output_path)?;
+    Ok(())
+}
+
 fn validate_managed_mkv_output(
     paths: &AppPaths,
     output_path: &Path,
@@ -27829,7 +29156,7 @@ fn validate_managed_mkv_output(
             output_path.to_string_lossy()
         )));
     }
-    let probe = ffmpeg::probe(paths, output_path)?;
+    let mut probe = ffmpeg::probe(paths, output_path)?;
     if probe.container.as_deref() != Some("matroska") {
         return Err(EngineError::InstallFailed(format!(
             "managed .mkv output has non-Matroska container {:?}: {}",
@@ -27851,19 +29178,42 @@ fn validate_managed_mkv_output(
             output_path.to_string_lossy()
         )));
     }
-    validate_stream_expectations(
-        "audio",
-        &expectations.audio_tracks,
-        &probe
+    let observed_audio = |probe: &ffmpeg::MediaProbe| {
+        probe
             .audio_streams
             .iter()
             .map(|stream| StreamExpectation {
                 language: stream.language.clone(),
                 title: stream.title.clone(),
             })
-            .collect::<Vec<_>>(),
+            .collect::<Vec<_>>()
+    };
+    if let Err(audio_error) = validate_stream_expectations(
+        "audio",
+        &expectations.audio_tracks,
+        &observed_audio(&probe),
         output_path,
-    )?;
+    ) {
+        // WP-0322 B2: yt-dlp reported a language for a selected audio track but the app's own
+        // mux dropped it (no language tag on the muxed stream). Fix the file with a
+        // stream-copy remux instead of failing the whole download for a tag the app itself
+        // failed to write; only surface the original diagnostic if the retag doesn't actually
+        // resolve it.
+        match plan_audio_language_retag(&expectations.audio_tracks, &observed_audio(&probe)) {
+            Some(plan) => {
+                retag_audio_language_in_place(paths, output_path, &plan)?;
+                probe = ffmpeg::probe(paths, output_path)?;
+                validate_stream_expectations(
+                    "audio",
+                    &expectations.audio_tracks,
+                    &observed_audio(&probe),
+                    output_path,
+                )
+                .map_err(|_| audio_error)?;
+            }
+            None => return Err(audio_error),
+        }
+    }
     if probe.subtitle_streams.len() < expectations.subtitle_tracks.len() {
         return Err(EngineError::InstallFailed(format!(
             "managed MKV output lost subtitle streams (expected at least {}, found {}): {}",
@@ -28855,6 +30205,18 @@ fn yt_dlp_subtitles_requested(subtitle_mode: Option<&str>) -> bool {
             | Some("srt")
             | Some("sidecar")
     )
+}
+
+fn yt_dlp_reported_output_path(stdout: &str) -> Result<PathBuf> {
+    // Plain --print filepath sanitizes non-ASCII directories under --restrict-filenames.
+    // The JSON receipt retains the actual filesystem path.
+    let post = stdout.lines().filter_map(|line| line.strip_prefix("VV_MEDIA_POST:")).last()
+        .ok_or_else(|| EngineError::InstallFailed("Missing structured download output path".into()))?;
+    let value: serde_json::Value = serde_json::from_str(post)?;
+    let path = value.get("filepath").and_then(serde_json::Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+        .ok_or_else(|| EngineError::InstallFailed("Missing structured download output path".into()))?;
+    Ok(PathBuf::from(path))
 }
 
 fn yt_dlp_managed_media_expectations(
@@ -31377,6 +32739,16 @@ INSERT INTO library_item (
     }
 
     #[test]
+    fn structured_download_path_preserves_unicode_and_ignores_plain_output() {
+        let path = r"Z:\Video\휴지필름\test.mkv";
+        let stdout = format!("sanitized-path.mkv\nVV_MEDIA_POST:{}\npostprocessor finished\n", serde_json::json!({"filepath":path}));
+        assert_eq!(yt_dlp_reported_output_path(&stdout).unwrap(), PathBuf::from(path));
+        assert!(yt_dlp_reported_output_path("sanitized-path.mkv").is_err());
+        assert!(yt_dlp_reported_output_path("VV_MEDIA_POST:{}").is_err());
+        assert!(yt_dlp_reported_output_path("VV_MEDIA_POST:invalid").is_err());
+    }
+
+    #[test]
     fn subtitle_publication_allows_writer_during_artifact_io_and_releases_export_read() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().join("app"));
@@ -32711,8 +34083,11 @@ INSERT INTO library_item (
 
         assert!(gate.ready());
         assert_eq!(gate.candidate_order()[0], JobTrack::YoutubeSingle);
-        let first_delay = gate.record_start(&paths, "foreground-job", JobTrack::YoutubeSingle, 20);
-        assert_eq!(first_delay, 20);
+        let first_delay = gate.record_start(&paths, "foreground-job", JobTrack::YoutubeSingle);
+        assert!(
+            (5..=15).contains(&first_delay),
+            "single lane base+jitter: {first_delay}"
+        );
         assert!(
             !gate.ready(),
             "one same-tick start must close the shared gate"
@@ -32725,44 +34100,33 @@ INSERT INTO library_item (
                 .expect("clock supports test interval"),
         );
         assert!(gate.ready());
-        let second_delay =
-            gate.record_start(&paths, "recurring-job", JobTrack::YoutubeRecurring, 0);
-        assert!((5..=10).contains(&second_delay));
+        let second_delay = gate.record_start(&paths, "recurring-job", JobTrack::YoutubeRecurring);
+        assert!(
+            (10..=15).contains(&second_delay),
+            "recurring lane base+jitter: {second_delay}"
+        );
         assert_eq!(gate.candidate_order()[0], JobTrack::YoutubeSingle);
     }
 
+    /// WP-0321 S4: `record_start` spaces the next start by a random value in `base..=base+jitter`
+    /// of the lane that just started (default youtube_single 5/10, youtube_recurring 10/5).
     #[test]
-    fn youtube_start_gate_uses_effective_aggregate_policy_interval() {
+    fn start_gate_spaces_by_lane_base_plus_jitter() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
         db::ensure_schema(&paths).expect("schema");
-        let runtime_epoch = youtube_protection::runtime_epoch_for_paths(&paths);
-        let now = now_ms();
-        let conn = db::open(&paths).expect("open");
-        conn.execute(
-            "INSERT INTO downloader_policy_state(provider,operation,auth_fingerprint,runtime_epoch,mode,entered_at_ms,version) VALUES(?1,?2,?3,?4,'conservative',?5,1)",
-            params![
-                youtube_protection::PROVIDER_YOUTUBE,
-                youtube_protection::OPERATION_DOWNLOAD,
-                youtube_protection::ANONYMOUS_AUTH_FINGERPRINT,
-                runtime_epoch,
-                now,
-            ],
-        )
-        .expect("seed conservative policy");
-        let params_json = serde_json::json!({
-            "url": "https://www.youtube.com/watch?v=aggregate123",
-            "provider": DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP,
-            "yt_dlp_concurrent_fragments": 8,
-            "yt_dlp_sleep_interval": 0,
-            "yt_dlp_sleep_requests": 0,
-        })
-        .to_string();
+        let mut gate = YoutubeStartGate::new();
 
-        assert_eq!(
-            effective_youtube_start_interval_secs(&paths, "aggregate-job", &params_json)
-                .expect("effective interval"),
-            20
+        let single_delay = gate.record_start(&paths, "single-job", JobTrack::YoutubeSingle);
+        assert!(
+            (5..=15).contains(&single_delay),
+            "single lane base+jitter: {single_delay}"
+        );
+
+        let recurring_delay = gate.record_start(&paths, "recurring-job", JobTrack::YoutubeRecurring);
+        assert!(
+            (10..=15).contains(&recurring_delay),
+            "recurring lane base+jitter: {recurring_delay}"
         );
     }
 
@@ -32850,8 +34214,9 @@ INSERT INTO library_item (
         assert_eq!(production.next_eligible_probe_at_ms, Some(future_probe));
     }
 
+    /// WP-0321 S4: download and enumeration share one policy-state row (`POLICY_STATE_OPERATION`).
     #[test]
-    fn scheduler_keeps_ineligible_enumeration_cooldown_jobs_queued() {
+    fn scheduler_keeps_ineligible_shared_cooldown_enumeration_jobs_queued() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
         db::ensure_schema(&paths).expect("schema");
@@ -32883,14 +34248,14 @@ INSERT INTO library_item (
             "INSERT INTO downloader_policy_state(provider,operation,auth_fingerprint,runtime_epoch,mode,entered_at_ms,next_eligible_probe_at_ms,version) VALUES(?1,?2,?3,?4,'cooldown',?5,?6,1)",
             params![
                 youtube_protection::PROVIDER_YOUTUBE,
-                youtube_protection::OPERATION_ENUMERATION,
+                youtube_protection::POLICY_STATE_OPERATION,
                 youtube_protection::ANONYMOUS_AUTH_FINGERPRINT,
                 runtime_epoch,
                 now,
                 future_probe,
             ],
         )
-        .expect("seed enumeration cooldown");
+        .expect("seed shared cooldown");
         let params_json = serde_json::json!({ "subscription_id": subscription.id }).to_string();
 
         let policy = effective_youtube_enumeration_scheduler_policy(
@@ -32926,6 +34291,7 @@ INSERT INTO library_item (
         let baseline = youtube_protection::DownloaderBaselinePolicy {
             concurrent_fragments: 4,
             sleep_interval_secs: 5,
+            sleep_jitter_secs: 10,
             sleep_requests_secs: 1,
             update_tranche_size: 25,
             limit_rate: None,
@@ -32973,21 +34339,85 @@ INSERT INTO library_item (
             "https://www.youtube.com/playlist?list=PLmanual",
             "https://youtu.be/subscript1",
         ] {
-            let (sleep, fragments) =
-                effective_direct_download_profile(&paths, url, "profile-job", 0, 8);
-            assert!((5..=10).contains(&sleep), "safe sleep for {url}");
-            assert_eq!(fragments, 1, "safe fragment limit for {url}");
+            let profile = effective_direct_download_profile(
+                &paths,
+                url,
+                JobTrack::YoutubeSingle,
+                0,
+                8,
+                0,
+                None,
+            );
+            assert!(
+                (5..=10).contains(&profile.sleep_interval_secs),
+                "safe sleep for {url}"
+            );
+            assert_eq!(profile.concurrent_fragments, 1, "safe fragment limit for {url}");
         }
         assert_eq!(
             effective_direct_download_profile(
                 &paths,
                 "https://example.com/video.mp4",
-                "non-youtube-job",
+                JobTrack::OtherVideo,
                 0,
                 8,
+                1,
+                None,
             ),
-            (0, 8)
+            DirectDownloadProfile {
+                sleep_interval_secs: 0,
+                sleep_jitter_secs: 0,
+                concurrent_fragments: 8,
+                sleep_requests_secs: 1,
+                limit_rate: None,
+            }
         );
+    }
+
+    /// WP-0321 S4: the YouTube lane policy is authoritative (no floor merge with the preset);
+    /// non-YouTube sites keep using the requested preset values verbatim.
+    #[test]
+    fn youtube_lane_policy_is_authoritative_and_other_sites_use_preset() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let single = effective_direct_download_profile(
+            &paths,
+            "https://www.youtube.com/watch?v=laneSingle1",
+            JobTrack::YoutubeSingle,
+            0,
+            8,
+            0,
+            None,
+        );
+        assert_eq!(single.sleep_interval_secs, 5, "single lane sleep verbatim");
+        assert_eq!(single.sleep_jitter_secs, 10, "single lane jitter verbatim");
+        assert_eq!(single.concurrent_fragments, 1, "single lane fragments verbatim");
+
+        let recurring = effective_direct_download_profile(
+            &paths,
+            "https://www.youtube.com/watch?v=laneRecurring1",
+            JobTrack::YoutubeRecurring,
+            0,
+            8,
+            0,
+            None,
+        );
+        assert_eq!(recurring.sleep_interval_secs, 10, "recurring lane sleep verbatim");
+        assert_eq!(recurring.sleep_jitter_secs, 5, "recurring lane jitter verbatim");
+
+        let other = effective_direct_download_profile(
+            &paths,
+            "https://example.com/video.mp4",
+            JobTrack::OtherVideo,
+            3,
+            8,
+            2,
+            None,
+        );
+        assert_eq!(other.sleep_interval_secs, 3, "non-youtube keeps requested preset");
+        assert_eq!(other.concurrent_fragments, 8, "non-youtube keeps requested preset");
     }
 
     #[test]
@@ -33121,6 +34551,48 @@ INSERT INTO library_item (
     }
 
     #[test]
+    fn restart_current_refuses_unowned_running_job_without_canceling() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).unwrap();
+        let job = enqueue_with_type_item_batch_and_track(&paths, JobType::DownloadDirectUrl,
+            r#"{"url":"https://example.com/foreign.mp4"}"#.into(), None, None, JobTrack::OtherVideo).unwrap();
+        let conn = db::open(&paths).unwrap();
+        conn.execute("UPDATE job SET status='running' WHERE id=?1", [&job.id]).unwrap();
+        drop(conn);
+        assert!(restart_download_current(&paths, &job.id).unwrap_err().to_string().contains("ownership"));
+        assert_eq!(get_job(&paths, &job.id).unwrap().unwrap().status, JobStatus::Running);
+        assert!(current_download_pacing_params(&paths, "null").is_err());
+    }
+
+    #[test]
+    fn restart_current_preserves_identity_and_uses_current_pacing() {
+        // WP-0321 S6: a queued, never-started row is idempotent in place — same row, same
+        // attempt, current pacing, and it stays queued (nothing to cancel/drain/reopen).
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).unwrap();
+        let presets = config::load_download_presets_config(&paths).unwrap();
+        let preset = presets.presets.first().unwrap();
+        let original = enqueue_with_type_item_batch_and_track(&paths, JobType::DownloadDirectUrl,
+            serde_json::json!({"url":"https://example.com/recovery.mp4","output_dir":"archive","preset_id":preset.id,"yt_dlp_sleep_requests":600,"format":"best","subtitle_languages":["en"]}).to_string(),
+            None, Some("recovery-batch".into()), JobTrack::OtherVideo).unwrap();
+        let replacement = restart_download_current(&paths, &original.id).unwrap();
+        let params: serde_json::Value = serde_json::from_str(&replacement.params_json).unwrap();
+        assert_eq!(params["yt_dlp_sleep_requests"], preset.yt_dlp_sleep_requests);
+        assert_eq!(params["output_dir"], "archive");
+        assert_eq!(params["format"], "best");
+        assert_eq!(params["subtitle_languages"], serde_json::json!(["en"]));
+        assert_eq!(replacement.id, original.id);
+        assert_eq!(replacement.attempt_no, 1);
+        assert_eq!(replacement.track, original.track);
+        assert_eq!(replacement.batch_id, original.batch_id);
+        assert_eq!(get_job(&paths, &original.id).unwrap().unwrap().status, JobStatus::Queued);
+        assert_eq!(restart_download_current(&paths, &original.id).unwrap().id, replacement.id);
+        assert_eq!(restart_download_current(&paths, &original.id).unwrap().attempt_no, 1);
+    }
+
+    #[test]
     fn retry_uses_legacy_track_fallback_only_when_source_track_is_null_or_invalid() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
@@ -33228,6 +34700,66 @@ INSERT INTO library_item (
             saved,
             "a mid-set SQLite error must roll back every track write"
         );
+    }
+
+    #[test]
+    fn operator_activity_pages_are_canonical_and_running_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).unwrap();
+        let conn = db::open(&paths).unwrap();
+        for (id, status, track, created) in [("old-running", "running", "youtube_single", 1), ("new-queued", "queued", "youtube_single", 5), ("image", "queued", "image_archive", 6), ("failure", "failed", "youtube_single", 7)] {
+            conn.execute("INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path,track,target_title) VALUES(?1,'download_direct_url',?2,0,'{}',?3,'',?4,?1)", params![id,status,created,track]).unwrap();
+        }
+        drop(conn);
+        let first = operator_activity_page(&paths, "youtube", "now", 0, 1).unwrap();
+        assert_eq!(first["total"], 2);
+        assert_eq!(first["jobs"][0]["job"]["id"], "old-running");
+        assert_eq!(first["has_more"], true);
+        let second = operator_activity_page(&paths, "youtube", "now", 1, 1).unwrap();
+        assert_eq!(second["jobs"][0]["job"]["id"], "new-queued");
+        assert_eq!(second["has_more"], false);
+        assert_eq!(operator_activity_page(&paths,"images","now",0,20).unwrap()["total"],1);
+        assert_eq!(operator_activity_page(&paths,"youtube","attention",0,20).unwrap()["total"],1);
+        assert!(operator_activity_page(&paths,"unknown","now",0,20).is_err());
+        assert!(operator_activity_page(&paths,"all","unknown",0,20).is_err());
+    }
+
+    #[test]
+    fn job_tracks_runtime_snapshot_projects_durable_cooldown_when_runner_has_not_observed_gate() {
+        // WP-0320: with nothing queued the runner never touches the gate, so the runtime state
+        // stays "ready" while the durable policy is in cooldown. The snapshot must surface the
+        // pause and the next probe time anyway.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let auth_fingerprint =
+            current_youtube_protection_auth_fingerprint(&paths).expect("fingerprint");
+        let runtime_epoch = youtube_protection::runtime_epoch_for_paths(&paths);
+        let now = now_ms();
+        let next_probe = now + 2 * 3_600_000;
+        {
+            let conn = db::open(&paths).expect("open");
+            conn.execute(
+                "INSERT INTO downloader_policy_state(provider,operation,auth_fingerprint,runtime_epoch,mode,entered_at_ms,last_evidence_at_ms,next_eligible_probe_at_ms,version,cooldown_failed_probe_count) VALUES(?1,?2,?3,?4,'cooldown',?5,?5,?6,1,1)",
+                params![
+                    youtube_protection::PROVIDER_YOUTUBE,
+                    youtube_protection::OPERATION_DOWNLOAD,
+                    auth_fingerprint,
+                    runtime_epoch,
+                    now - 3_600_000,
+                    next_probe,
+                ],
+            )
+            .expect("seed cooldown state");
+        }
+        let gate = youtube_gate_snapshot(&paths);
+        assert_eq!(gate.mode.as_deref(), Some("cooldown"));
+        assert_eq!(gate.cooldown_attempt, 2);
+        assert_eq!(gate.state, "held");
+        assert_eq!(gate.hold_reason.as_deref(), Some("adaptive_youtube_cooldown"));
+        assert_eq!(gate.next_eligible_at_ms, Some(next_probe));
+        assert_eq!(gate.entered_at_ms, Some(now - 3_600_000));
     }
 
     #[test]
@@ -33415,9 +34947,12 @@ INSERT INTO library_item (
             .collect::<rusqlite::Result<Vec<_>>>()
             .expect("collect explain")
             .join(" | ");
+        // Either durable (track, status, …) index satisfies the GROUP BY without a sort; SQLite's
+        // choice between them shifts with table shape (WP-0321 S6 added columns).
         assert!(
-            plan.contains("idx_job_track_status_created"),
-            "aggregate must use the durable track/status index; plan: {plan}"
+            plan.contains("idx_job_track_status_created")
+                || plan.contains("idx_job_track_status_type_created"),
+            "aggregate must use a durable track/status index; plan: {plan}"
         );
         assert!(
             !plan.contains("USE TEMP B-TREE"),
@@ -33480,30 +35015,15 @@ INSERT INTO library_item (
             def.recurring_min_interval_secs,
             DEFAULT_RECURRING_MIN_INTERVAL_SECS
         );
-        assert_eq!(def.enumeration_sleep_requests, DEFAULT_ENUM_SLEEP_REQUESTS);
         assert_eq!(def.update_all_batch_size, DEFAULT_UPDATE_ALL_BATCH);
         assert_eq!(def.recurring_jitter_secs, DEFAULT_RECURRING_JITTER_SECS);
-        assert_eq!(
-            def.recurring_download_min_sleep_secs,
-            DEFAULT_RECURRING_DOWNLOAD_MIN_SLEEP_SECS
-        );
-        assert_eq!(
-            def.recurring_download_max_sleep_secs,
-            DEFAULT_RECURRING_DOWNLOAD_MAX_SLEEP_SECS
-        );
-        let sleep = recurring_download_sleep_secs(&paths, "stable-job-id");
-        assert!((5..=10).contains(&sleep));
 
         let saved = set_antibot_pacing(
             &paths,
             AntiBotPacingSettings {
-                adaptive_protection_enabled: false,
                 recurring_min_interval_secs: 999_999,
                 recurring_jitter_secs: 999_999,
-                enumeration_sleep_requests: 999,
                 update_all_batch_size: 10,
-                recurring_download_min_sleep_secs: 999,
-                recurring_download_max_sleep_secs: 1,
             },
         )
         .expect("set");
@@ -33511,18 +35031,8 @@ INSERT INTO library_item (
             saved.recurring_min_interval_secs,
             MAX_RECURRING_MIN_INTERVAL_SECS
         );
-        assert_eq!(saved.enumeration_sleep_requests, MAX_ENUM_SLEEP_REQUESTS);
         assert_eq!(saved.update_all_batch_size, 10);
-        assert!(!saved.adaptive_protection_enabled);
         assert_eq!(saved.recurring_jitter_secs, MAX_RECURRING_JITTER_SECS);
-        assert_eq!(
-            saved.recurring_download_min_sleep_secs,
-            MAX_RECURRING_DOWNLOAD_SLEEP_SECS
-        );
-        assert_eq!(
-            saved.recurring_download_max_sleep_secs,
-            MAX_RECURRING_DOWNLOAD_SLEEP_SECS
-        );
 
         let reloaded = get_antibot_pacing(&paths).expect("reget");
         assert_eq!(
@@ -33531,28 +35041,11 @@ INSERT INTO library_item (
         );
         assert_eq!(reloaded.update_all_batch_size, 10);
 
+        // WP-0321 S4: protection is always on; status always projects the live effective policy.
         let status =
             get_youtube_protection_status(&paths, Some(youtube_protection::OPERATION_DOWNLOAD))
-                .expect("disabled adaptive status");
-        assert!(!status.automatic_protection_enabled);
-        assert_eq!(
-            status.effective.concurrent_fragments,
-            status.baseline.concurrent_fragments.max(1)
-        );
-        assert_eq!(
-            status.effective.sleep_interval_secs,
-            status.baseline.sleep_interval_secs
-        );
-        assert_eq!(
-            status.effective.max_sleep_interval_secs,
-            status.baseline.sleep_interval_secs,
-            "disabled adaptation must project the exact executed baseline, not a stricter normal overlay"
-        );
-        assert_eq!(status.effective.limit_rate, status.baseline.limit_rate);
-        assert_eq!(
-            status.effective.throttled_rate,
-            status.baseline.throttled_rate
-        );
+                .expect("status");
+        assert!(status.automatic_protection_enabled);
     }
 
     #[test]
@@ -34811,6 +36304,55 @@ EOF
     }
 
     #[test]
+    fn prune_pre_purge_backups_keeps_newest_three_app_backups_and_ignores_unrelated_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let backups_dir = dir.path().join("backups");
+        std::fs::create_dir_all(&backups_dir).expect("mkdir backups");
+
+        let stamps = [
+            "20260101_010101",
+            "20260102_020202",
+            "20260103_030303",
+            "20260104_040404",
+            "20260105_050505",
+        ];
+        for stamp in stamps {
+            std::fs::write(
+                backups_dir.join(format!("pre_purge_{stamp}.sqlite")),
+                "fake-backup",
+            )
+            .expect("write fake backup");
+        }
+        let unrelated = backups_dir.join("operator_manual_copy.sqlite");
+        std::fs::write(&unrelated, "unrelated").expect("write unrelated");
+
+        // Simulate the newest backup (the one "just written" by create_pre_purge_backup).
+        let just_written = backups_dir.join("pre_purge_20260106_060606.sqlite");
+        std::fs::write(&just_written, "newest").expect("write newest");
+
+        prune_pre_purge_backups(&paths, &backups_dir, &just_written);
+
+        let remaining: std::collections::BTreeSet<String> = std::fs::read_dir(&backups_dir)
+            .expect("read backups dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect();
+
+        // Newest three app-created backups (just-written + two newest of the five pre-seeded)
+        // survive; the two oldest app-created backups are pruned; the unrelated file is untouched.
+        assert_eq!(
+            remaining,
+            std::collections::BTreeSet::from([
+                "pre_purge_20260106_060606.sqlite".to_string(),
+                "pre_purge_20260105_050505.sqlite".to_string(),
+                "pre_purge_20260104_040404.sqlite".to_string(),
+                "operator_manual_copy.sqlite".to_string(),
+            ])
+        );
+    }
+
+    #[test]
     fn normalize_direct_url_allows_http_https_only() {
         assert!(normalize_direct_url("https://example.com/video.mp4").is_ok());
         assert!(normalize_direct_url("http://example.com/video.mp4").is_ok());
@@ -35325,6 +36867,45 @@ EOF
         assert!(!failed_artifacts.exists());
     }
 
+    /// WP-0320 red-team: rows must be deleted before files. Force the row delete to fail and
+    /// prove the log/artifact files are still on disk afterward, i.e. the failure is caught
+    /// before any file was ever touched rather than leaving an orphaned row after files were
+    /// already removed.
+    #[test]
+    fn flush_jobs_cache_deletes_rows_before_files_so_a_row_delete_failure_leaves_files_untouched()
+    {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let succeeded = enqueue_dummy_sleep(&paths, 1).expect("enqueue succeeded");
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2 WHERE id=?3",
+            params![JobStatus::Succeeded.as_str(), now_ms(), &succeeded.id],
+        )
+        .expect("mark succeeded");
+        conn.execute_batch(
+            "CREATE TRIGGER wp0320_reject_job_delete BEFORE DELETE ON job \
+             BEGIN SELECT RAISE(ABORT, 'wp0320 injected row-delete failure'); END;",
+        )
+        .expect("install failure trigger");
+        drop(conn);
+
+        let succeeded_log = PathBuf::from(&succeeded.logs_path);
+        std::fs::create_dir_all(paths.job_logs_dir()).expect("job logs dir");
+        std::fs::write(&succeeded_log, "ok").expect("write succeeded log");
+        let succeeded_artifacts = paths.job_artifacts_dir(&succeeded.id);
+        std::fs::create_dir_all(&succeeded_artifacts).expect("succeeded artifacts");
+        std::fs::write(succeeded_artifacts.join("a.txt"), "a").expect("artifact file");
+
+        let result = flush_jobs_cache(&paths, None);
+        assert!(result.is_err(), "row-delete failure must surface as an error");
+        assert!(succeeded_log.exists(), "files must survive an aborted row delete");
+        assert!(succeeded_artifacts.exists(), "artifacts must survive an aborted row delete");
+    }
+
     #[test]
     fn flush_jobs_cache_does_not_remove_output_dirs_without_opt_in() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -35507,7 +37088,7 @@ EOF
     }
 
     #[test]
-    fn flush_jobs_cache_surfaces_output_cleanup_failures_and_keeps_job_history() {
+    fn flush_jobs_cache_surfaces_output_cleanup_failures_after_removing_job_rows() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
         db::ensure_schema(&paths).expect("schema");
@@ -35554,14 +37135,180 @@ EOF
             }),
         )
         .expect("flush with failure");
-        assert_eq!(summary.removed_jobs, 0);
-        assert_eq!(summary.kept_jobs_due_to_failures, 1);
+        // WP-0320: rows are deleted before files, so a best-effort managed-output-dir cleanup
+        // failure no longer keeps the (already-terminal) job row around; it only shows up in
+        // `failed_paths` for the operator to investigate the leftover directory separately.
+        assert_eq!(summary.removed_jobs, 1);
+        assert_eq!(summary.kept_jobs_due_to_failures, 0);
         assert_eq!(summary.removed_managed_output_dirs, 0);
         assert!(!summary.failed_paths.is_empty());
 
         let remaining = list_jobs(&paths, 20, 0).expect("list");
-        assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].id, job.id);
+        assert!(remaining.is_empty());
+    }
+
+    /// Seeds one row of every kind `purge_terminal_job_history` must reason about: an eligible
+    /// old failed/canceled purgeable row, a queued and a running row (never selected regardless
+    /// of type), an old failed row of a non-purgeable type (stands in for localization, which
+    /// this allow-list also excludes), an old succeeded row (only eligible with
+    /// `include_succeeded`), and a recent failed row (excluded by the age cutoff).
+    fn seed_purge_history_rows(paths: &AppPaths, old_at_ms: i64, recent_at_ms: i64) {
+        let conn = db::open(paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        let rows: [(&str, &str, &str, i64); 7] = [
+            ("purge-eligible-failed", "download_direct_url", "failed", old_at_ms),
+            (
+                "purge-eligible-canceled",
+                "youtube_subscription_refresh_v1",
+                "canceled",
+                old_at_ms,
+            ),
+            ("purge-keep-queued", "download_direct_url", "queued", old_at_ms),
+            ("purge-keep-running", "download_direct_url", "running", old_at_ms),
+            // Non-purgeable type (`mux_dub_preview_v1`, a localization job type): excluded by
+            // the allow-list even though it is old and terminal.
+            (
+                "purge-keep-localization",
+                "mux_dub_preview_v1",
+                "failed",
+                old_at_ms,
+            ),
+            ("purge-keep-succeeded-by-default", "download_direct_url", "succeeded", old_at_ms),
+            ("purge-keep-recent-failed", "download_direct_url", "failed", recent_at_ms),
+        ];
+        for (id, job_type, status, created_at_ms) in rows {
+            conn.execute(
+                "INSERT INTO job (id, type, status, progress, params_json, created_at_ms, logs_path) \
+                 VALUES (?1, ?2, ?3, 0.0, '{}', ?4, '')",
+                params![id, job_type, status, created_at_ms],
+            )
+            .expect("seed purge history row");
+        }
+    }
+
+    #[test]
+    fn purge_terminal_job_history_dry_run_does_not_delete() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let now = now_ms();
+        let old_at_ms = now - 40 * 86_400_000;
+        seed_purge_history_rows(&paths, old_at_ms, now);
+
+        let receipt =
+            purge_terminal_job_history(&paths, 30, false, true).expect("dry run purge");
+        assert!(receipt.dry_run);
+        assert_eq!(receipt.deleted, 0);
+        assert_eq!(receipt.backup_path, None);
+        assert_eq!(receipt.total, 2, "failed download + canceled refresh are eligible");
+        assert!(receipt
+            .counts_by_type_status
+            .iter()
+            .any(|row| row.job_type == "download_direct_url" && row.status == "failed"));
+        assert!(receipt
+            .counts_by_type_status
+            .iter()
+            .any(|row| row.job_type == "youtube_subscription_refresh_v1"
+                && row.status == "canceled"));
+
+        let conn = db::open(&paths).expect("open");
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM job", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(remaining, 7, "dry run must not delete any row");
+    }
+
+    #[test]
+    fn purge_terminal_job_history_execute_backs_up_then_deletes_only_eligible_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let now = now_ms();
+        let old_at_ms = now - 40 * 86_400_000;
+        seed_purge_history_rows(&paths, old_at_ms, now);
+
+        let receipt =
+            purge_terminal_job_history(&paths, 30, false, false).expect("execute purge");
+        assert!(!receipt.dry_run);
+        assert_eq!(receipt.deleted, 2);
+        assert_eq!(receipt.total, 2);
+        let backup_path = receipt.backup_path.expect("backup path");
+        let backup_file = PathBuf::from(&backup_path);
+        assert!(backup_file.exists(), "backup file must exist before delete");
+        assert!(
+            std::fs::metadata(&backup_file).expect("backup metadata").len() > 0,
+            "backup file must not be empty"
+        );
+        let backup_conn = rusqlite::Connection::open_with_flags(
+            &backup_file,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .expect("open backup");
+        let backup_job_count: i64 = backup_conn
+            .query_row("SELECT COUNT(*) FROM job", [], |row| row.get(0))
+            .expect("backup job count");
+        assert_eq!(
+            backup_job_count, 7,
+            "backup is a pre-delete snapshot of every seeded row"
+        );
+
+        let conn = db::open(&paths).expect("open");
+        let mut remaining_ids: Vec<String> = conn
+            .prepare("SELECT id FROM job ORDER BY id")
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect");
+        remaining_ids.sort();
+        assert_eq!(
+            remaining_ids,
+            vec![
+                "purge-keep-localization".to_string(),
+                "purge-keep-queued".to_string(),
+                "purge-keep-recent-failed".to_string(),
+                "purge-keep-running".to_string(),
+                "purge-keep-succeeded-by-default".to_string(),
+            ],
+            "only the two eligible purgeable rows are deleted"
+        );
+    }
+
+    #[test]
+    fn purge_terminal_job_history_include_succeeded_and_zero_days_widen_selection() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let now = now_ms();
+        let old_at_ms = now - 40 * 86_400_000;
+        seed_purge_history_rows(&paths, old_at_ms, now);
+
+        // older_than_days=0 means "every eligible terminal row regardless of age", so the
+        // recent failed row becomes eligible once `include_succeeded` also widens status.
+        let receipt =
+            purge_terminal_job_history(&paths, 0, true, false).expect("execute wide purge");
+        assert_eq!(
+            receipt.deleted, 4,
+            "failed x2 (old+recent) + canceled + succeeded, still excluding queued/running/localization"
+        );
+
+        let conn = db::open(&paths).expect("open");
+        let mut remaining_ids: Vec<String> = conn
+            .prepare("SELECT id FROM job ORDER BY id")
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect");
+        remaining_ids.sort();
+        assert_eq!(
+            remaining_ids,
+            vec![
+                "purge-keep-localization".to_string(),
+                "purge-keep-queued".to_string(),
+                "purge-keep-running".to_string(),
+            ],
+        );
     }
 
     #[test]
@@ -35783,7 +37530,10 @@ EOF
 
         clear_youtube_auth_block(&paths).expect("clear auth block");
         let retried = retry_job(&paths, &failed.id).expect("retry after clear");
-        assert_ne!(retried.id, failed.id);
+        // WP-0321 S6: `download_direct_url` retry reopens the same durable row (new attempt)
+        // instead of linking a fresh replacement row.
+        assert_eq!(retried.id, failed.id);
+        assert_eq!(retried.attempt_no, 2);
         assert_eq!(retried.status, JobStatus::Queued);
     }
 
@@ -36306,9 +38056,9 @@ EOF
         assert!(load_youtube_auth_block(&paths).expect("load").is_none());
     }
 
-    // WP-0257: repeated rejections escalate the auto-clear TTL.
+    // WP-0321 S4: one fixed auto-clear wait replaces the escalating backoff ladder.
     #[test]
-    fn auth_block_backoff_escalates_ttl() {
+    fn auth_block_uses_one_fixed_wait() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
         db::ensure_schema(&paths).expect("schema");
@@ -36320,7 +38070,7 @@ EOF
             .expect("load")
             .expect("state 1");
         assert_eq!(first.backoff_count, 1);
-        assert!(first.expires_at_ms > first.blocked_at_ms);
+        assert_eq!(first.expires_at_ms - first.blocked_at_ms, YOUTUBE_AUTH_BLOCK_WAIT_MS);
 
         record_youtube_auth_block(&paths, key.to_string(), "r2".to_string(), None, None)
             .expect("record 2");
@@ -36328,9 +38078,9 @@ EOF
             .expect("load")
             .expect("state 2");
         assert_eq!(second.backoff_count, 2);
-        assert!(
-            (second.expires_at_ms - second.blocked_at_ms)
-                > (first.expires_at_ms - first.blocked_at_ms)
+        assert_eq!(
+            second.expires_at_ms - second.blocked_at_ms,
+            YOUTUBE_AUTH_BLOCK_WAIT_MS
         );
     }
 
@@ -36564,6 +38314,16 @@ EOF
     }
 
     #[test]
+    fn configured_browser_session_error_is_preserved_without_anonymous_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(dir.path().join("app"));
+        let args = vec!["--write-link".into(), "--cookies-from-browser".into(), "firefox".into()];
+        let error = run_yt_dlp_with_browser_cookie_retry(&paths, &args, None, 1, true, None).unwrap_err().to_string();
+        assert!(error.contains("forbidden"), "{error}");
+        assert!(!error.contains("retry without browser cookies"), "original error must not be replaced by anonymous fallback: {error}");
+    }
+
+    #[test]
     fn retry_direct_download_reuses_active_job_for_same_youtube_url() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
@@ -36598,6 +38358,19 @@ EOF
             Some("batch-retry".to_string()),
         )
         .expect("enqueue active duplicate");
+        // The claim-aware batch enqueue path registers `active` as the canonical owner of this
+        // URL via `library::claim_download_source`; this raw fixture bypasses that path, so
+        // register the claim explicitly to model the real precondition retry now depends on.
+        library::claim_download_source(
+            &paths,
+            "https://www.youtube.com/watch?v=abc123",
+            &active.id,
+            true,
+            false,
+            "single",
+            None,
+        )
+        .expect("claim active duplicate");
 
         let conn = db::open(&paths).expect("open");
         db::migrate(&conn).expect("migrate");
@@ -36678,6 +38451,19 @@ EOF
             Some("other-active-batch".to_string()),
         )
         .expect("enqueue active duplicate");
+        // As above: register the claim this raw fixture would otherwise skip, so retry's
+        // `claim_download_source` call sees `active_duplicate` as the canonical owner of
+        // `batch111111` and reuses it instead of reopening `failed_reused` in place.
+        library::claim_download_source(
+            &paths,
+            "https://www.youtube.com/watch?v=batch111111",
+            &active_duplicate.id,
+            true,
+            false,
+            "single",
+            None,
+        )
+        .expect("claim active duplicate");
 
         let conn = db::open(&paths).expect("open");
         db::migrate(&conn).expect("migrate");
@@ -36787,7 +38573,9 @@ EOF
     }
 
     #[test]
-    fn retry_job_persists_lineage_between_original_and_replacement() {
+    fn retry_download_job_reopens_same_row_instead_of_linking_a_replacement() {
+        // WP-0321 S6: `download_direct_url` is one durable row per video. Retry reopens the
+        // exact same row (new attempt) instead of inserting a linked replacement row.
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
         db::ensure_schema(&paths).expect("schema");
@@ -36798,6 +38586,545 @@ EOF
             "lineage-batch",
             "old failure",
         );
+
+        let retry = retry_job(&paths, &failed.id).expect("retry");
+        assert_eq!(retry.id, failed.id);
+        assert_eq!(retry.attempt_no, 2);
+        assert_eq!(retry.status, JobStatus::Queued);
+        assert!(retry.retry_of_job_id.is_none());
+        assert!(retry.retry_replacement_job_id.is_none());
+
+        let reread = get_job(&paths, &failed.id)
+            .expect("get reopened row")
+            .expect("reopened row");
+        assert_eq!(reread.attempt_no, 2);
+        assert_eq!(reread.status, JobStatus::Queued);
+    }
+
+    #[test]
+    fn s6_reenqueue_same_video_reuses_row_and_caps_attempts_at_five() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let url = "https://www.youtube.com/watch?v=s6repeat111".to_string();
+        let first = enqueue_download_direct_url_batch_raw(
+            &paths,
+            vec![url.clone()],
+            Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
+            None,
+            Some("D:/archive".to_string()),
+            Some(false),
+            None,
+            None,
+            Some("batch-0".to_string()),
+            Vec::new(),
+        )
+        .expect("initial enqueue");
+        assert_eq!(first.len(), 1);
+        let job_id = first[0].id.clone();
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        for cycle in 0..7 {
+            conn.execute(
+                "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
+                params![
+                    JobStatus::Failed.as_str(),
+                    now_ms(),
+                    "cycle failure",
+                    &job_id
+                ],
+            )
+            .expect("mark terminal for reenqueue cycle");
+            // Mirror `set_failed`'s real completion path: a terminal transition releases the
+            // canonical claim immediately, not after a grace period. This raw-SQL fixture bypasses
+            // that production call, so release explicitly or `claim_download_source`'s 60s
+            // crash-recovery grace window keeps the just-taken claim looking "still active".
+            library::release_download_source_claim(&paths, &job_id, None, None)
+                .expect("release claim for reenqueue cycle");
+            let reenqueued = enqueue_download_direct_url_batch_raw(
+                &paths,
+                vec![url.clone()],
+                Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
+                None,
+                Some("D:/archive".to_string()),
+                Some(false),
+                None,
+                None,
+                Some(format!("batch-{}", cycle + 1)),
+                Vec::new(),
+            )
+            .expect("reenqueue cycle");
+            assert_eq!(reenqueued.len(), 1, "cycle {cycle} must reopen the same row");
+            assert_eq!(reenqueued[0].id, job_id);
+        }
+
+        let target_key = job_target_migration::download_target_key(&url, None)
+            .expect("target key for youtube url");
+        let row_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM job WHERE target_key=?1",
+                params![target_key],
+                |row| row.get(0),
+            )
+            .expect("count rows for target key");
+        assert_eq!(row_count, 1, "one durable row per video, regardless of reenqueue count");
+
+        let reread = get_job(&paths, &job_id)
+            .expect("get job")
+            .expect("job exists");
+        // Documented rule: attempt_no starts at 1 on first enqueue and increments by 1 on every
+        // reopen; 7 reopen cycles after the initial enqueue yields attempt_no 8.
+        assert_eq!(reread.attempt_no, 8);
+
+        let attempt_history_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM job_attempt WHERE job_id=?1",
+                params![&job_id],
+                |row| row.get(0),
+            )
+            .expect("count job_attempt rows");
+        assert_eq!(attempt_history_count, 5, "attempt history is trimmed to JOB_ATTEMPT_HISTORY_LIMIT");
+    }
+
+    #[test]
+    fn s6_fanout_moves_terminal_row_to_new_batch_history_stays_in_old() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let url = "https://www.youtube.com/watch?v=s6fanout1111".to_string();
+        let first = enqueue_download_direct_url_batch_raw(
+            &paths,
+            vec![url.clone()],
+            Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
+            None,
+            Some("D:/archive".to_string()),
+            Some(false),
+            None,
+            None,
+            Some("batch-A".to_string()),
+            Vec::new(),
+        )
+        .expect("enqueue in batch A");
+        let job_id = first[0].id.clone();
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
+            params![JobStatus::Failed.as_str(), now_ms(), "batch A failure", &job_id],
+        )
+        .expect("mark terminal in batch A");
+        // See s6_reenqueue_same_video_reuses_row_and_caps_attempts_at_five: release the claim this
+        // raw-SQL terminal transition would otherwise leave stale under the crash-recovery grace
+        // window, mirroring `set_failed`'s real completion path.
+        library::release_download_source_claim(&paths, &job_id, None, None)
+            .expect("release claim after batch A failure");
+
+        let second = enqueue_download_direct_url_batch_raw(
+            &paths,
+            vec![url.clone()],
+            Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
+            None,
+            Some("D:/archive".to_string()),
+            Some(false),
+            None,
+            None,
+            Some("batch-B".to_string()),
+            Vec::new(),
+        )
+        .expect("enqueue in batch B (fanout)");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].id, job_id);
+
+        let reread = get_job(&paths, &job_id).expect("get job").expect("job exists");
+        assert_eq!(reread.batch_id.as_deref(), Some("batch-B"));
+
+        let history_batch: Option<String> = conn
+            .query_row(
+                "SELECT batch_id FROM job_attempt WHERE job_id=?1 AND batch_id='batch-A'",
+                params![&job_id],
+                |row| row.get(0),
+            )
+            .expect("historical attempt row for batch A");
+        assert_eq!(history_batch.as_deref(), Some("batch-A"));
+
+        let detail_a = get_batch_detail(&paths, "batch-A").expect("batch A detail");
+        assert!(
+            detail_a.attempts.iter().any(|attempt| attempt.job.id == job_id),
+            "batch A detail must still show the historical attempt after the row moved to batch B"
+        );
+    }
+
+    #[test]
+    fn s6_concurrent_enqueue_same_target_yields_one_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let url = "https://www.youtube.com/watch?v=s6concur1111".to_string();
+        let paths_a = paths.clone();
+        let paths_b = paths.clone();
+        let url_a = url.clone();
+        let url_b = url.clone();
+        let thread_a = thread::spawn(move || {
+            enqueue_download_direct_url_batch_raw(
+                &paths_a,
+                vec![url_a],
+                Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
+                None,
+                Some("D:/archive".to_string()),
+                Some(false),
+                None,
+                None,
+                Some("batch-thread-a".to_string()),
+                Vec::new(),
+            )
+        });
+        let thread_b = thread::spawn(move || {
+            enqueue_download_direct_url_batch_raw(
+                &paths_b,
+                vec![url_b],
+                Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
+                None,
+                Some("D:/archive".to_string()),
+                Some(false),
+                None,
+                None,
+                Some("batch-thread-b".to_string()),
+                Vec::new(),
+            )
+        });
+        let result_a = thread_a.join().expect("thread a joined").expect("thread a enqueue");
+        let result_b = thread_b.join().expect("thread b joined").expect("thread b enqueue");
+
+        let total_created = result_a.len() + result_b.len();
+        assert_eq!(
+            total_created, 1,
+            "exactly one concurrent enqueue creates the row; the other reports active/skip"
+        );
+
+        let target_key = job_target_migration::download_target_key(&url, None)
+            .expect("target key for youtube url");
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        let row_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM job WHERE target_key=?1",
+                params![target_key],
+                |row| row.get(0),
+            )
+            .expect("count rows for target key");
+        assert_eq!(row_count, 1);
+    }
+
+    #[test]
+    fn s6_unique_target_key_rejects_duplicate_insert() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let url = "https://www.youtube.com/watch?v=s6unique1111".to_string();
+        let first = enqueue_download_direct_url_batch_raw(
+            &paths,
+            vec![url.clone()],
+            Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
+            None,
+            Some("D:/archive".to_string()),
+            Some(false),
+            None,
+            None,
+            Some("batch-unique".to_string()),
+            Vec::new(),
+        )
+        .expect("initial enqueue");
+        let target_key = job_target_migration::download_target_key(&url, None)
+            .expect("target key for youtube url");
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        let logs_path = paths
+            .job_logs_dir()
+            .join("s6-unique-duplicate.jsonl")
+            .to_string_lossy()
+            .to_string();
+        let insert_result = conn.execute(
+            "INSERT INTO job (id, item_id, batch_id, type, status, progress, error, params_json, created_at_ms, started_at_ms, finished_at_ms, logs_path, target_key, attempt_no) \
+             VALUES (?1, NULL, ?2, ?3, ?4, 0.0, NULL, '{}', ?5, NULL, NULL, ?6, ?7, 1)",
+            params![
+                "s6-unique-duplicate-id",
+                "batch-unique-2",
+                JobType::DownloadDirectUrl.as_str(),
+                JobStatus::Queued.as_str(),
+                now_ms(),
+                logs_path,
+                target_key,
+            ],
+        );
+        let err = insert_result.expect_err("duplicate target_key insert must be rejected");
+        assert!(is_target_key_unique_violation(&EngineError::Database(err)));
+
+        assert_eq!(first.len(), 1);
+    }
+
+    #[test]
+    fn s6_reopen_refused_while_previous_worker_draining() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let failed = enqueue_failed_youtube_direct_job(
+            &paths,
+            "https://www.youtube.com/watch?v=s6drain11111",
+            "drain-batch",
+            "old failure",
+        );
+
+        let execution_key = download_execution_key(&paths, &failed.id);
+        ACTIVE_DOWNLOAD_EXECUTIONS
+            .get_or_init(Default::default)
+            .lock()
+            .expect("lock execution registry")
+            .insert(execution_key.clone());
+
+        let err = retry_job(&paths, &failed.id).expect_err("retry must refuse while draining");
+        assert!(err.to_string().contains("draining"));
+
+        ACTIVE_DOWNLOAD_EXECUTIONS
+            .get_or_init(Default::default)
+            .lock()
+            .expect("lock execution registry")
+            .remove(&execution_key);
+
+        assert_eq!(stored_job_status(&paths, &failed.id), JobStatus::Failed.as_str());
+    }
+
+    #[test]
+    fn s6_restart_current_on_queued_row_is_idempotent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let first = enqueue_download_direct_url_batch_raw(
+            &paths,
+            vec!["https://www.youtube.com/watch?v=s6idempot111".to_string()],
+            Some(DOWNLOAD_PROVIDER_YOUTUBE_YT_DLP.to_string()),
+            None,
+            Some("D:/archive".to_string()),
+            Some(false),
+            None,
+            None,
+            Some("batch-idempotent".to_string()),
+            Vec::new(),
+        )
+        .expect("initial enqueue");
+        let job_id = first[0].id.clone();
+        assert_eq!(first[0].status, JobStatus::Queued);
+        assert_eq!(first[0].attempt_no, 1);
+
+        let restarted_once = restart_download_current(&paths, &job_id).expect("first restart");
+        assert_eq!(restarted_once.id, job_id);
+        assert_eq!(restarted_once.attempt_no, 1);
+        assert_eq!(restarted_once.status, JobStatus::Queued);
+
+        let restarted_twice = restart_download_current(&paths, &job_id).expect("second restart");
+        assert_eq!(restarted_twice.id, job_id);
+        assert_eq!(restarted_twice.attempt_no, 1);
+        assert_eq!(restarted_twice.status, JobStatus::Queued);
+
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        let attempt_history_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM job_attempt WHERE job_id=?1",
+                params![&job_id],
+                |row| row.get(0),
+            )
+            .expect("count job_attempt rows");
+        assert_eq!(attempt_history_count, 0, "idempotent restart on a never-started row adds no attempt history");
+    }
+
+    #[test]
+    fn s6_batch_retry_counts_reopened_as_queued() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let batch_id = "s6-batch-retry-counts";
+        let first = enqueue_failed_youtube_direct_job(
+            &paths,
+            "https://www.youtube.com/watch?v=s6batchret01",
+            batch_id,
+            "old failure",
+        );
+        let second = enqueue_failed_youtube_direct_job(
+            &paths,
+            "https://www.youtube.com/watch?v=s6batchret02",
+            batch_id,
+            "old failure",
+        );
+
+        let summary = retry_failed_jobs_for_batch(&paths, batch_id).expect("retry batch");
+        assert_eq!(summary.matched_retryable_jobs, 2);
+        assert_eq!(summary.queued_jobs, 2);
+        assert_eq!(summary.reused_active_jobs, 0);
+        assert_eq!(summary.failed_retries, 0);
+
+        assert_eq!(stored_job_status(&paths, &first.id), JobStatus::Queued.as_str());
+        assert_eq!(stored_job_status(&paths, &second.id), JobStatus::Queued.as_str());
+    }
+
+    #[test]
+    fn s6_purge_cascades_attempts() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let failed = enqueue_failed_youtube_direct_job(
+            &paths,
+            "https://www.youtube.com/watch?v=s6purge11111",
+            "purge-batch",
+            "old failure",
+        );
+        // Build attempt history by reopening and failing again a couple of times.
+        let retried = retry_job(&paths, &failed.id).expect("retry to build history");
+        assert_eq!(retried.id, failed.id);
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
+            params![JobStatus::Failed.as_str(), now_ms(), "second failure", &failed.id],
+        )
+        .expect("mark terminal again");
+
+        let attempt_history_before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM job_attempt WHERE job_id=?1",
+                params![&failed.id],
+                |row| row.get(0),
+            )
+            .expect("count job_attempt rows before purge");
+        assert!(attempt_history_before > 0, "fixture must have attempt history to prove cascade");
+
+        purge_terminal_job_history(&paths, 0, true, false).expect("purge terminal history");
+
+        let job_count_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM job WHERE id=?1",
+                params![&failed.id],
+                |row| row.get(0),
+            )
+            .expect("count job rows after purge");
+        assert_eq!(job_count_after, 0);
+
+        let attempt_count_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM job_attempt WHERE job_id=?1",
+                params![&failed.id],
+                |row| row.get(0),
+            )
+            .expect("count job_attempt rows after purge");
+        assert_eq!(attempt_count_after, 0, "purge must cascade-delete job_attempt history");
+    }
+
+    #[test]
+    fn s6_retry_refuses_operator_deleted_and_present_media() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+
+        // Case A: canonical identity is operator-deleted.
+        let deleted_media_id = "s6opdeleted1";
+        conn.execute(
+            "INSERT INTO library_item (id, created_at_ms, source_type, source_uri, title, media_path, origin, file_status) \
+             VALUES (?1, 1, 'local_file', ?2, ?1, ?2, '4kvdp_import', 'operator_deleted')",
+            params![
+                "s6-op-deleted-item",
+                dir.path().join("deleted.mp4").to_string_lossy().to_string(),
+            ],
+        )
+        .expect("insert deleted library item");
+        conn.execute(
+            "INSERT INTO media_source_identity (service, media_id, canonical_url, library_item_id, active_job_id, repair_state, created_at_ms, updated_at_ms) \
+             VALUES ('youtube', ?1, ?2, ?3, NULL, 'ready', 1, 1)",
+            params![
+                deleted_media_id,
+                format!("https://www.youtube.com/watch?v={deleted_media_id}"),
+                "s6-op-deleted-item",
+            ],
+        )
+        .expect("insert operator-deleted identity");
+        let deleted_job = enqueue_failed_youtube_direct_job(
+            &paths,
+            &format!("https://www.youtube.com/watch?v={deleted_media_id}"),
+            "op-deleted-batch",
+            "old failure",
+        );
+        let err = retry_job(&paths, &deleted_job.id).expect_err("operator-deleted retry must refuse");
+        assert!(err
+            .to_string()
+            .contains("operator-deleted media requires an explicit selected-item redownload"));
+
+        // Case B: canonical identity is present in the library.
+        let present_media_id = "s6presentme1";
+        let present_path = dir.path().join("present.mp4");
+        std::fs::write(&present_path, b"present media bytes").expect("write present fixture");
+        conn.execute(
+            "INSERT INTO library_item (id, created_at_ms, source_type, source_uri, title, media_path, origin, file_status) \
+             VALUES (?1, 1, 'local_file', ?2, ?1, ?2, '4kvdp_import', 'available')",
+            params![
+                "s6-present-item",
+                present_path.to_string_lossy().to_string(),
+            ],
+        )
+        .expect("insert present library item");
+        conn.execute(
+            "INSERT INTO media_source_identity (service, media_id, canonical_url, library_item_id, active_job_id, repair_state, created_at_ms, updated_at_ms) \
+             VALUES ('youtube', ?1, ?2, ?3, NULL, 'ready', 1, 1)",
+            params![
+                present_media_id,
+                format!("https://www.youtube.com/watch?v={present_media_id}"),
+                "s6-present-item",
+            ],
+        )
+        .expect("insert present identity");
+        let present_job = enqueue_failed_youtube_direct_job(
+            &paths,
+            &format!("https://www.youtube.com/watch?v={present_media_id}"),
+            "present-batch",
+            "old failure",
+        );
+        let err = retry_job(&paths, &present_job.id).expect_err("present-media retry must refuse");
+        assert!(err.to_string().contains("duplicate prevented"));
+    }
+
+    #[test]
+    fn retry_non_download_job_links_replacement_row() {
+        // Every job type other than `download_direct_url` keeps the insert+link retry chain.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+
+        let params_json = serde_json::json!({"seconds": 1_u64}).to_string();
+        let failed = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::DummySleep,
+            params_json,
+            None,
+            Some("non-download-batch".to_string()),
+        )
+        .expect("enqueue dummy job");
+        let conn = db::open(&paths).expect("open");
+        db::migrate(&conn).expect("migrate");
+        conn.execute(
+            "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
+            params![JobStatus::Failed.as_str(), now_ms(), "old failure", &failed.id],
+        )
+        .expect("mark failed");
 
         let retry = retry_job(&paths, &failed.id).expect("retry");
         assert_ne!(retry.id, failed.id);
@@ -36845,20 +39172,23 @@ EOF
         assert_eq!(detail.health.total_jobs, 2);
         assert_eq!(detail.health.succeeded_targets, 1);
         assert_eq!(detail.health.unresolved_targets, 0);
+        // WP-0321 S6: reopen keeps the same row id across attempts, so the historical and current
+        // entries share `job.id` (== `failed.id` == `retry.id`); disambiguate by attempt_no /
+        // is_current_attempt instead of by id.
         let original_attempt = detail
             .attempts
             .iter()
-            .find(|attempt| attempt.job.id == failed.id)
+            .find(|attempt| attempt.job.id == failed.id && !attempt.is_current_attempt)
             .expect("original attempt");
         assert_eq!(original_attempt.status_label, "Historical failure");
-        assert!(!original_attempt.is_current_attempt);
+        assert_eq!(original_attempt.job.attempt_no, 1);
         let retry_attempt = detail
             .attempts
             .iter()
-            .find(|attempt| attempt.job.id == retry.id)
+            .find(|attempt| attempt.job.id == retry.id && attempt.is_current_attempt)
             .expect("retry attempt");
         assert_eq!(retry_attempt.status_label, "Retry succeeded");
-        assert!(retry_attempt.is_current_attempt);
+        assert_eq!(retry_attempt.job.attempt_no, 2);
     }
 
     #[test]
@@ -37400,6 +39730,9 @@ EOF
         assert_eq!(params.subscription_id.as_deref(), Some("subscription-1"));
         assert_eq!(params.output_path_template.as_deref(), Some("."));
         assert_eq!(params.filename_template.as_deref(), Some("{title}_{id}"));
+        let template = build_yt_dlp_output_template(&jobs[0].id, params.output_path_template.as_deref(), params.filename_template.as_deref()).expect("subscription producer must feed the real output consumer");
+        assert!(!template.contains(".."));
+        assert!(template.starts_with("%(title)"));
     }
 
     #[test]
@@ -37669,6 +40002,15 @@ EOF
             browser_cookie_source_for_request(false, None).expect("off"),
             None
         );
+    }
+
+    #[test]
+    fn subscription_dot_template_is_consumable_without_permitting_traversal() {
+        let output = build_yt_dlp_output_template("12345678-long", Some("."), Some("{title}_{id}")).unwrap();
+        assert_eq!(output, "%(title).80B_%(id)s_12345678.%(ext)s");
+        for invalid in ["..", "./nested", "nested/../file", "/root", r"C:\root", r"\\server\share"] {
+            assert!(build_yt_dlp_output_template("12345678", Some(invalid), None).is_err(), "{invalid}");
+        }
     }
 
     #[test]
@@ -38783,6 +41125,24 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
         assert!(atomic_publish_no_replace(&later, &destination).is_err());
         assert_eq!(std::fs::read(&destination).unwrap(), preserved);
         assert_eq!(std::fs::read(&later).unwrap(), b"must-not-replace");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn atomic_no_replace_publish_supports_long_staging_and_destination_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let deep = dir.path().join("archive-subscription".repeat(5)).join("attempt-staging".repeat(6));
+        std::fs::create_dir_all(&deep).unwrap();
+        let staging = deep.join("source-".repeat(12) + ".mkv");
+        let destination = deep.join("output-".repeat(12) + ".mkv");
+        assert!(staging.as_os_str().len() > 260);
+        std::fs::write(&staging, b"verified-media").unwrap();
+        atomic_publish_no_replace(&staging, &destination).unwrap();
+        assert_eq!(std::fs::read(&destination).unwrap(), b"verified-media");
+        std::fs::write(&staging, b"must-not-replace").unwrap();
+        assert!(atomic_publish_no_replace(&staging, &destination).is_err());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"verified-media");
+        assert_eq!(std::fs::read(&staging).unwrap(), b"must-not-replace");
     }
 
     #[test]
@@ -40386,5 +42746,129 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .is_empty());
+    }
+
+    // WP-0322 B1 tests.
+
+    #[test]
+    fn app_busy_classifier_matches_known_transient_errors_only() {
+        assert!(is_app_busy_error(
+            "database runtime error: writer_admission_timeout"
+        ));
+        assert!(is_app_busy_error(
+            "database runtime error: read_admission_timeout"
+        ));
+        assert!(is_app_busy_error("database is locked"));
+        assert!(is_app_busy_error(
+            "some wrapper: database is locked (code 5)"
+        ));
+        assert!(!is_app_busy_error("yt-dlp: video unavailable"));
+        assert!(!is_app_busy_error(
+            "HTTP Error 429: Too Many Requests"
+        ));
+        assert!(!is_app_busy_error("playlist does not exist"));
+    }
+
+    fn seed_app_busy_job_row(paths: &AppPaths, id: &str) {
+        db::ensure_schema(paths).expect("schema");
+        let conn = db::open(paths).expect("open db");
+        conn.execute(
+            "INSERT INTO job (id, type, status, progress, params_json, created_at_ms, logs_path) \
+             VALUES (?1, 'download_direct_url', 'running', 0.0, '{}', ?2, '')",
+            params![id, now_ms()],
+        )
+        .expect("insert job");
+    }
+
+    #[test]
+    fn requeue_job_for_app_busy_is_bounded_then_reports_exhausted() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        seed_app_busy_job_row(&paths, "app-busy-job-1");
+
+        for attempt in 1..=APP_BUSY_MAX_ATTEMPTS {
+            let requeued = requeue_job_for_app_busy_or_exhausted(&paths, "app-busy-job-1")
+                .expect("requeue call should succeed");
+            assert!(requeued, "attempt {attempt} should still be within bound");
+            let conn = db::open_readonly(&paths).expect("readonly");
+            let (status, attempts): (String, i64) = conn
+                .query_row(
+                    "SELECT status, app_busy_attempts FROM job WHERE id='app-busy-job-1'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .expect("read job row");
+            assert_eq!(status, JobStatus::Queued.as_str());
+            assert_eq!(attempts, attempt);
+        }
+
+        let exhausted = requeue_job_for_app_busy_or_exhausted(&paths, "app-busy-job-1")
+            .expect("bounded-out call should still succeed");
+        assert!(!exhausted, "6th attempt must report bound exceeded");
+    }
+
+    // WP-0322 B2 tests: `plan_audio_language_retag` decision function.
+
+    fn expectation(language: Option<&str>, title: Option<&str>) -> StreamExpectation {
+        StreamExpectation {
+            language: language.map(str::to_string),
+            title: title.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn retag_plan_fixes_missing_language_when_title_matches() {
+        let expected = vec![expectation(Some("ko"), None)];
+        let actual = vec![expectation(None, None)];
+        let plan = plan_audio_language_retag(&expected, &actual).expect("should be retaggable");
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].stream_index, 0);
+        assert_eq!(plan[0].language, "ko");
+    }
+
+    #[test]
+    fn retag_plan_none_when_already_matches() {
+        let expected = vec![expectation(Some("ko"), None)];
+        let actual = vec![expectation(Some("ko"), None)];
+        assert!(plan_audio_language_retag(&expected, &actual).is_none());
+    }
+
+    #[test]
+    fn retag_plan_none_when_language_present_but_wrong() {
+        // Observed has *a* language, just not the expected one: this is a real mismatch, not a
+        // missing-tag case, so it must not be silently retagged over.
+        let expected = vec![expectation(Some("ko"), None)];
+        let actual = vec![expectation(Some("en"), None)];
+        assert!(plan_audio_language_retag(&expected, &actual).is_none());
+    }
+
+    #[test]
+    fn retag_plan_none_when_title_also_mismatches() {
+        let expected = vec![expectation(Some("ko"), Some("Korean dub"))];
+        let actual = vec![expectation(None, Some("Something else"))];
+        assert!(plan_audio_language_retag(&expected, &actual).is_none());
+    }
+
+    #[test]
+    fn retag_plan_none_when_track_counts_differ() {
+        let expected = vec![
+            expectation(Some("ko"), None),
+            expectation(Some("en"), None),
+        ];
+        let actual = vec![expectation(None, None)];
+        assert!(plan_audio_language_retag(&expected, &actual).is_none());
+    }
+
+    #[test]
+    fn retag_plan_handles_multiple_tracks_independently() {
+        let expected = vec![
+            expectation(Some("ko"), None),
+            expectation(Some("en"), None),
+        ];
+        let actual = vec![expectation(Some("en"), None), expectation(None, None)];
+        let plan = plan_audio_language_retag(&expected, &actual).expect("retaggable");
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].stream_index, 1);
+        assert_eq!(plan[0].language, "ko");
     }
 }

@@ -216,12 +216,14 @@ test("Item voice plans select a native managed backend and preserve comparable m
   const fullInstallerScript = readRepoFile(
     "..",
     "..",
-    "governance",
+    "offline-installer-runtime",
     "scripts",
     "build_offline_full_installer.ps1",
   );
   const fullInstallerDefinition = readRepoFile(
-    "src-tauri",
+    "..",
+    "..",
+    "offline-installer-runtime",
     "installer",
     "VoxVulgi_offline_full.iss",
   );

@@ -12,7 +12,7 @@ updated_at: 2026-08-23
 
 - ID: WP-0315
 - Owner: —
-- Status: BACKLOG
+- Status: DONE (outcome: `reject`, operator decision 2026-09-23)
 - Created: 2026-08-23
 - Refinement: `WP-0315_SURREALDB_ROCKSDB_SHADOW_BENCHMARK_AND_MIGRATION_DECISION_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md`
@@ -43,7 +43,7 @@ Answer whether embedded SurrealDB with RocksDB materially improves VoxVulgi's ex
 - `product/desktop/src-tauri/Cargo.toml` and lockfile
 - planned isolated harness root `governance/scripts/experiments/wp_0315_surrealdb/`
 - planned default-off integration module `product/desktop/src-tauri/src/wp_0315_surrealdb_experiment.rs` and planned wrapper `governance/scripts/experiments/wp_0315_surrealdb/build_experimental_tauri.ps1`
-- `governance/spec/PRODUCT_SPEC.md`, `governance/spec/TECHNICAL_DESIGN.md`, `governance/workflow/PROOF_STANDARD.md`, and `governance/release/OFFLINE_INSTALLER_BUILD_MANUAL.md`
+- `governance/spec/PRODUCT_SPEC.md`, `governance/spec/TECHNICAL_DESIGN.md`, `governance/workflow/PROOF_STANDARD.md`, and `offline-installer-runtime/GUIDE.md`
 - No standalone product-code/governance topology artifact was found on 2026-08-23; do not invent or claim one in this packet. Record the gap and route a separate topology-foundation proposal to the operator if later adoption needs one.
 
 ## Required implementation order
@@ -85,5 +85,6 @@ Answer whether embedded SurrealDB with RocksDB materially improves VoxVulgi's ex
 
 - 2026-08-23: Created from current VoxVulgi database/source inspection and current SurrealDB 3.2.4, SurrealKV 0.21.2, RocksDB, SQLite, Rust-toolchain, licensing, FTS, migration, and embedding primary sources.
 - 2026-08-23: Current evidence supports retaining SQLite while WP-0312 hardens its access boundary and authorizes only this isolated SurrealDB/RocksDB decision experiment. Status is BACKLOG; no database migration or user-data mutation occurred.
+- 2026-09-23: Operator decision: outcome `reject`. SQLite is retained; no SurrealDB, RocksDB, or other database-engine benchmark or migration test will be run. Basis: live evidence on v0.1.204 (1.2 GB `app.sqlite`, 339,092 `job` rows of which 87% terminal, 33–104 s reads, three truncated `database_locked` trace rows) attributes the slowness to access patterns, dead rows, and lost lock attribution, not to the engine. Remediation continues in WP-0320. Status is DONE with no product code changed by this packet.
 
 </topic>

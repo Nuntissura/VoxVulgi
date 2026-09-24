@@ -1,10 +1,10 @@
 ---
 file_id: WP-0308-v1
 file_kind: work-packet
-updated_at: 2026-08-24
+updated_at: 2026-08-26
 ---
 
-<topic id="contract" status="in-progress" version="v1" wp="WP-0308" updated_at="2026-08-24">
+<topic id="contract" status="superseded" version="v1" wp="WP-0308" superseded_by="WP-0316" updated_at="2026-08-30">
 
 # Work Packet: WP-0308 — Single-unit fast offline installer
 
@@ -12,11 +12,12 @@ updated_at: 2026-08-24
 
 - ID: WP-0308
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: SUPERSEDED
 - Created: 2026-08-21
 - Refinement: `WP-0308_SINGLE_UNIT_FAST_OFFLINE_INSTALLER_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md#wp-0308`
 - Related/superseded delivery detail: WP-0265
+- Superseded by: WP-0316. This packet's bounded-solid/build-and-recertify procedure is historical and must not be used for a new installer.
 
 ## Intent
 
@@ -25,14 +26,14 @@ Make every future public VoxVulgi install/update one non-technical ISO download 
 ## Base scope
 
 - Implement the complete refinement across repo authority, product/technical specs, the Inno installer, governed build driver, tests, artifact manifests, logs, and proof.
-- Preserve the full offline payload, Inno 7 long-path handling, core NSIS maintenance labels/behavior, `shellexec` elevation, semantic-version build policy, and all user data.
-- Do not build or run the full payload while the operator's current v0.1.175 installation is actively saturating C:/D:; fixture verification may proceed quietly.
+- Preserve the full offline payload, Inno 7 long-path handling, core NSIS maintenance labels/behavior, current-user/asInvoker operation with no UAC handoff, semantic-version build policy, and all user data.
+- Treat every installer implementation, binary, payload/archive cache, staging tree, receipt, log, attempt, and proof artifact created before the operator's 2026-08-26 recovery instruction as invalid poison: delete it without evaluation and do not inspect, restore, adapt, cite, or reuse it.
 
 ## Required order
 
 1. Refine and update canonical authority/spec.
 2. Implement external 64 MiB bounded-solid archive extraction and durable logging while preserving Inno `SolidCompression=no` and `DiskSpanning=no`.
-3. Implement archive/ISO build, reuse, audit, and single-public-artifact finalization.
+3. Implement archive/ISO build, fresh recovery audit, internal candidate assembly, exact-hash runtime proof, and atomic single-public-artifact publication.
 4. Add focused regression, corruption, long-path, user-data-boundary, and representative performance tests.
 5. Build the next semantic version and run full clean-profile/offline performance proof after the live installation no longer owns the disks.
 
@@ -45,15 +46,16 @@ Make every future public VoxVulgi install/update one non-technical ISO download 
 
 </topic>
 
-<topic id="status-updates" status="active" version="v1" wp="WP-0308" updated_at="2026-08-24">
+<topic id="status-updates" status="active" version="v1" wp="WP-0308" updated_at="2026-08-26">
 
 # Status updates
 
+- 2026-08-26: The operator invalidated and removed all prior offline-installer implementations, builds, caches, staging trees, logs, attempts, artifacts, receipts, and proof. Every earlier status entry below is historical context only and proves nothing for the recovery release; its referenced artifacts must not be inspected, restored, adapted, cited as evidence, or reused. WP-0308 remains `IN_PROGRESS` with every build, transaction, performance, exact-ISO runtime, offline-workflow, update/preservation, and publication gate requiring fresh proof from the new implementation.
 - 2026-08-21: Created from the exact v0.1.175 slow-install observation, current installer/process/disk evidence, current WP-0265/spec/build inspection, and current official Inno Setup 7, 7-Zip 26.02, and Microsoft Oscdimg documentation. Initially selected one UDF ISO plus native Inno extraction of five external non-solid 7z archives; the archive-solid policy was superseded by the measured 2026-08-24 selection below.
 - 2026-08-21: Implemented the one-ISO build driver, content-matched archive cache, initial non-solid fast-LZMA2 payload archives, source/archive SHA-256 checks, archive path/link audit, UDF creation, independent ISO listing, one-download artifact manifest, exact uncompressed progress bytes, per-archive runtime hashes, phase labels, and durable latest/final installer logs. The archive builder was later revised to the measured 64 MiB bounded-solid winner.
 - 2026-08-21: Inno Setup 7.1.0 compiled the governed wrapper cleanly. A direct external-archive fixture installed byte-identical nested outputs, created the durable checkpoint log while Setup's source log remained open, and logged successful SHA-256 verification/extraction; replacing the archive with different bytes failed closed with exit code 5 and `File hash is incorrect`.
 - 2026-08-21: Focused installer contracts and the complete desktop contract suite passed (249/249). Both PowerShell scripts passed an independent `System.Management.Automation.Language.Parser` syntax check. The repeatable >=2x representative speed gate is implemented but not run while v0.1.175 owns the operator's disks.
-- 2026-08-21: Hardened logging from extraction-only evidence into an end-to-end audit: named payload start/completion events, elevated core handoff start/return, before/after installed state, observed registry/install-path/binary versions, explicit verification/failure reason, and terminal outcome. Core postcondition failure now fails the wrapper and preserves latest/timestamped logs.
+- 2026-08-21: Hardened logging from extraction-only evidence into an end-to-end audit: named payload start/completion events, core handoff start/return, before/after installed state, observed registry/install-path/binary versions, explicit verification/failure reason, and terminal outcome. This implementation and its evidence were invalidated by the 2026-08-26 recovery instruction.
 - 2026-08-21: Inno Setup 7.1.0 compiled the hardened wrapper with the existing v0.1.175 core setup as a syntax-only fixture, and the complete desktop contract suite passed 251/251. This compile is not a rebuilt or publishable full ISO and does not advance the remaining full-payload proof gate.
 - 2026-08-21: Remaining hard predecessor for `DONE`: build the next semantic-version full ISO, independently list it, run a clean-profile fully offline install/update, prove the <=30-minute local-SSD gate, and prove the default localization workflow offline after the active v0.1.175 installation releases C:/D:.
 - 2026-08-23: The corrected real installer wait exposed a genuine performance regression: the 20,000-file `[Files] extractarchive` fixture took 730.078 seconds versus 430.115 seconds raw (0.589x, required 2x). Inno 7.1.0 source inspection identified per-member extraction and temp/rename processing. At that stage, the wrapper and fixture retained external non-solid `.7z` plus `ArchiveExtraction=enhanced/nopassword` but changed to runtime hashing and bulk extraction into a recoverable staging tree before managed-root promotion. A 1,000-file compile/execution smoke passed; the later 2026-08-24 result superseded the archive block policy.

@@ -5,8 +5,9 @@
 - Follow `build_rules.md` for build verification and UI construction rules: built surfaces must be inspected visually and through backend or frontend navigation/interaction without popping up the app window or hijacking the operator keyboard/mouse, and new UI must not introduce more cards.
 - For desktop release builds, use `governance/scripts/build_desktop_target.ps1` (or `npm run build:desktop:target` from `product/desktop`).
 - Follow the offline payload policy in `build_rules.md`: routine builds must reuse a verified payload when inputs did not change, while explicit release/full-refresh builds must state that payload refresh can be slow and show useful progress.
-- Every desktop target build must increment the desktop semantic version.
-- Every desktop target build must append an entry to `governance/release/BUILD_CHANGELOG.md` with included Work Packet IDs.
+- [VV-CODEX-VERSION-001] Every desktop target build must retain the already-assigned desktop semantic version and leave `governance/release/BUILD_CHANGELOG.md` unchanged.
+- [VV-CODEX-VERSION-002] Version assignment is a separate explicit operator-directed product-release action; installer builds, repairs, retries, tests, and offline packaging must never calculate or apply a version bump.
+- [VV-CODEX-VERSION-003] Add a release-changelog entry only after the exact operator-designated release artifact passes its required proof gates.
 - Managed desktop build-output folders and filenames we control must not use spaces; prefer `snake_case`.
 - Build logs for each desktop target build must be written under:
   - `product/desktop/build_target/logs`
@@ -25,33 +26,17 @@
   - `Full uninstall`
 - Keep existing-install flow clear: show the pre-maintenance explainer before maintenance selection.
 - Keep app-data behavior explicit: `%APPDATA%\\com.voxvulgi.voxvulgi` is retained by the keep-actions and only removed by the full actions.
-- Every managed desktop installer build must increment semantic version.
+- Managed desktop installer builds retain the already-assigned semantic version; building, repairing, retrying, or testing an installer never changes it.
 - If wording semantics need to change, update canonical policy docs first:
   - `governance/spec/PRODUCT_SPEC.md`
   - `governance/spec/TECHNICAL_DESIGN.md`
 
-## Installer Payload Policy (Batteries-Included & Inno Setup Packaging)
+## Offline Installer Reminder
 
-- The public VoxVulgi installer must bundle ALL models and dependencies for the complete default localization pipeline: ASR model, diarization pack, separation pack, TTS/voice-conversion models with populated Hugging Face cache, portable Python with all pinned wheels, FFmpeg/ffprobe, and supporting tools.
-- To bypass the hard 2 GB 32-bit archive ceiling of NSIS without failing builds or discarding model weights, full offline distributions use **Inno Setup 7 or newer** (`governance/scripts/build_offline_full_installer.ps1` + `product/desktop/src-tauri/installer/VoxVulgi_offline_full.iss`); Inno 7 extended-length path support is required for the bundled Python payload and the build must reject Inno 6.
-- [VV-INSTALL-001] Every future public full-offline install/update release is one user-downloadable UDF ISO; no companion `.bin` slice or separately downloaded payload file may be required.
-- [VV-INSTALL-002] The ISO root must expose one obvious `Install_VoxVulgi.exe` entrypoint; non-technical users must not need a terminal, archive tool, Python/pip command, or manual model/dependency step.
-- [VV-INSTALL-003] Inno Setup wraps the core NSIS setup.exe and extracts the complete payload directly from external bounded-solid `.7z` archives using a 64 MiB solid block inside the ISO into `%APPDATA%\com.voxvulgi.voxvulgi`; raw recursive dependency-tree entries and public Inno disk slices are forbidden.
-- [VV-INSTALL-004] Preserve `ArchiveExtraction=enhanced/nopassword`, `DiskSpanning=no`, `SolidCompression=no`, Inno 7 extended paths, and the perMachine NSIS `[Run]` `shellexec` elevation handoff.
-- [VV-INSTALL-005] Every installer run must continuously checkpoint `installer_<version>_latest.log` and retain a timestamped final log under `%APPDATA%\com.voxvulgi.voxvulgi\diagnostics\installer` on success, failure, or cancellation.
-- [VV-INSTALL-006] The governed build must test archive integrity/path safety, list/verify ISO contents, and refuse publication unless the ISO is the sole public user-required artifact with every expected payload archive present.
-- [VV-INSTALL-007] Installer performance is release-gated: the representative Python-tree archive fixture must be at least 2x faster than the legacy raw-file fixture. The canonical 64 MiB bounded-solid fixture passed at 2.128x (222.717 s raw median versus 104.677 s archive median, with identical output-tree SHA-256); this fixture proof does not replace the still-required full clean-profile offline install target of at most 30 minutes on the documented reference local-SSD machine with default security settings.
-- [VV-INSTALL-008] Before creating any full-offline installer or updater, read and follow the single canonical no-context procedure at `governance/release/OFFLINE_INSTALLER_BUILD_MANUAL.md`; do not create or rely on a second installer build guide.
-- [VV-INSTALL-009] Installer logs must record wrapper start/source/expected version, every named payload phase start and completion, core-installer launch and return, pre-install and post-install registry state, observed install path and binary version, post-install verification, failure reason, and terminal outcome.
-- [VV-INSTALL-010] The wrapper must not report success unless the core installer produced the expected uninstall-registry version and an installed main binary whose file version matches the release; verification failure must fail the installation and preserve the log.
-- First run must be able to complete the full default localization workflow (import -> captions -> translate -> dub -> export) fully offline with zero downloads.
-- The updater carries all dependencies too: the public update artifact for an existing install is the same full-offline ISO. Running it over an existing install performs `Update` maintenance semantics — settings, options, and the database are preserved while the dependency payload trees (`tools/`, `models/`, `cache/huggingface/`, `voice_backends/`) are refreshed; an update must never require network downloads for the default path.
-- Readiness/"ready" states must reflect verified bytes on disk, never network reachability, for the default path.
-- Non-technical users are the primary persona; no terminal, pip, or manual model steps may ever be required for the default path.
-- Bundled models and backends are user-swappable later through in-app surfaces; swapping is optional and never required.
-- Slim/dev installers without the full payload are development-only and must not be the public download default.
-- The app must define, detect, and state a full-quality GPU tier and a CPU-only fallback tier; a missing GPU must never hard-fail the default path, and both tiers must be fully covered by the bundled payload.
-- Canonical detail: `governance/spec/PRODUCT_SPEC.md` sections 8.1.8 (payload) and 8.1.9 (minimum-hardware contract), `governance/spec/TECHNICAL_DESIGN.md` section 2.1, and the stack research basis in `governance/spec/LOCALIZATION_STACK_LANDSCAPE_2026_07.md`.
+- [VV-CODEX-INSTALL-001] The offline installer is one ISO containing the existing working VoxVulgi app/core, all existing dependencies, installer, and offline tooling; packaging only bundles them and never builds, downloads, repairs, starts, warms up, or upgrades them.
+- [VV-CODEX-INSTALL-002] Create it package-first: hash and reuse existing inputs, build the wrapper and ISO, then test that exact ISO offline and publish only the passing hash.
+- [VV-CODEX-INSTALL-003] Creating or retrying the installer is not a desktop build and never bumps the version or changelog; product builds and version changes happen separately.
+- [VV-CODEX-INSTALL-004] `offline-installer-runtime/GUIDE.md` is the sole detailed authority; use only an entrypoint it marks conforming and do not duplicate its procedure here.
 
 ## Artifact Cleanup Policy
 
@@ -137,7 +122,7 @@ For a disposable headless state root, set `VOXVULGI_AGENT_HEADLESS_BASE_DIR` to 
 On startup the app writes two files:
 ```
 %APPDATA%\com.voxvulgi.voxvulgi\agent_bridge_port.txt   (port number, plain text)
-%APPDATA%\com.voxvulgi.voxvulgi\agent_bridge.json       ({"port", "pid", "started_at_ms"})
+%APPDATA%\com.voxvulgi.voxvulgi\agent_bridge.json       ({"port", "pid", "started_at_ms", "bridge_token"})
 ```
 Both are removed on graceful shutdown. After a hard kill the JSON file is **stale** — verify the `pid` is still alive before trusting the port (avoids hanging on a network probe to a dead listener).
 
@@ -145,6 +130,8 @@ Recommended discovery flow for an agent:
 1. Read `agent_bridge.json`. If missing, fall back to `agent_bridge_port.txt`.
 2. If JSON present: confirm the PID is alive (`Get-Process -Id $pid` on Windows). If the PID is dead, treat as stale and stop here.
 3. Probe `http://127.0.0.1:<port>/agent/health` with a **short timeout (≤ 3 seconds)** to distinguish stale-port (timeout) from busy-app (slow but eventually responding).
+
+Treat `bridge_token` as a per-process secret. Include it in the JSON body of `POST /agent/ui_audit` and `POST /agent/ui_action`; the backend validates it and removes it before WebView dispatch. It is never returned by `/agent/state`, audit/action receipts, or diagnostics traces. A restarted app has a new token.
 
 A timed-out health check on a stale port file is the most common false-negative — always pair the file read with a PID check or a short timeout. (WP-0210)
 
@@ -157,8 +144,8 @@ A timed-out health check on a stale port file is the most common false-negative 
 | `POST` | `/agent/navigate` | `{"page":"video_ingest"}` | Switches the active page. Valid pages: `localization`, `video_ingest`, `instagram_archive`, `image_archive`, `media_library`, `jobs`, `diagnostics`, `options`. |
 | `POST` | `/agent/snapshot` | `{"subfolder":"WP-0171","label":"jobs_page"}` | Captures a snapshot via html2canvas and returns `{"path":"..."}`. Blocks up to 30 seconds. |
 | `POST` | `/agent/dump` | `{"subfolder":"WP-0209","label":"after_run"}` | Writes a JSON state dump (URL, viewport, `.content` scroll, filtered `voxvulgi.*` localStorage, mounted `loc-*` element ids, last 200 console entries) and returns `{"path":"..."}`. Blocks up to 10 seconds. (WP-0209) |
-| `POST` | `/agent/ui_audit` | `{"limit":700,"include_offscreen":true}` | Headless-only semantic inventory of rendered headings, regions, tables, disclosures, controls, roles, names, states, bounds, product IDs/test IDs, temporary audit IDs, and allowlisted actions. Returns a structured receipt. (WP-0279) |
-| `POST` | `/agent/ui_action` | `{"audit_id":"vv-audit-12","action":"click"}` | Headless-only structural interaction. Allowed actions are `scroll_into_view`, `scroll_content`, and safe clicks on disclosures, tabs/`aria-pressed`, semantic options/expanded controls, or explicit `data-agent-safe-action` controls. Mutating buttons and arbitrary selectors/scripts are refused. Re-run `ui_audit` after state changes. (WP-0279) |
+| `POST` | `/agent/ui_audit` | `{"bridge_token":"<sidecar-token>","limit":700,"include_offscreen":true}` | Token-authenticated semantic inventory of rendered headings, regions, tables, disclosures, controls, roles, names, states, bounds, product IDs/test IDs, temporary audit IDs, declared product actions/effect classes, bounded non-secret select choices, and allowlisted actions. Works in hidden headless and normal installed sessions. Returns a structured receipt. |
+| `POST` | `/agent/ui_action` | `{"bridge_token":"<sidecar-token>","audit_id":"vv-audit-12","action":"activate_product_action","actor_id":"codex.agent-1","expected_product_action_id":"youtube.connect-selected-browser"}` | Token-authenticated semantic interaction. Isolated `--agent-headless` sessions allow actions; normal installed sessions enable token-authenticated actions by default; `VOXVULGI_AGENT_LIVE_ACTIONS=0` explicitly disables them. Supports structural actions plus explicitly declared non-destructive product activation, select, and non-secret text actions. Product/input actions require a stable actor ID and the exact audited product-action ID. Arbitrary selectors/scripts and credential/destructive controls are refused. Re-audit after state changes. |
 | `POST` | `/agent/subscription_status` | `{"id":"<subscription-id>","status":"deleted"}` | Headless-only, explicit assistant mutation for the manual subscription lifecycle status. Accepted statuses are `deleted` and `normal`; the engine attributes the action to `assistant`, preserves subscription/video/metadata/history records, and returns the updated row plus canceled refresh-job count. Automatic failures cannot call this path. (WP-0282) |
 | `POST` | `/agent/freeze_event` | `{"event":"freeze_detected","details":{...},"level":"warn"}` | Worker-only ingress used by the freeze detector. Accepted `event` values: `freeze_detected`, `freeze_recovered`, `worker_alive` (the v0.1.20 liveness heartbeat, fires every 30 s). Appends a row to `diagnostics_trace.jsonl`. Returns `{"status":"ok"}`. (WP-0221) |
 | `POST` | `/agent/freeze_dump` | `{"limit":1000,"note":"..."}` | Bundles app version, pid, bridge port, agent state, and the recent trace tail into a single JSON report. Writes a timestamped file plus `freeze_report_latest.json` under the trace dir's `freeze_reports/` subfolder. Returns `{"path","latest_path","trace_rows_included"}`. Runs on the bridge thread, so it works even when the WebView is frozen. (WP-0221) |
@@ -177,7 +164,7 @@ curl -s -X POST http://127.0.0.1:$PORT/agent/snapshot -d '{"subfolder":"audit","
 curl -s -X POST http://127.0.0.1:$PORT/agent/dump     -d '{"subfolder":"audit","label":"video_archiver"}'
 ```
 
-For a full UI audit, launch with `--agent-headless`, call `/agent/ui_audit`, choose only an action listed in the target row's `safe_actions`, call `/agent/ui_action` with that row's `audit_id`, then audit and snapshot again. Audit IDs belong to the current mounted DOM and must not be cached across rerenders. Both routes return `403` outside headless mode and write `agent_ui_audit` / `agent_ui_action` timing and outcome rows into the existing diagnostics trace. Headless mode skips the job runner, startup subscription auto-sync, offline hydration/seeding, fallback-media relocation, and watcher-supervisor startup so inspection does not enqueue or resume operator work.
+For a full UI audit, read the current token from the PID-validated sidecar, launch with `--agent-headless`, call `/agent/ui_audit`, choose only an action listed in the target row's `safe_actions`, and call `/agent/ui_action` with the same token and target `audit_id`. Product/input actions also require `actor_id` and `expected_product_action_id`. Audit and snapshot again after state changes. Audit IDs belong to the current mounted DOM and must not be cached across rerenders. Both routes write `agent_ui_audit` / `agent_ui_action` timing and outcome rows into the existing diagnostics trace. For an already installed normal app, audit uses the same token; actions are enabled by default and can be explicitly disabled with `VOXVULGI_AGENT_LIVE_ACTIONS=0`. Headless mode skips the job runner, startup subscription auto-sync, offline hydration/seeding, fallback-media relocation, and watcher-supervisor startup so inspection does not enqueue or resume operator work.
 
 ### JS globals (in-WebView use)
 
@@ -277,3 +264,10 @@ Use `vvwatch.cmd` when the app itself may be frozen or when evidence must distin
 - [OPERATOR-AUTHORITY-004] The assistant must not stop, pause, slow down, or declare work "done for now" or "the rest is optional" unless the operator explicitly says so.
 - [OPERATOR-AUTHORITY-005] When the operator lists multiple requirements, the assistant implements ALL of them and may not hand back a partial result and call it done.
 - [OPERATOR-AUTHORITY-006] The assistant may not use tokens, session limits, capacity, or effort as a reason to stop, slow, or narrow operator-requested work.
+
+## Quiet agent operation and built-in manual (WP-0317)
+
+- [VV-AGENT-MANUAL-001] Before claiming a VoxVulgi capability is unavailable, discover the PID-validated bridge, read `GET /agent/capabilities` and `GET /agent/manual`, and inspect the exact endpoint/action receipt. The same product manual is under Options → User manual.
+- [VV-AGENT-MANUAL-002] Use the built-in bridge for navigation, semantic interaction, backend commands, screenshots and dumps without native input or foreground activation. Computer Use is a last resort requiring explicit operator authorization. Build missing product capabilities when requested.
+- [VV-AGENT-MANUAL-003] Backend mutations require the bridge token, stable actor ID and unique operation ID; poll receipts and independently read canonical jobs. Exact restart selections must retain originals and reconcile every replacement before declaring recovery.
+- [VV-AGENT-MANUAL-004] In builds with WP-0317, token-authenticated live actions are enabled by default; `VOXVULGI_AGENT_LIVE_ACTIONS=0` disables them explicitly. Capability discovery is authoritative for the running build. Older build behavior documented above remains version-specific.

@@ -67,7 +67,13 @@ Var UpdateMode
 Var NoShortcutMode
 Var WixMode
 Var OldMainBinaryName
+Var OfflineInstallGeneration
+Var OfflineMarkerProbeEnvironment
+Var OfflineMarkerProbePath
+Var InstallerLogPath
 Var MaintenanceAction
+Var LegacyMachineInstallDir
+Var LegacyMachineVersion
 Var MaintenanceOptionUpdate
 Var MaintenanceOptionReinstallKeep
 Var MaintenanceOptionFullReinstall
@@ -167,6 +173,39 @@ VIAddVersionKey "ProductVersion" "${VERSION}"
 ;    only if a previous installation was detected
 Page custom PageMaintenanceModeInfo PageLeaveMaintenanceModeInfo
 Page custom PageReinstall PageLeaveReinstall
+
+!macro AppendInstallerLog Line
+  Push "${Line}"
+  Call AppendInstallerLog
+!macroend
+
+Function AppendInstallerLog
+  Exch $0
+  Push $1
+  Push $2
+  StrCpy $2 0
+  ${If} ${Errors}
+    StrCpy $2 1
+  ${EndIf}
+  ClearErrors
+  ${If} $InstallerLogPath != ""
+    FileOpen $1 "$InstallerLogPath" a
+    ${IfNot} ${Errors}
+      ; NSIS append mode preserves contents but still opens at byte zero.
+      FileSeek $1 0 END
+      FileWrite $1 "$0$\r$\n"
+      FileClose $1
+    ${EndIf}
+  ${EndIf}
+  ClearErrors
+  ${If} $2 = 1
+    SetErrors
+  ${EndIf}
+  Pop $2
+  Pop $1
+  Pop $0
+FunctionEnd
+
 Function PageMaintenanceModeInfo
   ; Detect previous WiX installation if it exists.
   StrCpy $0 0
@@ -391,9 +430,19 @@ Function PageLeaveReinstall
     Goto reinst_done
   ${EndIf}
 
+  ; Reinstall in this already-running, CRC-checked installer process. Delegating
+  ; to the old uninstaller created a destructive gap in which the app was gone
+  ; while this parent process still had to resume and decompress the new files.
+  ${If} $MaintenanceAction == "reinstall_keep"
+  ${OrIf} $MaintenanceAction == "full_reinstall"
+    !insertmacro AppendInstallerLog "maintenance_reinstall_in_process action=$MaintenanceAction"
+    Goto reinst_done
+  ${EndIf}
+
   reinst_uninstall:
     HideWindow
     ClearErrors
+    !insertmacro AppendInstallerLog "maintenance_uninstall_begin action=$MaintenanceAction"
 
     ${If} $WixMode = 1
       ReadRegStr $R1 HKLM "$R6" "UninstallString"
@@ -402,18 +451,14 @@ Function PageLeaveReinstall
       ReadRegStr $4 SHCTX "${MANUPRODUCTKEY}" ""
       ReadRegStr $R1 SHCTX "${UNINSTKEY}" "UninstallString"
       StrCpy $R5 ""
-      ${If} $MaintenanceAction == "reinstall_keep"
-      ${OrIf} $MaintenanceAction == "full_reinstall"
-        StrCpy $R5 "$R5 /UPDATE"
-      ${EndIf}
-      ${If} $MaintenanceAction == "full_reinstall"
-      ${OrIf} $MaintenanceAction == "full_uninstall"
+      ${If} $MaintenanceAction == "full_uninstall"
         StrCpy $R5 "$R5 /DELETEAPPDATA"
       ${EndIf}
       ${IfThen} $PassiveMode = 1 ${|} StrCpy $R5 "$R5 /P" ${|}
       StrCpy $R1 "$R1$R5 _?=$4"
       ExecWait '$R1' $0
     ${EndIf}
+    !insertmacro AppendInstallerLog "maintenance_uninstall_end action=$MaintenanceAction exit_code=$0"
 
     BringToFront
 
@@ -537,6 +582,45 @@ FunctionEnd
   !include "{{this}}"
 {{/each}}
 
+Function RunOfflineMarkerProbe
+  ${If} $OfflineMarkerProbeEnvironment == ""
+    Return
+  ${EndIf}
+
+  ClearErrors
+  ReadEnvStr $OfflineMarkerProbePath "$OfflineMarkerProbeEnvironment"
+  ${If} ${Errors}
+    SetErrorLevel 87
+    Quit
+  ${EndIf}
+  ${If} $OfflineMarkerProbePath == ""
+    SetErrorLevel 87
+    Quit
+  ${EndIf}
+
+  ${If} $OfflineInstallGeneration == ""
+    SetErrorLevel 87
+    Quit
+  ${EndIf}
+
+  ClearErrors
+  FileOpen $0 "$OfflineMarkerProbePath" w
+  ${If} ${Errors}
+    SetErrorLevel 5
+    Quit
+  ${EndIf}
+  FileWrite $0 "schema=voxvulgi.offline_core_marker_probe.v1$\r$\n"
+  FileWrite $0 "version=${VERSION}$\r$\n"
+  FileWrite $0 "generation=$OfflineInstallGeneration$\r$\n"
+  FileClose $0
+  ${If} ${Errors}
+    SetErrorLevel 5
+    Quit
+  ${EndIf}
+  SetErrorLevel 0
+  Quit
+FunctionEnd
+
 Function .onInit
   ${GetOptions} $CMDLINE "/P" $PassiveMode
   ${IfNot} ${Errors}
@@ -553,13 +637,62 @@ Function .onInit
     StrCpy $UpdateMode 1
   ${EndIf}
 
+  ; Deterministic maintenance selection for passive installer verification and
+  ; support. Interactive users continue to use the exact five-option page.
+  ${GetOptions} $CMDLINE "/VVMAINTENANCE=" $0
+  ${IfNot} ${Errors}
+    ${If} $0 == "update"
+    ${OrIf} $0 == "reinstall_keep"
+    ${OrIf} $0 == "full_reinstall"
+    ${OrIf} $0 == "uninstall_keep"
+    ${OrIf} $0 == "full_uninstall"
+      StrCpy $MaintenanceAction $0
+    ${Else}
+      SetErrorLevel 64
+      Quit
+    ${EndIf}
+  ${EndIf}
+  ClearErrors
+
+  ; The full-offline wrapper supplies a per-run generation identifier. Persisting
+  ; it only after the core app files and uninstall metadata are written gives the
+  ; wrapper an independent postcondition that cannot be satisfied by stale
+  ; same-version HKCU state from an earlier installation.
+  ${GetOptions} $CMDLINE "/VVGEN=" $OfflineInstallGeneration
+  ClearErrors
+
+  ; The release driver passes only a no-space environment-variable name on the
+  ; command line. The receipt path itself stays in the environment so NSIS
+  ; GetOptions cannot lose the option when Windows quotes a path with spaces.
+  ${GetOptions} $CMDLINE "/VVMARKERPROBEENV=" $OfflineMarkerProbeEnvironment
+  ClearErrors
+  Call RunOfflineMarkerProbe
+
   !if "${DISPLAYLANGUAGESELECTOR}" == "true"
     !insertmacro MUI_LANGDLL_DISPLAY
   !endif
 
   !insertmacro SetContext
 
-  ${If} $INSTDIR == "${PLACEHOLDER_INSTALL_DIR}"
+  CreateDirectory "$LOCALAPPDATA\voxvulgi_installer_logs"
+  StrCpy $InstallerLogPath "$LOCALAPPDATA\voxvulgi_installer_logs\maintenance_latest.log"
+  FileOpen $0 "$InstallerLogPath" w
+  ${IfNot} ${Errors}
+    FileWrite $0 "installer_start version=${VERSION} maintenance=$MaintenanceAction passive=$PassiveMode update=$UpdateMode$\r$\n"
+    FileClose $0
+  ${EndIf}
+
+  !if "${INSTALLMODE}" == "currentUser"
+    ; A current-user/asInvoker installer can never write Program Files. Treat an
+    ; older HKLM installation as separate migration state, never as $INSTDIR.
+    ReadRegStr $LegacyMachineInstallDir HKLM "${MANUPRODUCTKEY}" ""
+    ReadRegStr $LegacyMachineVersion HKLM "${UNINSTKEY}" "DisplayVersion"
+    ${If} $LegacyMachineInstallDir != ""
+      !insertmacro AppendInstallerLog "legacy_machine_install_detected version=$LegacyMachineVersion path=$LegacyMachineInstallDir"
+    ${EndIf}
+    StrCpy $INSTDIR "$LOCALAPPDATA\${PRODUCTNAME}"
+    !insertmacro AppendInstallerLog "current_user_install_target_enforced path=$INSTDIR"
+  !else if $INSTDIR == "${PLACEHOLDER_INSTALL_DIR}"
     ; Set default install location
     !if "${INSTALLMODE}" == "perMachine"
       ${If} ${RunningX64}
@@ -573,12 +706,10 @@ Function .onInit
       ${Else}
         StrCpy $INSTDIR "$PROGRAMFILES\${PRODUCTNAME}"
       ${EndIf}
-    !else if "${INSTALLMODE}" == "currentUser"
-      StrCpy $INSTDIR "$LOCALAPPDATA\${PRODUCTNAME}"
     !endif
 
     Call RestorePreviousInstallLocation
-  ${EndIf}
+  !endif
 
 
   !if "${INSTALLMODE}" == "both"
@@ -619,9 +750,6 @@ Section WebView2
 
   ${If} $4 == ""
     ; Webview2 installation
-    ;
-    ; Skip if updating
-    ${If} $UpdateMode <> 1
       !if "${INSTALLWEBVIEW2MODE}" == "downloadBootstrapper"
         Delete "$TEMP\MicrosoftEdgeWebview2Setup.exe"
         DetailPrint "$(webview2Downloading)"
@@ -666,7 +794,6 @@ Section WebView2
           Abort "$(webview2AbortError)"
         ${EndIf}
       webview2_done:
-    ${EndIf}
   ${Else}
     !if "${MINIMUMWEBVIEW2VERSION}" != ""
       ${VersionCompare} "${MINIMUMWEBVIEW2VERSION}" "$4" $R0
@@ -707,8 +834,36 @@ Section Install
 
   !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
 
+  ${If} $MaintenanceAction == "reinstall_keep"
+  ${OrIf} $MaintenanceAction == "full_reinstall"
+    DetailPrint "$(maintenancePreparingReinstall)"
+    !insertmacro AppendInstallerLog "reinstall_cleanup_begin action=$MaintenanceAction install_dir=$INSTDIR"
+
+    ; Remove only installer-managed program files. User databases, preferences,
+    ; libraries, models, and the managed runtime live outside $INSTDIR.
+    Delete "$INSTDIR\${MAINBINARYNAME}.exe"
+    ReadRegStr $OldMainBinaryName SHCTX "${UNINSTKEY}" "MainBinaryName"
+    ${If} $OldMainBinaryName != ""
+    ${AndIf} $OldMainBinaryName != "${MAINBINARYNAME}.exe"
+      Delete "$INSTDIR\$OldMainBinaryName"
+    ${EndIf}
+    Delete "$INSTDIR\uninstall.exe"
+    {{#each resources_dirs}}
+    RMDir /r "$INSTDIR\\{{this}}"
+    {{/each}}
+
+    ${If} $MaintenanceAction == "full_reinstall"
+      SetShellVarContext current
+      RmDir /r "$APPDATA\${BUNDLEID}"
+      RmDir /r "$LOCALAPPDATA\${BUNDLEID}"
+      !insertmacro AppendInstallerLog "full_reinstall_user_data_removed bundle_id=${BUNDLEID}"
+    ${EndIf}
+    !insertmacro AppendInstallerLog "reinstall_cleanup_end action=$MaintenanceAction"
+  ${EndIf}
+
   ; Copy main executable
   File "${MAINBINARYSRCPATH}"
+  !insertmacro AppendInstallerLog "main_binary_written path=$INSTDIR\${MAINBINARYNAME}.exe"
 
   ; Copy resources
   {{#each resources_dirs}}
@@ -769,6 +924,16 @@ Section Install
   WriteRegStr SHCTX "${UNINSTKEY}" "UninstallString" "$\"$INSTDIR\uninstall.exe$\""
   WriteRegDWORD SHCTX "${UNINSTKEY}" "NoModify" "1"
   WriteRegDWORD SHCTX "${UNINSTKEY}" "NoRepair" "1"
+  !insertmacro AppendInstallerLog "uninstall_metadata_written version=${VERSION}"
+
+  ; Full-offline releases are current-user/asInvoker. Keep this marker in the
+  ; exact HKCU uninstall key verified by the wrapper, and never invent a value
+  ; when the core is launched outside the governed /VVGEN handoff.
+  !if "${INSTALLMODE}" == "currentUser"
+    ${If} $OfflineInstallGeneration != ""
+      WriteRegStr HKCU "${UNINSTKEY}" "OfflineInstallGeneration" "$OfflineInstallGeneration"
+    ${EndIf}
+  !endif
 
   ${GetSize} "$INSTDIR" "/M=uninstall.exe /S=0K /G=0" $0 $1 $2
   IntOp $0 $0 + ${ESTIMATEDSIZE}
@@ -804,6 +969,7 @@ Section Install
 SectionEnd
 
 Function .onInstSuccess
+  !insertmacro AppendInstallerLog "installer_success version=${VERSION} maintenance=$MaintenanceAction"
   ; Check for `/R` flag only in silent and passive installers because
   ; GUI installer has a toggle for the user to (re)start the app
   ${If} $PassiveMode = 1
@@ -814,6 +980,10 @@ Function .onInstSuccess
       nsis_tauri_utils::RunAsUser "$INSTDIR\${MAINBINARYNAME}.exe" "$R0"
     ${EndIf}
   ${EndIf}
+FunctionEnd
+
+Function .onInstFailed
+  !insertmacro AppendInstallerLog "installer_failed version=${VERSION} maintenance=$MaintenanceAction"
 FunctionEnd
 
 Function un.onInit

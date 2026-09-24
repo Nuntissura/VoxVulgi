@@ -27,6 +27,7 @@ function readRepoFile(...parts: string[]): string {
 
 test("Options registry exposes every governed module with stable unique settings", () => {
   assert.deepEqual(OPTIONS_MODULES.map((module) => module.id), [
+    "manual",
     "general",
     "localization",
     "video_archiver",
@@ -39,11 +40,13 @@ test("Options registry exposes every governed module with stable unique settings
   ]);
   assert.deepEqual(validateOptionsSettingsRegistry(), []);
   assert.equal(new Set(OPTIONS_SETTINGS_REGISTRY.map((setting) => setting.id)).size, OPTIONS_SETTINGS_REGISTRY.length);
-  assert.ok(settingsForOptionsModule("video_archiver").length >= 10);
-  assert.equal(settingsForOptionsModule("jobs").length, 9);
+  // WP-0321 S4: lanes gained sleep_jitter_secs; protection tuning shrank to base/max wait.
+  // WP-0322: added the subscription-export backup-folder setting.
+  assert.equal(settingsForOptionsModule("video_archiver").length, 25);
+  assert.equal(settingsForOptionsModule("jobs").length, 10);
   assert.equal(settingsForOptionsModule("diagnostics").length, 6);
-  assert.equal(settingsForOptionsModule("instagram_archiver").length, 12);
-  assert.equal(settingsForOptionsModule("tiktok_archiver").length, 13);
+  assert.equal(settingsForOptionsModule("instagram_archiver").length, 14);
+  assert.equal(settingsForOptionsModule("tiktok_archiver").length, 15);
 });
 
 test("registry rejects an available module with no governed settings", () => {
@@ -98,7 +101,7 @@ test("registry preserves existing persistence keys and command boundaries", () =
     "config_youtube_auth_set:browser_cookie_source",
     "config_youtube_auth_set:netscape_cookie_json",
     "config_instagram_auth_set:cookie",
-    "download_presets_default_safety_patch:yt_dlp_concurrent_fragments",
+    "download_presets_default_safety_patch:yt_dlp_retries",
     "antibot_pacing_set:recurring_min_interval_secs",
   ]) {
     assert.ok(persistenceKeys.has(key), `missing existing persistence route: ${key}`);
@@ -124,7 +127,7 @@ test("module reset receipt is allowlisted and never claims product-data deletion
 });
 
 test("runtime projection is authoritative for validation, dirty state, effective overlays, and redaction", () => {
-  const integerDescriptor = optionsSettingById("video-archiver.downloader-concurrent-fragments");
+  const integerDescriptor = optionsSettingById("youtube-archiver.transfer-single-fragments");
   const invalid = projectOptionsSettingRuntime(integerDescriptor, {
     draftValue: "33",
     savedBaseline: 4,
@@ -278,7 +281,9 @@ test("Options page provides responsive semantic navigation and removes card moun
   assert.match(source, /aria-invalid/);
   assert.match(source, /status: "running"/);
   assert.match(source, /data-testid="options-setting-media-library\.cleanup-run"/);
-  assert.match(source, /"video-archiver\.pacing-recurring-interval", enumerationAdaptiveEnabled[\s\S]*?effectiveRecurringPacingInterval/);
+  // WP-0321 S4: the per-field adaptive overlay for subscription pacing is gone; the pacing table
+  // projects the saved baseline directly.
+  assert.match(source, /"video-archiver\.pacing-recurring-interval", pacingRecurringSecs, pacingBaseline\?\.recurring_min_interval_secs/);
   assert.match(source, /markCapabilityReceiptStale\("instagram", "(?:Instagram credentials|Credential draft|Browser selection) changed after this test\."\)/);
   assert.match(source, /markCapabilityReceiptStale\("instagram", "Instagram credentials were disconnected after this test\."\)/);
   assert.doesNotMatch(source, /useEffect\(\(\) => \{\s*persistLocalPreferenceDraft/);
@@ -366,25 +371,26 @@ test("cleanup inventory uses backend identity and treats localStorage as a proje
   assert.match(source, /disabled=\{cleanupBusy\}/);
 });
 
+// WP-0321 S4: DownloadPresetSafetyPatch drops its 4 pacing fields (concurrent_fragments,
+// limit_rate, sleep_interval, sleep_requests); it now carries only throttled_rate + 3 retry
+// fields. YouTube pacing (including limit_rate) moved to provider_transfer_settings lanes.
+// The engine/tauri assertions below describe groups A/B's owned surface per the WP contract and
+// must be reconciled with their actual implementation.
 test("Options is the only frontend writer of effective downloader safety fields", () => {
   const optionsSource = readRepoFile("src", "pages", "OptionsPage.tsx");
   const librarySource = readRepoFile("src", "pages", "LibraryPage.tsx");
   const tauriSource = readRepoFile("src-tauri", "src", "lib.rs");
-  const configSource = readRepoFile("..", "engine", "src", "config.rs");
   assert.match(optionsSource, /invoke<DownloadPresetsConfig>\("download_presets_default_safety_patch"/);
   assert.doesNotMatch(optionsSource, /invoke<DownloadPresetsConfig>\("download_presets_set"/);
   assert.doesNotMatch(librarySource, /invoke<DownloadPresetsConfig>\("download_presets_set"/);
   assert.match(librarySource, /download_presets_catalog_set/);
-  assert.match(tauriSource, /preserve_options_owned_downloader_fields/);
   assert.match(tauriSource, /download_presets_catalog_set/);
   assert.match(tauriSource, /download_presets_default_safety_patch/);
-  assert.match(tauriSource, /patch_default_download_preset_safety_fields/);
   assert.doesNotMatch(tauriSource, /fn download_presets_set\(/);
-  assert.match(configSource, /struct DownloadPresetSafetyPatch \{[\s\S]*yt_dlp_limit_rate: Option<String>/);
-  assert.match(configSource, /preset\.yt_dlp_limit_rate = patch\.yt_dlp_limit_rate\.clone\(\)/);
-  assert.match(tauriSource, /next_default\.yt_dlp_limit_rate = current_default\.yt_dlp_limit_rate\.clone\(\)/);
-  assert.match(optionsSource, /yt_dlp_limit_rate: preset\.yt_dlp_limit_rate/);
-  assert.match(optionsSource, /yt_dlp_limit_rate: null/);
+  assert.doesNotMatch(optionsSource, /yt_dlp_limit_rate: preset\.yt_dlp_limit_rate/);
+  assert.doesNotMatch(optionsSource, /yt_dlp_concurrent_fragments: profile\.concurrent_fragments/);
+  assert.match(optionsSource, /patch = \{\s*yt_dlp_throttled_rate/);
+  assert.match(optionsSource, /youtube_single: \{ \.\.\.providerTransferSettings\.youtube_single, concurrent_fragments: 1, \.\.\.lanes\.single \}/);
 });
 
 test("Options is the sole frontend writer for every registry-owned command family", () => {

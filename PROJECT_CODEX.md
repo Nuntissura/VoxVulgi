@@ -68,12 +68,8 @@ Pick the first real implementation WP from `governance/workflow/ROADMAP.md` and 
 
 - Follow `build_rules.md` for headless visual/app-boundary verification and the no-new-cards UI rule.
 - Follow `build_rules.md` for offline payload handling: reuse a verified payload for routine builds when dependency inputs did not change, and reserve slow payload refreshes for explicit release/full-refresh cases or changed/missing/stale payload inputs.
-- Every desktop target build must:
-  - increment the desktop semantic version,
-  - append an entry in `governance/release/BUILD_CHANGELOG.md`,
-  - list included Work Packet IDs in that entry,
-  - write a build log file under `product/desktop/build_target/logs`.
-- Managed desktop build-output folders and filenames we control should avoid spaces; prefer `snake_case` such as `build_target` and `old_versions`.
+- Every desktop target build must require the caller to state the expected version and write a build log under `product/desktop/build_target/logs`; see [VV-CODEX-VERSION-001], [VV-CODEX-VERSION-002], [VV-CODEX-VERSION-003] in `AGENTS.md`/`CLAUDE.md` for the version/changelog-retention policy.
+- Managed desktop build-output folders and filenames we control should avoid spaces; prefer `snake_case` such as `build_target` and `old_versions` (see "Desktop Build Output Policy" in `AGENTS.md`).
 
 ## 8) Installer mode policy (Windows)
 
@@ -81,27 +77,24 @@ Pick the first real implementation WP from `governance/workflow/ROADMAP.md` and 
   1. **Core App Installer (NSIS)**: Produces the per-machine application binary, uninstaller, shortcuts, and maintenance mode selector.
   2. **Single-unit Full Offline ISO (Inno Setup 7+)**: Produces one UDF ISO with root `Install_VoxVulgi.exe` and five non-solid `.7z` payload archives under the ISO's `payload/` folder, verified and extracted natively by Inno. The user launches only the root executable; no manual archive extraction, terminal, Python/pip, or network step is allowed (`offline-installer-runtime/scripts/build_offline_full_installer.ps1`).
 - The full-offline ISO is also the public updater: every public install AND update artifact carries the complete dependency payload (all models, portable Python, wheels, caches, tools), and an update must never require network downloads for the default path. Running it over an existing install performs `Update` semantics — settings and database preserved, dependency payload trees refreshed; only the explicit full actions remove user data.
-- Before creating any full-offline installer or updater, follow `offline-installer-runtime/GUIDE.md`; it owns the full-offline installer definition and workflow.
-- Use and preserve these maintenance labels in installer UX/copy:
+- See [VV-CODEX-INSTALL-001], [VV-CODEX-INSTALL-002], [VV-CODEX-INSTALL-003], [VV-CODEX-INSTALL-004] in `AGENTS.md`/`CLAUDE.md` for the full-offline installer definition, workflow authority, and version/changelog handling.
+- Use and preserve these maintenance labels in installer UX/copy (see "Installer Maintenance Mode Policy" in `AGENTS.md`/`CLAUDE.md` for the keep-vs-full distinction and app-data retention rule):
   - `Update`
   - `Reinstall (keep preferences and options)`
   - `Full reinstall`
   - `Uninstall (keep preferences and options)`
   - `Full uninstall`
-- Keep the keep-vs-full distinction explicit in the installer explainer page.
-- Every managed desktop installer build must increment semantic version.
 - Canonical source of truth:
   - `governance/spec/PRODUCT_SPEC.md` (sections 8.1.8 and 8.1.9)
   - `governance/spec/TECHNICAL_DESIGN.md` (section 2.1)
 
 ## 9) Operator and agent diagnostics (WP-0221)
 
-The app exposes a localhost-only agent bridge and a freeze-detector pipeline so that an agent can inspect runtime state and freeze evidence without operator relay. Full details live in `AGENTS.md` / `CLAUDE.md` under "Headless Agent Bridge" and "Freeze Report (WP-0221)". Quick index:
-
-- **Trigger a freeze report from a terminal (works while the WebView is frozen):** run `vvfreeze.cmd` at the repo root.
-- **Canonical report path the next agent reads:** `%APPDATA%\com.voxvulgi.voxvulgi\diagnostics\traces\freeze_reports\freeze_report_latest.json`.
-- **Raw continuous trace:** `%APPDATA%\com.voxvulgi.voxvulgi\diagnostics\traces\diagnostics_trace.jsonl`.
-- **From inside the app:** Diagnostics → "Diagnostics trace" → "Freeze events" → "Capture freeze report now" button.
-- **Worker sanity check (v0.1.20+):** any freeze investigation starts by confirming `worker_alive` rows are present every ~30 s in the trace. If they are missing while `runtime_sample` rows continue, the JS freeze-detector Worker silently failed to install and the absence of `freeze_detected` rows is a Worker bug, not a quiet runtime.
+The app exposes a localhost-only agent bridge and a freeze-detector pipeline so that an agent can inspect runtime state and freeze evidence without operator relay. Canonical details, endpoints, trace/report paths, and the terminal trigger (`vvfreeze.cmd`) live in `AGENTS.md` / `CLAUDE.md` under "Headless Agent Bridge" and "Freeze Report (WP-0221)"; read those before claiming a diagnostic capability is missing.
 
 Do not invent parallel diagnostic surfaces; extend the existing freeze-detector pipeline and add new event names to the existing trace so agents and the Diagnostics page keep working without re-discovery.
+
+## Built-in agent manual
+
+- [VV-CODEX-MANUAL-001] Discover the live PID-validated bridge and read `/agent/capabilities` and `/agent/manual` before claiming tools are missing. Options → User manual renders the same product-owned catalog. Use `/agent/navigate` with `{"page":"options","section_id":"options-manual"}` to open it quietly.
+- [VV-CODEX-MANUAL-002] Prefer documented bridge frontend/backend commands and saved visual snapshots. Never substitute Computer Use without explicit operator authorization. Mutations and accepted receipts require canonical outcome verification; downloads stopped by this task must have verified replacement/recovery lineage.

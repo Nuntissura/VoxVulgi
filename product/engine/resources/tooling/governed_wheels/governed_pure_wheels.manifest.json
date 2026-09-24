@@ -1,0 +1,590 @@
+{
+  "build_contract": "static_no_sdist_execution_deterministic_zip_v1",
+  "helper": {
+    "bytes": 35148,
+    "filename": "build_governed_pure_wheels.py",
+    "sha256": "de6c72c663bd69a063d3749721c46779ed6fe192dd558efb2a107a0e58be91c7",
+    "version": "1"
+  },
+  "packages": [
+    {
+      "members": [
+        {
+          "bytes": 1063,
+          "output": "openai_whisper-20231117.dist-info/LICENSE",
+          "output_bytes": 1063,
+          "output_sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d",
+          "sha256": "b5d65a59060e68c4ff940e1eddfa6f94b2d68fdf58ed7f4dd57721c997e35e9d",
+          "source": "openai-whisper-20231117/LICENSE",
+          "transform": null
+        },
+        {
+          "bytes": 6901,
+          "output": "whisper/__init__.py",
+          "output_bytes": 6901,
+          "output_sha256": "35969670c1c07ddfc515479dd4e6afcc21c722c2800b23355ec551f4d83081ca",
+          "sha256": "35969670c1c07ddfc515479dd4e6afcc21c722c2800b23355ec551f4d83081ca",
+          "source": "openai-whisper-20231117/whisper/__init__.py",
+          "transform": null
+        },
+        {
+          "bytes": 35,
+          "output": "whisper/__main__.py",
+          "output_bytes": 35,
+          "output_sha256": "c519d586c3a6b639f64e59d2d6fd6b591a67ecd739f9727492911fc4ce4d545a",
+          "sha256": "c519d586c3a6b639f64e59d2d6fd6b591a67ecd739f9727492911fc4ce4d545a",
+          "source": "openai-whisper-20231117/whisper/__main__.py",
+          "transform": null
+        },
+        {
+          "bytes": 835554,
+          "output": "whisper/assets/gpt2.tiktoken",
+          "output_bytes": 835554,
+          "output_sha256": "306cd27f03c1a714eca7108e03d66b7dc042abe8c258b44c199a7ed9838dd930",
+          "sha256": "306cd27f03c1a714eca7108e03d66b7dc042abe8c258b44c199a7ed9838dd930",
+          "source": "openai-whisper-20231117/whisper/assets/gpt2.tiktoken",
+          "transform": null
+        },
+        {
+          "bytes": 4271,
+          "output": "whisper/assets/mel_filters.npz",
+          "output_bytes": 4271,
+          "output_sha256": "7450ae70723a5ef9d341e3cee628c7cb0177f36ce42c44b7ed2bf3325f0f6d4c",
+          "sha256": "7450ae70723a5ef9d341e3cee628c7cb0177f36ce42c44b7ed2bf3325f0f6d4c",
+          "source": "openai-whisper-20231117/whisper/assets/mel_filters.npz",
+          "transform": null
+        },
+        {
+          "bytes": 816730,
+          "output": "whisper/assets/multilingual.tiktoken",
+          "output_bytes": 816730,
+          "output_sha256": "b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126",
+          "sha256": "b34b360dbb493e781e479794586d661700670d65564001f23024971d1f2fa126",
+          "source": "openai-whisper-20231117/whisper/assets/multilingual.tiktoken",
+          "transform": null
+        },
+        {
+          "bytes": 4932,
+          "output": "whisper/audio.py",
+          "output_bytes": 4932,
+          "output_sha256": "d93b25bda8d701630764f348d3023d1f6db4f4ea5e1708d556ed2b11d2b01df2",
+          "sha256": "d93b25bda8d701630764f348d3023d1f6db4f4ea5e1708d556ed2b11d2b01df2",
+          "source": "openai-whisper-20231117/whisper/audio.py",
+          "transform": null
+        },
+        {
+          "bytes": 32155,
+          "output": "whisper/decoding.py",
+          "output_bytes": 32155,
+          "output_sha256": "94084fedc5af74cabf8e1883a85552700057081f00ea669ad49435ecb29039db",
+          "sha256": "94084fedc5af74cabf8e1883a85552700057081f00ea669ad49435ecb29039db",
+          "source": "openai-whisper-20231117/whisper/decoding.py",
+          "transform": null
+        },
+        {
+          "bytes": 10847,
+          "output": "whisper/model.py",
+          "output_bytes": 10847,
+          "output_sha256": "17ffd2a7b8cdce2868550bb4144eb97a7ca93bbb56408192a21892bafc64480a",
+          "sha256": "17ffd2a7b8cdce2868550bb4144eb97a7ca93bbb56408192a21892bafc64480a",
+          "source": "openai-whisper-20231117/whisper/model.py",
+          "transform": null
+        },
+        {
+          "bytes": 130,
+          "output": "whisper/normalizers/__init__.py",
+          "output_bytes": 130,
+          "output_sha256": "f18fcdce4caee7f2e80e4c01ab0457d3a080a872a29489542c6d23c4b0bba572",
+          "sha256": "f18fcdce4caee7f2e80e4c01ab0457d3a080a872a29489542c6d23c4b0bba572",
+          "source": "openai-whisper-20231117/whisper/normalizers/__init__.py",
+          "transform": null
+        },
+        {
+          "bytes": 1936,
+          "output": "whisper/normalizers/basic.py",
+          "output_bytes": 1936,
+          "output_sha256": "ad567b3a0e1d03ccc0c35fc746fd6830c35290fe4ed7674eb61ce157ba3d380d",
+          "sha256": "ad567b3a0e1d03ccc0c35fc746fd6830c35290fe4ed7674eb61ce157ba3d380d",
+          "source": "openai-whisper-20231117/whisper/normalizers/basic.py",
+          "transform": null
+        },
+        {
+          "bytes": 56128,
+          "output": "whisper/normalizers/english.json",
+          "output_bytes": 56128,
+          "output_sha256": "6607f948be9824d2e1b2fa2223cd94c06c45afa4e05ea0e3d5e1f2bdffde2465",
+          "sha256": "6607f948be9824d2e1b2fa2223cd94c06c45afa4e05ea0e3d5e1f2bdffde2465",
+          "source": "openai-whisper-20231117/whisper/normalizers/english.json",
+          "transform": null
+        },
+        {
+          "bytes": 20868,
+          "output": "whisper/normalizers/english.py",
+          "output_bytes": 20868,
+          "output_sha256": "2898e4672aeefc9f44cb4de38c115cdf286f5b35ae321433467a7674ce8841d0",
+          "sha256": "2898e4672aeefc9f44cb4de38c115cdf286f5b35ae321433467a7674ce8841d0",
+          "source": "openai-whisper-20231117/whisper/normalizers/english.py",
+          "transform": null
+        },
+        {
+          "bytes": 12583,
+          "output": "whisper/timing.py",
+          "output_bytes": 12583,
+          "output_sha256": "24f9cd5b0fb0f4f4f9abbc93a70e3deb08a27aa3b556d94dfbfebad1201d3b31",
+          "sha256": "24f9cd5b0fb0f4f4f9abbc93a70e3deb08a27aa3b556d94dfbfebad1201d3b31",
+          "source": "openai-whisper-20231117/whisper/timing.py",
+          "transform": null
+        },
+        {
+          "bytes": 12338,
+          "output": "whisper/tokenizer.py",
+          "output_bytes": 12338,
+          "output_sha256": "3b48e361a7e95b4ec0356ca6d72bba635778aa10269153136ee7bc34cae30b85",
+          "sha256": "3b48e361a7e95b4ec0356ca6d72bba635778aa10269153136ee7bc34cae30b85",
+          "source": "openai-whisper-20231117/whisper/tokenizer.py",
+          "transform": null
+        },
+        {
+          "bytes": 22796,
+          "output": "whisper/transcribe.py",
+          "output_bytes": 22796,
+          "output_sha256": "f92867cb18eebcffba99937b9d082051e0d1b7361ec43e99e18817c3e1d19ec0",
+          "sha256": "f92867cb18eebcffba99937b9d082051e0d1b7361ec43e99e18817c3e1d19ec0",
+          "source": "openai-whisper-20231117/whisper/transcribe.py",
+          "transform": null
+        },
+        {
+          "bytes": 3474,
+          "output": "whisper/triton_ops.py",
+          "output_bytes": 3474,
+          "output_sha256": "164c8317baac5a415615206e489e12bc7bdeb6c43ba4fca1bb20c626f8cdc957",
+          "sha256": "164c8317baac5a415615206e489e12bc7bdeb6c43ba4fca1bb20c626f8cdc957",
+          "source": "openai-whisper-20231117/whisper/triton_ops.py",
+          "transform": null
+        },
+        {
+          "bytes": 11041,
+          "output": "whisper/utils.py",
+          "output_bytes": 11041,
+          "output_sha256": "faff52e95d927d6ad5671a7f5b903f87eff8816abd6a6c51a3ec37044dffd883",
+          "sha256": "faff52e95d927d6ad5671a7f5b903f87eff8816abd6a6c51a3ec37044dffd883",
+          "source": "openai-whisper-20231117/whisper/utils.py",
+          "transform": null
+        },
+        {
+          "bytes": 25,
+          "output": "whisper/version.py",
+          "output_bytes": 25,
+          "output_sha256": "190a8ec3bf4d187f43c613afd7f785740a3e89495ef13fb4b6a5e7aa8897fa74",
+          "sha256": "190a8ec3bf4d187f43c613afd7f785740a3e89495ef13fb4b6a5e7aa8897fa74",
+          "source": "openai-whisper-20231117/whisper/version.py",
+          "transform": null
+        }
+      ],
+      "metadata_sha256": "639e62446acc21fb446864e4150f5786d4733d8f4f6a7a056e512b38e2409455",
+      "name": "openai-whisper",
+      "requires_dist": [
+        "numba",
+        "numpy",
+        "torch",
+        "tqdm",
+        "more-itertools",
+        "tiktoken"
+      ],
+      "source": {
+        "bytes": 798593,
+        "filename": "openai-whisper-20231117.tar.gz",
+        "sha256": "7af424181436f1800cc0b7d75cf40ede34e9ddf1ba4983a910832fcf4aade4a4"
+      },
+      "version": "20231117",
+      "wheel": {
+        "bytes": 1859178,
+        "filename": "openai_whisper-20231117-py3-none-any.whl",
+        "root_is_purelib": true,
+        "sha256": "70ccb12d1f7c0649fd55178224cee4278f065b1579f02082b014c95b258582ee",
+        "tag": "py3-none-any"
+      }
+    },
+    {
+      "members": [
+        {
+          "bytes": 22355,
+          "output": "wget.py",
+          "output_bytes": 22355,
+          "output_sha256": "17e1e138d89005e6d0c487878f0489f9ec60d7f0c632135627e4efb26a0c115f",
+          "sha256": "17e1e138d89005e6d0c487878f0489f9ec60d7f0c632135627e4efb26a0c115f",
+          "source": "wget-3.2/wget.py",
+          "transform": null
+        }
+      ],
+      "metadata_sha256": "50e2a66ee620587087108422426d059812386807a639a696f827ba3401e33a9d",
+      "name": "wget",
+      "requires_dist": [],
+      "source": {
+        "bytes": 10857,
+        "filename": "wget-3.2.zip",
+        "sha256": "35e630eca2aa50ce998b9b1a127bb26b30dfee573702782aa982f875e3f16061"
+      },
+      "version": "3.2",
+      "wheel": {
+        "bytes": 23313,
+        "filename": "wget-3.2-py3-none-any.whl",
+        "root_is_purelib": true,
+        "sha256": "dd499a2798da224ba5c8d355274b85e04fdca383b871651b5b312421de7efd79",
+        "tag": "py3-none-any"
+      }
+    },
+    {
+      "members": [
+        {
+          "bytes": 1057,
+          "output": "MyShell_OpenVoice-0.0.0.dist-info/LICENSE",
+          "output_bytes": 1057,
+          "output_sha256": "bb3541f421e6273d3a3e3dd5bdba2bd3b79a3c2eadca65cde9c62c2467903ac0",
+          "sha256": "bb3541f421e6273d3a3e3dd5bdba2bd3b79a3c2eadca65cde9c62c2467903ac0",
+          "source": "OpenVoice-74a1d147b17a8c3092dd5430504bd83ef6c7eb23/LICENSE",
+          "transform": null
+        },
+        {
+          "bytes": 0,
+          "output": "openvoice/__init__.py",
+          "output_bytes": 0,
+          "output_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+          "source": "OpenVoice-74a1d147b17a8c3092dd5430504bd83ef6c7eb23/openvoice/__init__.py",
+          "transform": null
+        },
+        {
+          "bytes": 7823,
+          "output": "openvoice/api.py",
+          "output_bytes": 7867,
+          "output_sha256": "00c870aea27bffdba2f3c9f0f93be03a719ef1f7b794d9a393587bc50cc83efb",
+          "sha256": "6830abaf9b0ea6023fe7e3df3d9a0a1fd9b73a7dbbc13f8a892da009052637b9",
+          "source": "OpenVoice-74a1d147b17a8c3092dd5430504bd83ef6c7eb23/openvoice/api.py",
+          "transform": "openvoice_disable_watermark_v1"
+        },
+        {
+          "bytes": 16360,
+          "output": "openvoice/attentions.py",
+          "output_bytes": 16360,
+          "output_sha256": "6a392057838e6051afc8beed43c2d1279d75de8c8b600552e7232ad930b356c3",
+          "sha256": "6a392057838e6051afc8beed43c2d1279d75de8c8b600552e7232ad930b356c3",
+          "source": "OpenVoice-74a1d147b17a8c3092dd5430504bd83ef6c7eb23/openvoice/attentions.py",
+          "transform": null
+        },
+        {
+          "bytes": 4956,
+          "output": "openvoice/commons.py",
+          "output_bytes": 4956,
+          "output_sha256": "046943d265635c3d9c99195562e703564a26300981a7db5b87d4cd3fd180ae0d",
+          "sha256": "046943d265635c3d9c99195562e703564a26300981a7db5b87d4cd3fd180ae0d",
+          "source": "OpenVoice-74a1d147b17a8c3092dd5430504bd83ef6c7eb23/openvoice/commons.py",
+          "transform": null
+        },
+        {
+          "bytes": 6098,
+          "output": "openvoice/mel_processing.py",
+          "output_bytes": 6098,
+          "output_sha256": "b8fd9924f8fb4c5b31031e04464c4a8145104e4bdfc3c29ecb6c485fa3b5c049",
+          "sha256": "b8fd9924f8fb4c5b31031e04464c4a8145104e4bdfc3c29ecb6c485fa3b5c049",
+          "source": "OpenVoice-74a1d147b17a8c3092dd5430504bd83ef6c7eb23/openvoice/mel_processing.py",
+          "transform": null
+        },
+        {
+          "bytes": 16801,
+          "output": "openvoice/models.py",
+          "output_bytes": 16801,
+          "output_sha256": "54f9e8284a0e9a89c75cb3163d2694cf34d90a5d05cfbcbf12ccd4f0b1ba2dc8",
+          "sha256": "54f9e8284a0e9a89c75cb3163d2694cf34d90a5d05cfbcbf12ccd4f0b1ba2dc8",
+          "source": "OpenVoice-74a1d147b17a8c3092dd5430504bd83ef6c7eb23/openvoice/models.py",
+          "transform": null
+        },
+        {
+          "bytes": 19010,
+          "output": "openvoice/modules.py",
+          "output_bytes": 19010,
+          "output_sha256": "b2376049141934eb63bb4d905920c486a286bec65f0735b78ba52b2fb54564d0",
+          "sha256": "b2376049141934eb63bb4d905920c486a286bec65f0735b78ba52b2fb54564d0",
+          "source": "OpenVoice-74a1d147b17a8c3092dd5430504bd83ef6c7eb23/openvoice/modules.py",
+          "transform": null
+        },
+        {
+          "bytes": 2757,
+          "output": "openvoice/text/__init__.py",
+          "output_bytes": 2757,
+          "output_sha256": "f04afd34eb0f2258eeb19a8bac80ce329eb2b2b4c0c13dc0c0502f6a752d19b5",
+          "sha256": "f04afd34eb0f2258eeb19a8bac80ce329eb2b2b4c0c13dc0c0502f6a752d19b5",
+          "source": "OpenVoice-74a1d147b17a8c3092dd5430504bd83ef6c7eb23/openvoice/text/__init__.py",
+          "transform": null
+        },
+        {
+          "bytes": 846,
+          "output": "openvoice/text/cleaners.py",
+          "output_bytes": 846,
+          "output_sha256": "ddd518de8e37112ee357475d355428d12ee3462eeb5152dfdaa16594c8313ba6",
+          "sha256": "ddd518de8e37112ee357475d355428d12ee3462eeb5152dfdaa16594c8313ba6",
+          "source": "OpenVoice-74a1d147b17a8c3092dd5430504bd83ef6c7eb23/openvoice/text/cleaners.py",
+          "transform": null
+        },
+        {
+          "bytes": 5559,
+          "output": "openvoice/text/english.py",
+          "output_bytes": 5559,
+          "output_sha256": "f439b50c707a4a8dd383af3e992ead4ccabab43eb8c5ab515d4b2dfcdbd85f10",
+          "sha256": "f439b50c707a4a8dd383af3e992ead4ccabab43eb8c5ab515d4b2dfcdbd85f10",
+          "source": "OpenVoice-74a1d147b17a8c3092dd5430504bd83ef6c7eb23/openvoice/text/english.py",
+          "transform": null
+        },
+        {
+          "bytes": 7717,
+          "output": "openvoice/text/mandarin.py",
+          "output_bytes": 7717,
+          "output_sha256": "147cb7c5db5cc3104660dd50df145435bb103c49209166df0c50a18706dcb077",
+          "sha256": "147cb7c5db5cc3104660dd50df145435bb103c49209166df0c50a18706dcb077",
+          "source": "OpenVoice-74a1d147b17a8c3092dd5430504bd83ef6c7eb23/openvoice/text/mandarin.py",
+          "transform": null
+        },
+        {
+          "bytes": 2588,
+          "output": "openvoice/text/symbols.py",
+          "output_bytes": 2588,
+          "output_sha256": "d957e98403192800ec9cad22bd973f2505ba0794bfd19a53df6f292608467f04",
+          "sha256": "d957e98403192800ec9cad22bd973f2505ba0794bfd19a53df6f292608467f04",
+          "source": "OpenVoice-74a1d147b17a8c3092dd5430504bd83ef6c7eb23/openvoice/text/symbols.py",
+          "transform": null
+        },
+        {
+          "bytes": 7253,
+          "output": "openvoice/transforms.py",
+          "output_bytes": 7253,
+          "output_sha256": "e6798989a0d75cbec45e7e24e3697e1c4886b3664c6a80a452645ef1d2a93f9c",
+          "sha256": "e6798989a0d75cbec45e7e24e3697e1c4886b3664c6a80a452645ef1d2a93f9c",
+          "source": "OpenVoice-74a1d147b17a8c3092dd5430504bd83ef6c7eb23/openvoice/transforms.py",
+          "transform": null
+        },
+        {
+          "bytes": 5776,
+          "output": "openvoice/utils.py",
+          "output_bytes": 5776,
+          "output_sha256": "87c1e5b375503e07098d7d21d5493a96f2a4f084893dade063f6aac5065638bd",
+          "sha256": "87c1e5b375503e07098d7d21d5493a96f2a4f084893dade063f6aac5065638bd",
+          "source": "OpenVoice-74a1d147b17a8c3092dd5430504bd83ef6c7eb23/openvoice/utils.py",
+          "transform": null
+        }
+      ],
+      "metadata_sha256": "39ae8bc2743a11e2cebbfc8b0063f58a8d330cbbabe37eecc47ad99e32c10162",
+      "name": "MyShell-OpenVoice",
+      "requires_dist": [
+        "torch==2.10.0",
+        "numpy==1.26.4",
+        "librosa==0.11.0",
+        "soundfile==0.13.1",
+        "eng_to_ipa==0.0.2",
+        "inflect==7.5.0",
+        "Unidecode==1.4.0",
+        "pypinyin==0.55.0",
+        "cn2an==0.5.23",
+        "jieba==0.42.1"
+      ],
+      "source": {
+        "bytes": 3193160,
+        "filename": "OpenVoice-74a1d147b17a8c3092dd5430504bd83ef6c7eb23.tar.gz",
+        "sha256": "a0bc7e5b2968ab7f8898d237b2b36f7de46710cbc3901f97dff29781eeae8abd"
+      },
+      "version": "0.0.0",
+      "wheel": {
+        "bytes": 109091,
+        "filename": "MyShell_OpenVoice-0.0.0-py3-none-any.whl",
+        "root_is_purelib": true,
+        "sha256": "689dcb3493596361e2ad71f6b86748b60f150187ed76d76f47316ae3b6492408",
+        "tag": "py3-none-any"
+      }
+    },
+    {
+      "members": [
+        {
+          "bytes": 180,
+          "output": "eng_to_ipa/__init__.py",
+          "output_bytes": 180,
+          "output_sha256": "2ef06b7fb165b4364c3031205a1c8b69a011c6ef3c9ee072286b7972fe58571b",
+          "sha256": "2ef06b7fb165b4364c3031205a1c8b69a011c6ef3c9ee072286b7972fe58571b",
+          "source": "eng_to_ipa-0.0.2/eng_to_ipa/__init__.py",
+          "transform": null
+        },
+        {
+          "bytes": 4657152,
+          "output": "eng_to_ipa/resources/CMU_dict.db",
+          "output_bytes": 4657152,
+          "output_sha256": "1fa2b16d26169f50e8343c940cdcd2a2624a547096a89062752703d4190a95a9",
+          "sha256": "1fa2b16d26169f50e8343c940cdcd2a2624a547096a89062752703d4190a95a9",
+          "source": "eng_to_ipa-0.0.2/eng_to_ipa/resources/CMU_dict.db",
+          "transform": null
+        },
+        {
+          "bytes": 4498493,
+          "output": "eng_to_ipa/resources/CMU_dict.json",
+          "output_bytes": 4498493,
+          "output_sha256": "b0609f32b65f4d04466897a37fb55d3d5e877b65f3df46c145c3c2217b1ff55d",
+          "sha256": "b0609f32b65f4d04466897a37fb55d3d5e877b65f3df46c145c3c2217b1ff55d",
+          "source": "eng_to_ipa-0.0.2/eng_to_ipa/resources/CMU_dict.json",
+          "transform": null
+        },
+        {
+          "bytes": 616,
+          "output": "eng_to_ipa/resources/phones.json",
+          "output_bytes": 616,
+          "output_sha256": "98a613b148b511b4f18f9fab7e8a78006070daa9a3174b22cf18b50e8f43dc29",
+          "sha256": "98a613b148b511b4f18f9fab7e8a78006070daa9a3174b22cf18b50e8f43dc29",
+          "source": "eng_to_ipa-0.0.2/eng_to_ipa/resources/phones.json",
+          "transform": null
+        },
+        {
+          "bytes": 1484,
+          "output": "eng_to_ipa/rhymes.py",
+          "output_bytes": 1484,
+          "output_sha256": "15834c7fd578d9259662c7bd4213acee5fe827b298f9a46323c9305df25af1f3",
+          "sha256": "15834c7fd578d9259662c7bd4213acee5fe827b298f9a46323c9305df25af1f3",
+          "source": "eng_to_ipa-0.0.2/eng_to_ipa/rhymes.py",
+          "transform": null
+        },
+        {
+          "bytes": 4956,
+          "output": "eng_to_ipa/stress.py",
+          "output_bytes": 4956,
+          "output_sha256": "9b578e10d7cfd557ef4048e4fec40ae59b1f66f247c7fdede68a3beda0b1e4aa",
+          "sha256": "9b578e10d7cfd557ef4048e4fec40ae59b1f66f247c7fdede68a3beda0b1e4aa",
+          "source": "eng_to_ipa-0.0.2/eng_to_ipa/stress.py",
+          "transform": null
+        },
+        {
+          "bytes": 1302,
+          "output": "eng_to_ipa/syllables.py",
+          "output_bytes": 1302,
+          "output_sha256": "0ddd6ea23debc0ac494b6e8677b180571020f9ba788683dfeb282249b850c4ad",
+          "sha256": "0ddd6ea23debc0ac494b6e8677b180571020f9ba788683dfeb282249b850c4ad",
+          "source": "eng_to_ipa-0.0.2/eng_to_ipa/syllables.py",
+          "transform": null
+        },
+        {
+          "bytes": 8117,
+          "output": "eng_to_ipa/transcribe.py",
+          "output_bytes": 8117,
+          "output_sha256": "9ae5db8321c810a6f3852fbd1f1f081cf46ade2341a3e0b0946fb3ce5a37019c",
+          "sha256": "9ae5db8321c810a6f3852fbd1f1f081cf46ade2341a3e0b0946fb3ce5a37019c",
+          "source": "eng_to_ipa-0.0.2/eng_to_ipa/transcribe.py",
+          "transform": null
+        },
+        {
+          "bytes": 630,
+          "output": "eng_to_ipa/transcriber.py",
+          "output_bytes": 630,
+          "output_sha256": "5de5d0aadce0aee5384b854cd9670fb91372ba3d8cc5600d334059bfbeed026d",
+          "sha256": "5de5d0aadce0aee5384b854cd9670fb91372ba3d8cc5600d334059bfbeed026d",
+          "source": "eng_to_ipa-0.0.2/eng_to_ipa/transcriber.py",
+          "transform": null
+        }
+      ],
+      "metadata_sha256": "69c4a082ea412633a684cf06d42b9e78d59786ff68e1de7530d0f47aabfb391f",
+      "name": "eng_to_ipa",
+      "requires_dist": [],
+      "source": {
+        "bytes": 2808070,
+        "filename": "eng_to_ipa-0.0.2.tar.gz",
+        "sha256": "0e4fac8370b0ffeaf696193e971b3ff9bd3762e4d153c6d0d280147887e008b1"
+      },
+      "version": "0.0.2",
+      "wheel": {
+        "bytes": 9175784,
+        "filename": "eng_to_ipa-0.0.2-py3-none-any.whl",
+        "root_is_purelib": true,
+        "sha256": "a44392f6e7c9f7bf90b0245b1a311328870be6cf8910816dae2cbc1ee2bbd912",
+        "tag": "py3-none-any"
+      }
+    },
+    {
+      "members": [
+        {
+          "bytes": 19809,
+          "output": "jieba/__init__.py",
+          "output_bytes": 19809,
+          "output_sha256": "b47cefcfd0bf683b0c708c1de0328df83be2c35264637c442106e79d739fb7f3",
+          "sha256": "b47cefcfd0bf683b0c708c1de0328df83be2c35264637c442106e79d739fb7f3",
+          "source": "jieba-0.42.1/jieba/__init__.py",
+          "transform": null
+        },
+        {
+          "bytes": 2785,
+          "output": "jieba/_compat.py",
+          "output_bytes": 2785,
+          "output_sha256": "ce079f41be19a25857607275336073703a3fa116c66472821a1f6f53472a6023",
+          "sha256": "ce079f41be19a25857607275336073703a3fa116c66472821a1f6f53472a6023",
+          "source": "jieba-0.42.1/jieba/_compat.py",
+          "transform": null
+        },
+        {
+          "bytes": 5071852,
+          "output": "jieba/dict.txt",
+          "output_bytes": 5071852,
+          "output_sha256": "7197c3211ddd98962b036cdf40324d1ea2bfaa12bd028e68faa70111a88e12a8",
+          "sha256": "7197c3211ddd98962b036cdf40324d1ea2bfaa12bd028e68faa70111a88e12a8",
+          "source": "jieba-0.42.1/jieba/dict.txt",
+          "transform": null
+        },
+        {
+          "bytes": 2659,
+          "output": "jieba/finalseg/__init__.py",
+          "output_bytes": 2659,
+          "output_sha256": "2168475bf522c0dae9d0a5e2bcb63c11b8c15931a622035cb8905d1e77e94f84",
+          "sha256": "2168475bf522c0dae9d0a5e2bcb63c11b8c15931a622035cb8905d1e77e94f84",
+          "source": "jieba-0.42.1/jieba/finalseg/__init__.py",
+          "transform": null
+        },
+        {
+          "bytes": 93,
+          "output": "jieba/finalseg/prob_start.py",
+          "output_bytes": 93,
+          "output_sha256": "14c5706ced5cd3b42eb4873d4b88f7f52a7bdf80fbd767bc4423d361e20c5330",
+          "sha256": "14c5706ced5cd3b42eb4873d4b88f7f52a7bdf80fbd767bc4423d361e20c5330",
+          "source": "jieba-0.42.1/jieba/finalseg/prob_start.py",
+          "transform": null
+        },
+        {
+          "bytes": 241,
+          "output": "jieba/finalseg/prob_trans.py",
+          "output_bytes": 241,
+          "output_sha256": "54dfbc252ed71480d4f0cdfdf516ecfbe44efd0f6c3c64b158e7039f2906c91b",
+          "sha256": "54dfbc252ed71480d4f0cdfdf516ecfbe44efd0f6c3c64b158e7039f2906c91b",
+          "source": "jieba-0.42.1/jieba/finalseg/prob_trans.py",
+          "transform": null
+        },
+        {
+          "bytes": 1321732,
+          "output": "jieba/finalseg/prob_emit.py",
+          "output_bytes": 1321732,
+          "output_sha256": "27d46b1c9efe4dd148fde8be042a21be40e3562d0c7f1273f9de7abae12ebb8d",
+          "sha256": "27d46b1c9efe4dd148fde8be042a21be40e3562d0c7f1273f9de7abae12ebb8d",
+          "source": "jieba-0.42.1/jieba/finalseg/prob_emit.py",
+          "transform": null
+        }
+      ],
+      "metadata_sha256": "f6246e211c3e9b1541c72b418c598f1051f72ffa70cb355e66d19ded89d5d261",
+      "name": "jieba",
+      "requires_dist": [],
+      "source": {
+        "bytes": 19214172,
+        "filename": "jieba-0.42.1.tar.gz",
+        "sha256": "055ca12f62674fafed09427f176506079bc135638a14e23e25be909131928db2"
+      },
+      "version": "0.42.1",
+      "wheel": {
+        "bytes": 6421508,
+        "filename": "jieba-0.42.1-py3-none-any.whl",
+        "root_is_purelib": true,
+        "sha256": "f450eaddc95e36b9e43cf9722e8d48cab02c55ab55cf6adabeee1a1ae0c18c71",
+        "tag": "py3-none-any"
+      }
+    }
+  ],
+  "platform_contract": "windows_x64_cp311",
+  "schema": "voxvulgi.governed_pure_wheels.v1"
+}

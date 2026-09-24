@@ -1,7 +1,10 @@
+mod agent_control;
 use base64::Engine as _;
 #[cfg(target_os = "windows")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use sha2::{Digest, Sha256};
+#[cfg(target_os = "windows")]
+use std::os::windows::ffi::OsStrExt;
 use std::sync::{
     atomic::{AtomicBool, AtomicU64, Ordering},
     mpsc::{sync_channel, SyncSender, TrySendError},
@@ -13,12 +16,21 @@ use tauri::{Emitter, Manager, State};
 use tauri_runtime::ResizeDirection as TauriResizeDirection;
 #[cfg(target_os = "windows")]
 use windows_sys::Win32::{
-    Foundation::{HWND, RECT},
+    Foundation::{
+        CloseHandle, HWND, INVALID_HANDLE_VALUE, RECT, WAIT_ABANDONED, WAIT_FAILED, WAIT_OBJECT_0,
+        WAIT_TIMEOUT,
+    },
     Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDIBits,
         GetWindowDC, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
         HGDIOBJ, RGBQUAD, SRCCOPY,
     },
+    Storage::FileSystem::{
+        CreateFileW, FileIdInfo, GetFileInformationByHandleEx, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING,
+    },
+    System::Threading::{CreateMutexW, ReleaseMutex, WaitForSingleObject},
     UI::WindowsAndMessaging::{GetWindowRect, ShowWindowAsync, SW_HIDE},
 };
 
@@ -58,7 +70,1277 @@ static DIAGNOSTICS_ID_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static DIAGNOSTICS_SKEW_SELF_TEST_REQUESTED: AtomicBool = AtomicBool::new(false);
 static DIAGNOSTICS_CAPTURE_STATE: OnceLock<Mutex<DiagnosticsCaptureStatus>> = OnceLock::new();
 const AGENT_HEADLESS_BASE_DIR_ENV: &str = "VOXVULGI_AGENT_HEADLESS_BASE_DIR";
+const AGENT_LIVE_ACTIONS_ENV: &str = "VOXVULGI_AGENT_LIVE_ACTIONS";
+const OFFLINE_LOCALIZATION_PROOF_FLAG: &str = "--offline-localization-proof";
+const OFFLINE_LOCALIZATION_PROOF_MEDIA_ARG: &str = "--proof-media";
+const OFFLINE_LOCALIZATION_PROOF_ROOT_ARG: &str = "--proof-root";
+const OFFLINE_LOCALIZATION_PROOF_ASR_LANG_ARG: &str = "--proof-asr-lang";
+const OFFLINE_LOCALIZATION_PROOF_EXIT_FAILED: i32 = 30;
+const OFFLINE_LOCALIZATION_PROOF_EXIT_RECEIPT_FAILED: i32 = 31;
+const OFFLINE_LOCALIZATION_PROOF_EXIT_CONCURRENT: i32 = 32;
+const OFFLINE_UPDATE_PRESERVATION_SEED_FLAG: &str = "--offline-update-preservation-seed";
+const OFFLINE_UPDATE_PRESERVATION_SEED_ROOT_ARG: &str = "--seed-root";
+const OFFLINE_UPDATE_PRESERVATION_SEED_MEDIA_ARG: &str = "--seed-media";
+const OFFLINE_UPDATE_PRESERVATION_SEED_EXIT_FAILED: i32 = 33;
+const OFFLINE_UPDATE_PRESERVATION_SEED_EXIT_RECEIPT_FAILED: i32 = 34;
 const STARTUP_STATUS_EVENT: &str = "voxvulgi://startup-status";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OfflineLocalizationProofCli {
+    media_path: std::path::PathBuf,
+    proof_root: std::path::PathBuf,
+    asr_lang: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OfflineUpdatePreservationSeedCli {
+    seed_root: std::path::PathBuf,
+    media_path: std::path::PathBuf,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct OfflineLocalizationProofTerminalStatus {
+    schema_version: u32,
+    kind: &'static str,
+    outcome: String,
+    exit_code: Option<i32>,
+    proof_root: String,
+    proof_media_path: String,
+    proof_media_sha256: String,
+    proof_summary_path: String,
+    proof_summary_sha256: Option<String>,
+    app_version: String,
+    engine_version: String,
+    started_at_ms: i64,
+    finished_at_ms: Option<i64>,
+    error: Option<String>,
+    proof_run_id: String,
+    owner_pid: u32,
+    proof_root_canonical_path: String,
+    proof_root_volume_serial: String,
+    proof_root_file_id: String,
+    proof_output_dir_canonical_path: String,
+    proof_output_dir_volume_serial: String,
+    proof_output_dir_file_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OfflineProofDirectoryIdentity {
+    canonical_path: std::path::PathBuf,
+    volume_serial: String,
+    file_id: String,
+}
+
+#[cfg(target_os = "windows")]
+struct OfflineProofDirectoryHandle {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    identity: OfflineProofDirectoryIdentity,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for OfflineProofDirectoryHandle {
+    fn drop(&mut self) {
+        if self.handle != INVALID_HANDLE_VALUE && !self.handle.is_null() {
+            unsafe {
+                CloseHandle(self.handle);
+            }
+            self.handle = std::ptr::null_mut();
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct OfflineProofRootOwnership {
+    root: OfflineProofDirectoryHandle,
+    mutex: windows_sys::Win32::Foundation::HANDLE,
+    abandoned: bool,
+}
+
+#[cfg(target_os = "windows")]
+impl Drop for OfflineProofRootOwnership {
+    fn drop(&mut self) {
+        if !self.mutex.is_null() {
+            unsafe {
+                let _ = ReleaseMutex(self.mutex);
+                CloseHandle(self.mutex);
+            }
+            self.mutex = std::ptr::null_mut();
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+struct OfflineProofOutputOwnership {
+    diagnostics: OfflineProofDirectoryHandle,
+    output: OfflineProofDirectoryHandle,
+}
+
+#[cfg(target_os = "windows")]
+enum OfflineProofRootAcquire {
+    Acquired(OfflineProofRootOwnership),
+    Concurrent,
+}
+
+#[cfg(target_os = "windows")]
+fn windows_wide_null(value: &std::ffi::OsStr) -> Vec<u16> {
+    value.encode_wide().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(target_os = "windows")]
+fn assert_existing_path_chain_has_no_reparse_points(path: &std::path::Path) -> Result<(), String> {
+    use std::os::windows::fs::MetadataExt;
+    if !path.is_absolute() {
+        return Err(format!(
+            "owned proof path must be absolute: {}",
+            path.display()
+        ));
+    }
+    let mut chain = path.ancestors().collect::<Vec<_>>();
+    chain.reverse();
+    for component in chain {
+        if component.as_os_str().is_empty() {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(component).map_err(|error| {
+            format!(
+                "owned proof path component cannot be opened ({}): {error}",
+                component.display()
+            )
+        })?;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(format!(
+                "owned proof path contains a reparse point: {}",
+                component.display()
+            ));
+        }
+        if !metadata.is_dir() {
+            return Err(format!(
+                "owned proof path component is not a directory: {}",
+                component.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn directory_identity_from_handle(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    canonical_path: std::path::PathBuf,
+) -> Result<OfflineProofDirectoryIdentity, String> {
+    let mut info = unsafe { std::mem::zeroed::<FILE_ID_INFO>() };
+    let observed = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            (&mut info as *mut FILE_ID_INFO).cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if observed == 0 {
+        return Err(format!(
+            "failed to query FILE_ID_INFO for {}: {}",
+            canonical_path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(OfflineProofDirectoryIdentity {
+        canonical_path,
+        volume_serial: format!("{:08X}", info.VolumeSerialNumber as u32),
+        file_id: hex::encode_upper(info.FileId.Identifier),
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn open_owned_proof_directory(
+    path: &std::path::Path,
+) -> Result<OfflineProofDirectoryHandle, String> {
+    assert_existing_path_chain_has_no_reparse_points(path)?;
+    let canonical_path = std::fs::canonicalize(path).map_err(|error| {
+        format!(
+            "failed to canonicalize owned proof directory {}: {error}",
+            path.display()
+        )
+    })?;
+    assert_existing_path_chain_has_no_reparse_points(&canonical_path)?;
+    let wide = windows_wide_null(canonical_path.as_os_str());
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            FILE_READ_ATTRIBUTES,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(format!(
+            "failed to open owned proof directory {}: {}",
+            canonical_path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    let identity = match directory_identity_from_handle(handle, canonical_path) {
+        Ok(value) => value,
+        Err(error) => {
+            unsafe {
+                CloseHandle(handle);
+            }
+            return Err(error);
+        }
+    };
+    Ok(OfflineProofDirectoryHandle { handle, identity })
+}
+
+#[cfg(target_os = "windows")]
+fn revalidate_owned_proof_directory(directory: &OfflineProofDirectoryHandle) -> Result<(), String> {
+    assert_existing_path_chain_has_no_reparse_points(&directory.identity.canonical_path)?;
+    let held = directory_identity_from_handle(
+        directory.handle,
+        directory.identity.canonical_path.clone(),
+    )?;
+    if held != directory.identity {
+        return Err(format!(
+            "held proof directory identity changed: {}",
+            directory.identity.canonical_path.display()
+        ));
+    }
+    let reopened = open_owned_proof_directory(&directory.identity.canonical_path)?;
+    if reopened.identity != directory.identity {
+        return Err(format!(
+            "proof directory path was replaced: {}",
+            directory.identity.canonical_path.display()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn offline_proof_root_mutex_name(root: &OfflineProofDirectoryIdentity) -> String {
+    format!(
+        "Local\\VoxVulgi_OfflineProofRoot_{}_{}",
+        root.volume_serial, root.file_id
+    )
+}
+
+#[cfg(target_os = "windows")]
+fn acquire_offline_proof_root(root: &std::path::Path) -> Result<OfflineProofRootAcquire, String> {
+    let root = open_owned_proof_directory(root)?;
+    let mutex_name = offline_proof_root_mutex_name(&root.identity);
+    let mutex_name = windows_wide_null(std::ffi::OsStr::new(&mutex_name));
+    let mutex = unsafe { CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr()) };
+    if mutex.is_null() {
+        return Err(format!(
+            "failed to create offline proof-root mutex: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    let wait = unsafe { WaitForSingleObject(mutex, 0) };
+    match wait {
+        WAIT_OBJECT_0 | WAIT_ABANDONED => Ok(OfflineProofRootAcquire::Acquired(
+            OfflineProofRootOwnership {
+                root,
+                mutex,
+                abandoned: wait == WAIT_ABANDONED,
+            },
+        )),
+        WAIT_TIMEOUT => {
+            unsafe {
+                CloseHandle(mutex);
+            }
+            Ok(OfflineProofRootAcquire::Concurrent)
+        }
+        WAIT_FAILED => {
+            let error = std::io::Error::last_os_error();
+            unsafe {
+                CloseHandle(mutex);
+            }
+            Err(format!("offline proof-root mutex wait failed: {error}"))
+        }
+        other => {
+            unsafe {
+                CloseHandle(mutex);
+            }
+            Err(format!(
+                "offline proof-root mutex returned unexpected wait state {other}"
+            ))
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn create_or_open_empty_owned_directory(
+    path: &std::path::Path,
+    label: &str,
+) -> Result<OfflineProofDirectoryHandle, String> {
+    if path.exists() {
+        let metadata = std::fs::symlink_metadata(path)
+            .map_err(|error| format!("failed to inspect {label} {}: {error}", path.display()))?;
+        use std::os::windows::fs::MetadataExt;
+        if metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 || !metadata.is_dir() {
+            return Err(format!(
+                "{label} is not an owned regular directory: {}",
+                path.display()
+            ));
+        }
+        if std::fs::read_dir(path)
+            .map_err(|error| format!("failed to enumerate {label} {}: {error}", path.display()))?
+            .next()
+            .is_some()
+        {
+            return Err(format!(
+                "{label} must be empty before launch: {}",
+                path.display()
+            ));
+        }
+    } else {
+        std::fs::create_dir(path)
+            .map_err(|error| format!("failed to create {label} {}: {error}", path.display()))?;
+    }
+    open_owned_proof_directory(path)
+}
+
+#[cfg(target_os = "windows")]
+fn prepare_offline_localization_output(
+    ownership: &OfflineProofRootOwnership,
+) -> Result<OfflineProofOutputOwnership, String> {
+    revalidate_owned_proof_directory(&ownership.root)?;
+    let diagnostics_path = ownership.root.identity.canonical_path.join("diagnostics");
+    let diagnostics = if diagnostics_path.exists() {
+        open_owned_proof_directory(&diagnostics_path)?
+    } else {
+        std::fs::create_dir(&diagnostics_path)
+            .map_err(|error| format!("failed to create proof diagnostics directory: {error}"))?;
+        open_owned_proof_directory(&diagnostics_path)?
+    };
+    let output_path = diagnostics_path.join("offline_localization_proof");
+    let output = create_or_open_empty_owned_directory(
+        &output_path,
+        "offline localization proof output directory",
+    )?;
+    revalidate_owned_proof_directory(&ownership.root)?;
+    revalidate_owned_proof_directory(&diagnostics)?;
+    revalidate_owned_proof_directory(&output)?;
+    Ok(OfflineProofOutputOwnership {
+        diagnostics,
+        output,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn prepare_offline_update_seed_output(
+    ownership: &OfflineProofRootOwnership,
+) -> Result<OfflineProofOutputOwnership, String> {
+    revalidate_owned_proof_directory(&ownership.root)?;
+    let diagnostics_path = ownership.root.identity.canonical_path.join("diagnostics");
+    if !diagnostics_path.exists() {
+        std::fs::create_dir(&diagnostics_path)
+            .map_err(|error| format!("failed to create seed diagnostics directory: {error}"))?;
+    }
+    let diagnostics = open_owned_proof_directory(&diagnostics_path)?;
+    let output_path = diagnostics_path.join("offline_update_preservation_seed");
+    if !output_path.exists() {
+        std::fs::create_dir(&output_path)
+            .map_err(|error| format!("failed to create update-seed output directory: {error}"))?;
+    }
+    let output = open_owned_proof_directory(&output_path)?;
+    revalidate_owned_proof_directory(&ownership.root)?;
+    revalidate_owned_proof_directory(&diagnostics)?;
+    revalidate_owned_proof_directory(&output)?;
+    Ok(OfflineProofOutputOwnership {
+        diagnostics,
+        output,
+    })
+}
+
+#[cfg(target_os = "windows")]
+fn revalidate_offline_localization_ownership(
+    root: &OfflineProofRootOwnership,
+    output: &OfflineProofOutputOwnership,
+) -> Result<(), String> {
+    revalidate_owned_proof_directory(&root.root)?;
+    revalidate_owned_proof_directory(&output.diagnostics)?;
+    revalidate_owned_proof_directory(&output.output)
+}
+
+static OFFLINE_PROOF_RUN_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+fn new_offline_proof_run_id(root: &OfflineProofDirectoryIdentity, started_at_ms: i64) -> String {
+    let sequence = OFFLINE_PROOF_RUN_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let mut hash = Sha256::new();
+    hash.update(root.volume_serial.as_bytes());
+    hash.update(root.file_id.as_bytes());
+    hash.update(std::process::id().to_le_bytes());
+    hash.update(started_at_ms.to_le_bytes());
+    hash.update(sequence.to_le_bytes());
+    hash.update(nonce.to_le_bytes());
+    hex::encode(&hash.finalize()[..16])
+}
+
+fn cli_arg_value(args: &[String], name: &str) -> Result<String, String> {
+    let positions = args
+        .iter()
+        .enumerate()
+        .filter_map(|(index, value)| (value == name).then_some(index))
+        .collect::<Vec<_>>();
+    if positions.len() != 1 {
+        return Err(format!("{name} must be provided exactly once"));
+    }
+    let value = args
+        .get(positions[0] + 1)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty() && !value.starts_with("--"))
+        .ok_or_else(|| format!("{name} requires a non-empty value"))?;
+    Ok(value.to_string())
+}
+
+fn parse_offline_localization_proof_cli(
+    args: &[String],
+) -> Result<Option<OfflineLocalizationProofCli>, String> {
+    if !args
+        .iter()
+        .any(|value| value == OFFLINE_LOCALIZATION_PROOF_FLAG)
+    {
+        return Ok(None);
+    }
+    if args
+        .iter()
+        .any(|value| value == OFFLINE_UPDATE_PRESERVATION_SEED_FLAG)
+    {
+        return Err(format!(
+            "{OFFLINE_LOCALIZATION_PROOF_FLAG} and {OFFLINE_UPDATE_PRESERVATION_SEED_FLAG} are mutually exclusive"
+        ));
+    }
+    if args
+        .iter()
+        .filter(|value| *value == OFFLINE_LOCALIZATION_PROOF_FLAG)
+        .count()
+        != 1
+    {
+        return Err(format!(
+            "{OFFLINE_LOCALIZATION_PROOF_FLAG} must be provided exactly once"
+        ));
+    }
+    if !args.iter().any(|value| value == "--agent-headless") {
+        return Err(format!(
+            "{OFFLINE_LOCALIZATION_PROOF_FLAG} requires --agent-headless"
+        ));
+    }
+    let media_path =
+        std::path::PathBuf::from(cli_arg_value(args, OFFLINE_LOCALIZATION_PROOF_MEDIA_ARG)?);
+    let proof_root =
+        std::path::PathBuf::from(cli_arg_value(args, OFFLINE_LOCALIZATION_PROOF_ROOT_ARG)?);
+    let asr_lang = cli_arg_value(args, OFFLINE_LOCALIZATION_PROOF_ASR_LANG_ARG)?;
+    if !media_path.is_absolute() {
+        return Err(format!(
+            "{OFFLINE_LOCALIZATION_PROOF_MEDIA_ARG} must be an absolute path"
+        ));
+    }
+    if !proof_root.is_absolute() {
+        return Err(format!(
+            "{OFFLINE_LOCALIZATION_PROOF_ROOT_ARG} must be an absolute path"
+        ));
+    }
+    if asr_lang.len() > 16
+        || !asr_lang
+            .chars()
+            .all(|value| value.is_ascii_alphanumeric() || value == '-' || value == '_')
+    {
+        return Err(format!(
+            "{OFFLINE_LOCALIZATION_PROOF_ASR_LANG_ARG} contains unsupported characters"
+        ));
+    }
+    let env_root = std::env::var_os(AGENT_HEADLESS_BASE_DIR_ENV).ok_or_else(|| {
+        format!("{AGENT_HEADLESS_BASE_DIR_ENV} is required for {OFFLINE_LOCALIZATION_PROOF_FLAG}")
+    })?;
+    let env_root = std::path::PathBuf::from(env_root);
+    if !env_root.is_absolute()
+        || AppPaths::normalize_base_dir(&env_root) != AppPaths::normalize_base_dir(&proof_root)
+    {
+        return Err(format!(
+            "{AGENT_HEADLESS_BASE_DIR_ENV} must exactly match {OFFLINE_LOCALIZATION_PROOF_ROOT_ARG}"
+        ));
+    }
+    Ok(Some(OfflineLocalizationProofCli {
+        media_path,
+        proof_root,
+        asr_lang,
+    }))
+}
+
+fn parse_offline_update_preservation_seed_cli(
+    args: &[String],
+) -> Result<Option<OfflineUpdatePreservationSeedCli>, String> {
+    if !args
+        .iter()
+        .any(|value| value == OFFLINE_UPDATE_PRESERVATION_SEED_FLAG)
+    {
+        return Ok(None);
+    }
+    if args
+        .iter()
+        .filter(|value| *value == OFFLINE_UPDATE_PRESERVATION_SEED_FLAG)
+        .count()
+        != 1
+    {
+        return Err(format!(
+            "{OFFLINE_UPDATE_PRESERVATION_SEED_FLAG} must be provided exactly once"
+        ));
+    }
+    if args
+        .iter()
+        .any(|value| value == OFFLINE_LOCALIZATION_PROOF_FLAG)
+    {
+        return Err(format!(
+            "{OFFLINE_UPDATE_PRESERVATION_SEED_FLAG} and {OFFLINE_LOCALIZATION_PROOF_FLAG} are mutually exclusive"
+        ));
+    }
+    if !args.iter().any(|value| value == "--agent-headless") {
+        return Err(format!(
+            "{OFFLINE_UPDATE_PRESERVATION_SEED_FLAG} requires --agent-headless"
+        ));
+    }
+    let seed_root = std::path::PathBuf::from(cli_arg_value(
+        args,
+        OFFLINE_UPDATE_PRESERVATION_SEED_ROOT_ARG,
+    )?);
+    let media_path = std::path::PathBuf::from(cli_arg_value(
+        args,
+        OFFLINE_UPDATE_PRESERVATION_SEED_MEDIA_ARG,
+    )?);
+    if !seed_root.is_absolute() {
+        return Err(format!(
+            "{OFFLINE_UPDATE_PRESERVATION_SEED_ROOT_ARG} must be an absolute path"
+        ));
+    }
+    if !media_path.is_absolute() {
+        return Err(format!(
+            "{OFFLINE_UPDATE_PRESERVATION_SEED_MEDIA_ARG} must be an absolute path"
+        ));
+    }
+    let env_root = std::env::var_os(AGENT_HEADLESS_BASE_DIR_ENV).ok_or_else(|| {
+        format!(
+            "{AGENT_HEADLESS_BASE_DIR_ENV} is required for {OFFLINE_UPDATE_PRESERVATION_SEED_FLAG}"
+        )
+    })?;
+    let env_root = std::path::PathBuf::from(env_root);
+    if !env_root.is_absolute()
+        || AppPaths::normalize_base_dir(&env_root) != AppPaths::normalize_base_dir(&seed_root)
+    {
+        return Err(format!(
+            "{AGENT_HEADLESS_BASE_DIR_ENV} must exactly match {OFFLINE_UPDATE_PRESERVATION_SEED_ROOT_ARG}"
+        ));
+    }
+    Ok(Some(OfflineUpdatePreservationSeedCli {
+        seed_root,
+        media_path,
+    }))
+}
+
+fn offline_update_preservation_seed_receipt_path(root: &std::path::Path) -> std::path::PathBuf {
+    root.join("diagnostics")
+        .join("offline_update_preservation_seed")
+        .join("seed_receipt.json")
+}
+
+#[cfg(target_os = "windows")]
+fn run_offline_update_preservation_seed_one_shot(
+    paths: &AppPaths,
+    database: &db::AppDatabase,
+    cli: OfflineUpdatePreservationSeedCli,
+    root: &OfflineProofRootOwnership,
+    output: OfflineProofOutputOwnership,
+) -> i32 {
+    let receipt_path = offline_update_preservation_seed_receipt_path(&cli.seed_root);
+    if let Err(error) = revalidate_offline_localization_ownership(root, &output) {
+        eprintln!("update-preservation seed ownership changed before receipt cleanup: {error}");
+        return OFFLINE_UPDATE_PRESERVATION_SEED_EXIT_RECEIPT_FAILED;
+    }
+    if receipt_path.is_file() {
+        if let Err(error) = std::fs::remove_file(&receipt_path) {
+            eprintln!("failed to remove stale update-preservation receipt: {error}");
+            return OFFLINE_UPDATE_PRESERVATION_SEED_EXIT_RECEIPT_FAILED;
+        }
+    }
+    let seed_result =
+        voxvulgi_engine::offline_update_preservation_seed::seed_offline_update_preservation_state(
+            paths,
+            &cli.media_path,
+            &receipt_path,
+        );
+    let drain_result = database.shutdown_and_drain(db::SHUTDOWN_DRAIN_TIMEOUT);
+    match (seed_result, drain_result) {
+        (Ok(_), Ok(_)) => {
+            match revalidate_offline_localization_ownership(root, &output) {
+                Ok(()) => 0,
+                Err(error) => {
+                    eprintln!("update-preservation seed ownership changed before receipt acceptance: {error}");
+                    OFFLINE_UPDATE_PRESERVATION_SEED_EXIT_RECEIPT_FAILED
+                }
+            }
+        }
+        (seed, drain) => {
+            let _ = std::fs::remove_file(&receipt_path);
+            if let Err(error) = seed {
+                eprintln!("offline update-preservation seed failed: {error}");
+            }
+            if let Err(error) = drain {
+                eprintln!("offline update-preservation database drain failed: {error}");
+            }
+            OFFLINE_UPDATE_PRESERVATION_SEED_EXIT_FAILED
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn assert_offline_localization_prelaunch_state(
+    ownership: &OfflineProofRootOwnership,
+) -> Result<(), String> {
+    revalidate_owned_proof_directory(&ownership.root)?;
+    let db_dir = ownership.root.identity.canonical_path.join("db");
+    if db_dir.exists() {
+        let db = open_owned_proof_directory(&db_dir)?;
+        if std::fs::read_dir(&db_dir)
+            .map_err(|error| format!("failed to enumerate proof database directory: {error}"))?
+            .next()
+            .is_some()
+        {
+            return Err(format!(
+                "offline localization proof requires a new empty database directory; {} already contains state",
+                db_dir.display()
+            ));
+        }
+        revalidate_owned_proof_directory(&db)?;
+    }
+    let diagnostics = ownership.root.identity.canonical_path.join("diagnostics");
+    if !diagnostics.exists() {
+        return Ok(());
+    }
+    let diagnostics_handle = open_owned_proof_directory(&diagnostics)?;
+    let output = diagnostics.join("offline_localization_proof");
+    if output.exists() {
+        let output_handle = open_owned_proof_directory(&output)?;
+        if std::fs::read_dir(&output)
+            .map_err(|error| format!("failed to enumerate proof output directory: {error}"))?
+            .next()
+            .is_some()
+        {
+            return Err(format!(
+                "offline localization proof output must be empty before launch: {}",
+                output.display()
+            ));
+        }
+        revalidate_owned_proof_directory(&output_handle)?;
+    }
+    revalidate_owned_proof_directory(&diagnostics_handle)
+}
+
+#[cfg(target_os = "windows")]
+fn assert_exact_offline_localization_output_membership(
+    ownership: &OfflineProofOutputOwnership,
+) -> Result<(), String> {
+    revalidate_owned_proof_directory(&ownership.output)?;
+    let expected = std::collections::BTreeSet::from([
+        "localization_export.zip".to_string(),
+        "localized_dub.mkv".to_string(),
+        "localized_dub.wav".to_string(),
+        "proof_summary.json".to_string(),
+        "terminal_status.json".to_string(),
+        "voice_report.json".to_string(),
+    ]);
+    let mut observed = std::collections::BTreeSet::new();
+    for entry in std::fs::read_dir(&ownership.output.identity.canonical_path)
+        .map_err(|error| format!("failed to enumerate final proof outputs: {error}"))?
+    {
+        let entry = entry.map_err(|error| format!("failed to read final proof output: {error}"))?;
+        use std::os::windows::fs::MetadataExt;
+        let metadata = std::fs::symlink_metadata(entry.path())
+            .map_err(|error| format!("failed to inspect final proof output: {error}"))?;
+        if !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+            || entry
+                .file_type()
+                .map_err(|error| error.to_string())?
+                .is_symlink()
+        {
+            return Err(format!(
+                "final proof output is not a nonempty regular file: {}",
+                entry.path().display()
+            ));
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "final proof output name is not Unicode".to_string())?;
+        observed.insert(name);
+    }
+    if observed != expected {
+        return Err(format!(
+            "final proof output membership mismatch: expected {:?}, observed {:?}",
+            expected, observed
+        ));
+    }
+    revalidate_owned_proof_directory(&ownership.output)
+}
+
+fn write_offline_localization_terminal_status(
+    path: &std::path::Path,
+    status: &OfflineLocalizationProofTerminalStatus,
+) -> Result<(), String> {
+    let body = serde_json::to_string_pretty(status).map_err(|error| error.to_string())?;
+    voxvulgi_engine::persistence::atomic_write_text(path, &format!("{body}\n"))
+        .map_err(|error| error.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn prepare_offline_localization_proof_one_shot(
+    cli: &OfflineLocalizationProofCli,
+    root: &OfflineProofRootOwnership,
+) -> Result<
+    (
+        OfflineProofOutputOwnership,
+        OfflineLocalizationProofTerminalStatus,
+        std::path::PathBuf,
+    ),
+    String,
+> {
+    let started_at_ms = now_epoch_ms_i64();
+    assert_offline_localization_prelaunch_state(root)?;
+    let media_path = std::fs::canonicalize(&cli.media_path)
+        .map_err(|error| format!("proof media cannot be opened: {error}"))?;
+    if !media_path.is_file() {
+        return Err(format!(
+            "proof media is not a local file: {}",
+            media_path.display()
+        ));
+    }
+    let media_sha256 = sha256_hex_file(&media_path)
+        .map_err(|error| format!("proof media hashing failed: {error}"))?;
+    let output = prepare_offline_localization_output(root)?;
+    let output_dir = output.output.identity.canonical_path.clone();
+    let summary_path = output_dir.join("proof_summary.json");
+    let terminal_path = output_dir.join("terminal_status.json");
+    let proof_run_id = new_offline_proof_run_id(&root.root.identity, started_at_ms);
+    let base_status = OfflineLocalizationProofTerminalStatus {
+        schema_version: 2,
+        kind: "voxvulgi_offline_localization_proof_terminal",
+        outcome: "running".to_string(),
+        exit_code: None,
+        proof_root: root
+            .root
+            .identity
+            .canonical_path
+            .to_string_lossy()
+            .to_string(),
+        proof_media_path: media_path.to_string_lossy().to_string(),
+        proof_media_sha256: media_sha256,
+        proof_summary_path: summary_path.to_string_lossy().to_string(),
+        proof_summary_sha256: None,
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        engine_version: voxvulgi_engine::diagnostics::engine_version().to_string(),
+        started_at_ms,
+        finished_at_ms: None,
+        error: None,
+        proof_run_id,
+        owner_pid: std::process::id(),
+        proof_root_canonical_path: root
+            .root
+            .identity
+            .canonical_path
+            .to_string_lossy()
+            .to_string(),
+        proof_root_volume_serial: root.root.identity.volume_serial.clone(),
+        proof_root_file_id: root.root.identity.file_id.clone(),
+        proof_output_dir_canonical_path: output_dir.to_string_lossy().to_string(),
+        proof_output_dir_volume_serial: output.output.identity.volume_serial.clone(),
+        proof_output_dir_file_id: output.output.identity.file_id.clone(),
+    };
+    revalidate_offline_localization_ownership(root, &output)?;
+    write_offline_localization_terminal_status(&terminal_path, &base_status)
+        .map_err(|error| format!("failed to write running proof status: {error}"))?;
+    revalidate_offline_localization_ownership(root, &output)?;
+    Ok((output, base_status, media_path))
+}
+
+#[cfg(target_os = "windows")]
+fn run_offline_localization_proof_one_shot(
+    paths: &AppPaths,
+    database: &db::AppDatabase,
+    cli: OfflineLocalizationProofCli,
+    root: &OfflineProofRootOwnership,
+    output: OfflineProofOutputOwnership,
+    base_status: OfflineLocalizationProofTerminalStatus,
+    media_path: std::path::PathBuf,
+) -> i32 {
+    let output_dir = output.output.identity.canonical_path.clone();
+    let summary_path = output_dir.join("proof_summary.json");
+    let terminal_path = output_dir.join("terminal_status.json");
+    let media_sha256 = base_status.proof_media_sha256.clone();
+    if let Err(error) = revalidate_offline_localization_ownership(root, &output) {
+        eprintln!("offline proof ownership changed before execution: {error}");
+        return OFFLINE_LOCALIZATION_PROOF_EXIT_FAILED;
+    }
+
+    let proof_result =
+        voxvulgi_engine::localization_offline_proof::run_offline_localization_proof_at(
+            paths,
+            voxvulgi_engine::localization_offline_proof::OfflineLocalizationProofRequest {
+                media_path: media_path.to_string_lossy().to_string(),
+                asr_lang: Some(cli.asr_lang),
+                proof_run_id: base_status.proof_run_id.clone(),
+                proof_started_at_ms: base_status.started_at_ms,
+            },
+            output_dir.clone(),
+        );
+    let drain_result = database.shutdown_and_drain(db::SHUTDOWN_DRAIN_TIMEOUT);
+    let outcome = match (proof_result, drain_result) {
+        (Ok(summary), Ok(())) => {
+            if let Err(error) = revalidate_offline_localization_ownership(root, &output) {
+                Err(format!(
+                    "proof ownership changed before final validation: {error}"
+                ))
+            } else if summary.proof_summary_path != summary_path.to_string_lossy().as_ref()
+                || !summary_path.is_file()
+                || summary.media_path != media_path.to_string_lossy().as_ref()
+                || !summary.media_sha256.eq_ignore_ascii_case(&media_sha256)
+                || summary.outcome != "succeeded"
+            {
+                Err("proof summary postconditions did not match the one-shot request".to_string())
+            } else {
+                assert_exact_offline_localization_output_membership(&output).and_then(|()| {
+                    sha256_hex_file(&summary_path).map(|summary_sha256| (summary, summary_sha256))
+                })
+            }
+        }
+        (Err(error), Ok(())) => Err(error.to_string()),
+        (Ok(_), Err(error)) => Err(format!("database drain failed after proof: {error}")),
+        (Err(proof_error), Err(drain_error)) => Err(format!(
+            "{proof_error}; database drain also failed: {drain_error}"
+        )),
+    };
+
+    match outcome {
+        Ok((summary, summary_sha256)) => {
+            let success = OfflineLocalizationProofTerminalStatus {
+                outcome: "succeeded".to_string(),
+                exit_code: Some(0),
+                proof_summary_sha256: Some(summary_sha256),
+                finished_at_ms: Some(now_epoch_ms_i64()),
+                engine_version: summary.engine_version,
+                ..base_status
+            };
+            if let Err(error) = revalidate_offline_localization_ownership(root, &output) {
+                eprintln!("proof ownership changed before success publication: {error}");
+                return OFFLINE_LOCALIZATION_PROOF_EXIT_RECEIPT_FAILED;
+            }
+            match write_offline_localization_terminal_status(&terminal_path, &success) {
+                Ok(()) => match revalidate_offline_localization_ownership(root, &output) {
+                    Ok(()) => 0,
+                    Err(error) => {
+                        eprintln!("proof ownership changed after success publication: {error}");
+                        OFFLINE_LOCALIZATION_PROOF_EXIT_RECEIPT_FAILED
+                    }
+                },
+                Err(error) => {
+                    eprintln!("failed to write terminal success status: {error}");
+                    OFFLINE_LOCALIZATION_PROOF_EXIT_RECEIPT_FAILED
+                }
+            }
+        }
+        Err(error) => {
+            let failed = OfflineLocalizationProofTerminalStatus {
+                outcome: "failed".to_string(),
+                exit_code: Some(OFFLINE_LOCALIZATION_PROOF_EXIT_FAILED),
+                finished_at_ms: Some(now_epoch_ms_i64()),
+                error: Some(error.clone()),
+                ..base_status
+            };
+            if let Err(ownership_error) = revalidate_offline_localization_ownership(root, &output) {
+                eprintln!("{error}; proof ownership changed before failure publication: {ownership_error}");
+                OFFLINE_LOCALIZATION_PROOF_EXIT_RECEIPT_FAILED
+            } else if let Err(receipt_error) =
+                write_offline_localization_terminal_status(&terminal_path, &failed)
+            {
+                eprintln!("{error}; failed to write terminal failure status: {receipt_error}");
+                OFFLINE_LOCALIZATION_PROOF_EXIT_RECEIPT_FAILED
+            } else {
+                eprintln!("{error}");
+                OFFLINE_LOCALIZATION_PROOF_EXIT_FAILED
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod offline_localization_proof_cli_tests {
+    use super::*;
+
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+    #[cfg(target_os = "windows")]
+    fn wait_for_file(path: &std::path::Path, timeout: Duration) {
+        let deadline = Instant::now() + timeout;
+        while !path.is_file() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(path.is_file(), "timed out waiting for {}", path.display());
+    }
+
+    #[cfg(target_os = "windows")]
+    fn create_junction(link: &std::path::Path, target: &std::path::Path) {
+        use std::os::windows::process::CommandExt;
+        let status = std::process::Command::new("cmd.exe")
+            .args([
+                "/d",
+                "/c",
+                "mklink",
+                "/J",
+                link.to_string_lossy().as_ref(),
+                target.to_string_lossy().as_ref(),
+            ])
+            .creation_flags(0x08000000)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("launch mklink");
+        assert!(status.success(), "mklink /J failed with {status}");
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn offline_proof_root_owner_child_process_probe() {
+        let Some(root) = std::env::var_os("VOXVULGI_OFFLINE_PROOF_TEST_CHILD_ROOT") else {
+            return;
+        };
+        let marker = std::path::PathBuf::from(
+            std::env::var_os("VOXVULGI_OFFLINE_PROOF_TEST_CHILD_MARKER").expect("child marker"),
+        );
+        let mode = std::env::var("VOXVULGI_OFFLINE_PROOF_TEST_CHILD_MODE")
+            .unwrap_or_else(|_| "hold".to_string());
+        let ownership =
+            match acquire_offline_proof_root(std::path::Path::new(&root)).expect("child acquire") {
+                OfflineProofRootAcquire::Acquired(value) => value,
+                OfflineProofRootAcquire::Concurrent => panic!("child unexpectedly contended"),
+            };
+        std::fs::write(&marker, b"owned").expect("write child marker");
+        if mode == "abandon" {
+            std::thread::sleep(Duration::from_secs(2));
+            std::mem::forget(ownership);
+            std::process::exit(0);
+        }
+        std::thread::sleep(Duration::from_secs(3));
+        drop(ownership);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn root_wide_mutex_rejects_contender_and_accepts_clean_abandoned_owner() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).expect("root");
+        let test_exe = std::env::current_exe().expect("test exe");
+        let test_name =
+            "offline_localization_proof_cli_tests::offline_proof_root_owner_child_process_probe";
+
+        let marker = dir.path().join("owner_ready");
+        let mut owner = std::process::Command::new(&test_exe)
+            .args([test_name, "--exact", "--nocapture"])
+            .env("VOXVULGI_OFFLINE_PROOF_TEST_CHILD_ROOT", &root)
+            .env("VOXVULGI_OFFLINE_PROOF_TEST_CHILD_MARKER", &marker)
+            .env("VOXVULGI_OFFLINE_PROOF_TEST_CHILD_MODE", "hold")
+            .spawn()
+            .expect("spawn owner");
+        wait_for_file(&marker, Duration::from_secs(10));
+        assert!(matches!(
+            acquire_offline_proof_root(&root).expect("contender acquire"),
+            OfflineProofRootAcquire::Concurrent
+        ));
+        assert_eq!(std::fs::read_dir(&root).expect("root entries").count(), 0);
+        assert!(owner.wait().expect("owner exit").success());
+
+        let abandoned_marker = dir.path().join("abandoned_ready");
+        let mut abandoned_owner = std::process::Command::new(&test_exe)
+            .args([test_name, "--exact", "--nocapture"])
+            .env("VOXVULGI_OFFLINE_PROOF_TEST_CHILD_ROOT", &root)
+            .env(
+                "VOXVULGI_OFFLINE_PROOF_TEST_CHILD_MARKER",
+                &abandoned_marker,
+            )
+            .env("VOXVULGI_OFFLINE_PROOF_TEST_CHILD_MODE", "abandon")
+            .spawn()
+            .expect("spawn abandoned owner");
+        wait_for_file(&abandoned_marker, Duration::from_secs(2));
+        let identity = open_owned_proof_directory(&root).expect("root identity");
+        let mutex_name = windows_wide_null(std::ffi::OsStr::new(&offline_proof_root_mutex_name(
+            &identity.identity,
+        )));
+        let waiting_successor = unsafe { CreateMutexW(std::ptr::null(), 0, mutex_name.as_ptr()) };
+        assert!(!waiting_successor.is_null());
+        assert_eq!(
+            unsafe { WaitForSingleObject(waiting_successor, 0) },
+            WAIT_TIMEOUT
+        );
+        assert!(abandoned_owner
+            .wait()
+            .expect("abandoned owner exit")
+            .success());
+        assert_eq!(
+            unsafe { WaitForSingleObject(waiting_successor, 5_000) },
+            WAIT_ABANDONED
+        );
+        unsafe {
+            let _ = ReleaseMutex(waiting_successor);
+            CloseHandle(waiting_successor);
+        }
+        drop(identity);
+        let successor = match acquire_offline_proof_root(&root).expect("fresh successor acquire") {
+            OfflineProofRootAcquire::Acquired(value) => value,
+            OfflineProofRootAcquire::Concurrent => panic!("fresh successor remained contended"),
+        };
+        assert!(!successor.abandoned);
+        assert_eq!(std::fs::read_dir(&root).expect("root entries").count(), 0);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn dirty_database_and_output_are_rejected_without_mutation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path().join("root");
+        let db = root.join("db").join("app.sqlite");
+        std::fs::create_dir_all(db.parent().expect("db parent")).expect("db dir");
+        std::fs::write(&db, b"historical-proof-database").expect("db bytes");
+        let ownership = match acquire_offline_proof_root(&root).expect("ownership") {
+            OfflineProofRootAcquire::Acquired(value) => value,
+            OfflineProofRootAcquire::Concurrent => panic!("unexpected contention"),
+        };
+        let before = std::fs::read(&db).expect("db before");
+        assert!(assert_offline_localization_prelaunch_state(&ownership).is_err());
+        assert_eq!(std::fs::read(&db).expect("db after"), before);
+
+        std::fs::remove_file(&db).expect("remove db");
+        let output = root.join("diagnostics").join("offline_localization_proof");
+        std::fs::create_dir_all(&output).expect("output");
+        let sentinel = output.join("stale.bin");
+        std::fs::write(&sentinel, b"stale-proof-output").expect("sentinel");
+        let before = std::fs::read(&sentinel).expect("sentinel before");
+        assert!(assert_offline_localization_prelaunch_state(&ownership).is_err());
+        assert_eq!(std::fs::read(&sentinel).expect("sentinel after"), before);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn junction_matrix_and_post_validation_swap_are_rejected_without_outside_mutation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let outside = dir.path().join("outside");
+        std::fs::create_dir(&outside).expect("outside");
+        let sentinel = outside.join("sentinel.bin");
+        std::fs::write(&sentinel, b"outside-sentinel").expect("sentinel");
+        let expected = std::fs::read(&sentinel).expect("sentinel before");
+
+        let root_link = dir.path().join("root_link");
+        create_junction(&root_link, &outside);
+        assert!(open_owned_proof_directory(&root_link).is_err());
+        assert_eq!(
+            std::fs::read(&sentinel).expect("root link sentinel"),
+            expected
+        );
+
+        let root = dir.path().join("root");
+        std::fs::create_dir(&root).expect("root");
+        let diagnostics = root.join("diagnostics");
+        create_junction(&diagnostics, &outside);
+        let ownership = match acquire_offline_proof_root(&root).expect("root ownership") {
+            OfflineProofRootAcquire::Acquired(value) => value,
+            OfflineProofRootAcquire::Concurrent => panic!("unexpected contention"),
+        };
+        assert!(prepare_offline_localization_output(&ownership).is_err());
+        assert_eq!(
+            std::fs::read(&sentinel).expect("diagnostics sentinel"),
+            expected
+        );
+        std::fs::remove_dir(&diagnostics).expect("remove diagnostics junction");
+
+        std::fs::create_dir(&diagnostics).expect("diagnostics dir");
+        let output = diagnostics.join("offline_localization_proof");
+        create_junction(&output, &outside);
+        assert!(prepare_offline_localization_output(&ownership).is_err());
+        assert_eq!(std::fs::read(&sentinel).expect("output sentinel"), expected);
+        std::fs::remove_dir(&output).expect("remove output junction");
+
+        let prepared = prepare_offline_localization_output(&ownership).expect("prepared output");
+        assert!(std::fs::rename(&diagnostics, root.join("diagnostics_replaced")).is_err());
+        revalidate_offline_localization_ownership(&ownership, &prepared)
+            .expect("held identities remain valid");
+        assert_eq!(std::fs::read(&sentinel).expect("swap sentinel"), expected);
+    }
+
+    #[test]
+    fn parser_requires_headless_and_exact_explicit_root() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::var_os(AGENT_HEADLESS_BASE_DIR_ENV);
+        let proof_root = if cfg!(windows) {
+            r"C:\proof-root"
+        } else {
+            "/proof-root"
+        };
+        let other_root = if cfg!(windows) {
+            r"C:\other-root"
+        } else {
+            "/other-root"
+        };
+        let media_path = if cfg!(windows) {
+            r"C:\media\sample.mkv"
+        } else {
+            "/media/sample.mkv"
+        };
+        std::env::set_var(AGENT_HEADLESS_BASE_DIR_ENV, proof_root);
+        let args = [
+            "VoxVulgi.exe",
+            "--agent-headless",
+            OFFLINE_LOCALIZATION_PROOF_FLAG,
+            OFFLINE_LOCALIZATION_PROOF_MEDIA_ARG,
+            media_path,
+            OFFLINE_LOCALIZATION_PROOF_ROOT_ARG,
+            proof_root,
+            OFFLINE_LOCALIZATION_PROOF_ASR_LANG_ARG,
+            "ko",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let parsed = parse_offline_localization_proof_cli(&args)
+            .expect("valid args")
+            .expect("proof args");
+        assert_eq!(parsed.proof_root, std::path::PathBuf::from(proof_root));
+        let without_headless = args
+            .iter()
+            .filter(|value| value.as_str() != "--agent-headless")
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(parse_offline_localization_proof_cli(&without_headless).is_err());
+        let wrong_root = args
+            .iter()
+            .map(|value| {
+                if value == proof_root {
+                    other_root.to_string()
+                } else {
+                    value.clone()
+                }
+            })
+            .collect::<Vec<_>>();
+        assert!(parse_offline_localization_proof_cli(&wrong_root).is_err());
+        match previous {
+            Some(value) => std::env::set_var(AGENT_HEADLESS_BASE_DIR_ENV, value),
+            None => std::env::remove_var(AGENT_HEADLESS_BASE_DIR_ENV),
+        }
+    }
+
+    #[test]
+    fn update_seed_parser_requires_headless_exact_root_and_exclusive_mode() {
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let previous = std::env::var_os(AGENT_HEADLESS_BASE_DIR_ENV);
+        let seed_root = if cfg!(windows) {
+            r"C:\proof\update_seed"
+        } else {
+            "/proof/update_seed"
+        };
+        let media_path = if cfg!(windows) {
+            r"C:\media\sample.mkv"
+        } else {
+            "/media/sample.mkv"
+        };
+        std::env::set_var(AGENT_HEADLESS_BASE_DIR_ENV, seed_root);
+        let args = [
+            "VoxVulgi.exe",
+            "--agent-headless",
+            OFFLINE_UPDATE_PRESERVATION_SEED_FLAG,
+            OFFLINE_UPDATE_PRESERVATION_SEED_ROOT_ARG,
+            seed_root,
+            OFFLINE_UPDATE_PRESERVATION_SEED_MEDIA_ARG,
+            media_path,
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+        let parsed = parse_offline_update_preservation_seed_cli(&args)
+            .expect("valid seed args")
+            .expect("seed mode");
+        assert_eq!(parsed.seed_root, std::path::PathBuf::from(seed_root));
+        let without_headless = args
+            .iter()
+            .filter(|value| value.as_str() != "--agent-headless")
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(parse_offline_update_preservation_seed_cli(&without_headless).is_err());
+        let mut mixed = args.clone();
+        mixed.push(OFFLINE_LOCALIZATION_PROOF_FLAG.to_string());
+        assert!(parse_offline_update_preservation_seed_cli(&mixed).is_err());
+        match previous {
+            Some(value) => std::env::set_var(AGENT_HEADLESS_BASE_DIR_ENV, value),
+            None => std::env::remove_var(AGENT_HEADLESS_BASE_DIR_ENV),
+        }
+    }
+
+    #[test]
+    fn terminal_receipt_is_atomic_utf8_without_bom() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("terminal_status.json");
+        let status = OfflineLocalizationProofTerminalStatus {
+            schema_version: 2,
+            kind: "voxvulgi_offline_localization_proof_terminal",
+            outcome: "succeeded".to_string(),
+            exit_code: Some(0),
+            proof_root: dir.path().to_string_lossy().to_string(),
+            proof_media_path: r"C:\media\sample.mkv".to_string(),
+            proof_media_sha256: "A".repeat(64),
+            proof_summary_path: dir
+                .path()
+                .join("proof_summary.json")
+                .to_string_lossy()
+                .to_string(),
+            proof_summary_sha256: Some("B".repeat(64)),
+            app_version: "1.2.3".to_string(),
+            engine_version: "1.2.3".to_string(),
+            started_at_ms: 10,
+            finished_at_ms: Some(20),
+            error: None,
+            proof_run_id: "c".repeat(32),
+            owner_pid: std::process::id(),
+            proof_root_canonical_path: dir.path().to_string_lossy().to_string(),
+            proof_root_volume_serial: "1234ABCD".to_string(),
+            proof_root_file_id: "D".repeat(32),
+            proof_output_dir_canonical_path: dir.path().to_string_lossy().to_string(),
+            proof_output_dir_volume_serial: "1234ABCD".to_string(),
+            proof_output_dir_file_id: "E".repeat(32),
+        };
+        write_offline_localization_terminal_status(&path, &status).expect("write status");
+        let bytes = std::fs::read(&path).expect("read status");
+        assert!(!bytes.starts_with(&[0xEF, 0xBB, 0xBF]));
+        let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("parse status");
+        assert_eq!(parsed["outcome"], "succeeded");
+        assert_eq!(parsed["proof_media_sha256"], "A".repeat(64));
+        assert_eq!(parsed["proof_summary_sha256"], "B".repeat(64));
+        let siblings = std::fs::read_dir(dir.path())
+            .expect("read dir")
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(siblings, vec!["terminal_status.json"]);
+    }
+}
 
 fn resolve_agent_headless_base_dir(
     default_base_dir: std::path::PathBuf,
@@ -68,13 +1350,39 @@ fn resolve_agent_headless_base_dir(
         return Ok(default_base_dir);
     }
     let Some(raw) = std::env::var_os(AGENT_HEADLESS_BASE_DIR_ENV) else {
-        return Ok(default_base_dir);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{AGENT_HEADLESS_BASE_DIR_ENV} is required for --agent-headless; refusing the production app-data root"
+            ),
+        ));
     };
     let override_dir = std::path::PathBuf::from(raw);
     if override_dir.as_os_str().is_empty() || !override_dir.is_absolute() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("{AGENT_HEADLESS_BASE_DIR_ENV} must be an absolute non-empty path"),
+        ));
+    }
+    let normalized_override = AppPaths::normalize_base_dir(&override_dir);
+    let normalized_default = AppPaths::normalize_base_dir(&default_base_dir);
+    let same_lexical = normalized_override
+        .to_string_lossy()
+        .eq_ignore_ascii_case(&normalized_default.to_string_lossy());
+    let same_canonical = std::fs::canonicalize(&normalized_override)
+        .ok()
+        .zip(std::fs::canonicalize(&normalized_default).ok())
+        .map(|(left, right)| {
+            left.to_string_lossy()
+                .eq_ignore_ascii_case(&right.to_string_lossy())
+        })
+        .unwrap_or(false);
+    if same_lexical || same_canonical {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "{AGENT_HEADLESS_BASE_DIR_ENV} must not resolve to the production app-data root"
+            ),
         ));
     }
     Ok(override_dir)
@@ -93,6 +1401,7 @@ static JOBS_BATCH_OPERATIONS: OnceLock<
 // without relying on Tauri IPC (which routes through the WebView main thread we
 // are trying to observe).
 static AGENT_BRIDGE_PORT: OnceLock<u16> = OnceLock::new();
+static AGENT_UI_ACTION_TOKEN: OnceLock<String> = OnceLock::new();
 
 fn run_youtube_protection_mutation<T, F>(
     operation: &str,
@@ -153,6 +1462,8 @@ struct AgentBridgeInner {
     editor_item_id: Option<String>,
     safe_mode: bool,
     agent_headless: bool,
+    agent_background: bool,
+    runtime: Option<RuntimeProvenance>,
     snapshot_tx: Option<std::sync::mpsc::Sender<String>>,
     dump_tx: Option<std::sync::mpsc::Sender<String>>,
     ui_request_tx: Option<std::sync::mpsc::Sender<String>>,
@@ -185,6 +1496,12 @@ fn spawn_agent_bridge(app_data_dir: &std::path::Path) {
     let _ = AGENT_BRIDGE_FILES_DIR.set(app_data_dir.to_path_buf());
     let port_file = app_data_dir.join("agent_bridge_port.txt");
     let json_file = app_data_dir.join("agent_bridge.json");
+    let action_token = format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple()
+    );
+    let _ = AGENT_UI_ACTION_TOKEN.set(action_token.clone());
 
     std::thread::spawn(move || {
         let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
@@ -205,6 +1522,7 @@ fn spawn_agent_bridge(app_data_dir: &std::path::Path) {
                 "port": port,
                 "pid": std::process::id(),
                 "started_at_ms": now_epoch_ms_i64(),
+                "bridge_token": action_token,
             })
             .to_string(),
         );
@@ -391,6 +1709,10 @@ fn handle_agent_request(stream: &mut std::net::TcpStream) {
         }
     }
 
+    if matches!(path, "/agent/command" | "/agent/ui_audit" | "/agent/ui_action") && content_length > 16 * 1024 {
+        let _ = stream.write_all(b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+        return;
+    }
     // Read body
     let mut body = vec![0u8; content_length];
     if content_length > 0 {
@@ -408,6 +1730,9 @@ fn handle_agent_request(stream: &mut std::net::TcpStream) {
     } else {
         match (method, path) {
             ("GET", "/agent/health") => ("200 OK", r#"{"status":"ok"}"#.to_string()),
+            ("GET", "/agent/manual") => ("200 OK", agent_control::catalog().to_string()),
+            ("GET", "/agent/capabilities") => ("200 OK", agent_control::capabilities().to_string()),
+            ("POST", "/agent/command") => agent_control::handle(&body_str),
             ("GET", "/agent/state") => ("200 OK", agent_handle_state()),
             // WP-0261: read-only per-subscription activity so an external monitor can see
             // subscription refresh + fan-out progress without stealing focus.
@@ -417,6 +1742,9 @@ fn handle_agent_request(stream: &mut std::net::TcpStream) {
             // rows or duplicating gate calculations on the bridge thread.
             ("GET", "/agent/jobs_tracks") => agent_handle_jobs_tracks(),
             ("GET", "/agent/provider_verify") => agent_handle_provider_verify_status(),
+            ("GET", "/agent/localization_offline_proof") => {
+                agent_handle_localization_offline_proof_status()
+            }
             ("POST", "/agent/navigate") => agent_handle_navigate(&body_str),
             ("POST", "/agent/snapshot") => agent_handle_snapshot(&body_str),
             ("POST", "/agent/dump") => agent_handle_dump(&body_str),
@@ -426,6 +1754,9 @@ fn handle_agent_request(stream: &mut std::net::TcpStream) {
             ("POST", "/agent/freeze_event") => agent_handle_freeze_event(&body_str),
             ("POST", "/agent/freeze_dump") => agent_handle_freeze_dump(&body_str),
             ("POST", "/agent/provider_verify") => agent_handle_provider_verify_start(),
+            ("POST", "/agent/localization_offline_proof") => {
+                agent_handle_localization_offline_proof_start(&body_str)
+            }
             _ => ("404 Not Found", r#"{"error":"not found"}"#.to_string()),
         }
     };
@@ -467,6 +1798,213 @@ fn agent_headless_app_paths() -> Result<AppPaths, (&'static str, String)> {
         )
     })?;
     Ok(state.paths.clone())
+}
+
+fn agent_headless_isolated_app_paths() -> Result<AppPaths, (&'static str, String)> {
+    let paths = agent_headless_app_paths()?;
+    let configured = std::env::var_os(AGENT_HEADLESS_BASE_DIR_ENV).ok_or_else(|| {
+        (
+            "409 Conflict",
+            serde_json::json!({
+                "error": format!(
+                    "{} is required for installed-app localization proof; refusing the operator profile",
+                    AGENT_HEADLESS_BASE_DIR_ENV
+                )
+            })
+            .to_string(),
+        )
+    })?;
+    let configured = std::path::PathBuf::from(configured);
+    if !configured.is_absolute()
+        || AppPaths::normalize_base_dir(&configured)
+            != AppPaths::normalize_base_dir(&paths.base_dir)
+    {
+        return Err((
+            "409 Conflict",
+            serde_json::json!({
+                "error": format!(
+                    "{} does not match the active isolated app-data root",
+                    AGENT_HEADLESS_BASE_DIR_ENV
+                )
+            })
+            .to_string(),
+        ));
+    }
+    Ok(paths)
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct AgentLocalizationOfflineProofStatus {
+    state: String,
+    run_id: Option<String>,
+    started_at_ms: Option<i64>,
+    finished_at_ms: Option<i64>,
+    media_path: Option<String>,
+    error: Option<String>,
+    summary: Option<voxvulgi_engine::localization_offline_proof::OfflineLocalizationProofSummary>,
+}
+
+impl Default for AgentLocalizationOfflineProofStatus {
+    fn default() -> Self {
+        Self {
+            state: "idle".to_string(),
+            run_id: None,
+            started_at_ms: None,
+            finished_at_ms: None,
+            media_path: None,
+            error: None,
+            summary: None,
+        }
+    }
+}
+
+static AGENT_LOCALIZATION_OFFLINE_PROOF_STATUS: OnceLock<
+    Mutex<AgentLocalizationOfflineProofStatus>,
+> = OnceLock::new();
+
+fn agent_localization_offline_proof_status() -> &'static Mutex<AgentLocalizationOfflineProofStatus>
+{
+    AGENT_LOCALIZATION_OFFLINE_PROOF_STATUS
+        .get_or_init(|| Mutex::new(AgentLocalizationOfflineProofStatus::default()))
+}
+
+fn agent_handle_localization_offline_proof_status() -> (&'static str, String) {
+    if let Err(response) = agent_headless_isolated_app_paths() {
+        return response;
+    }
+    let status = agent_localization_offline_proof_status()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    match serde_json::to_string(&status) {
+        Ok(body) => ("200 OK", body),
+        Err(error) => (
+            "500 Internal Server Error",
+            serde_json::json!({ "error": error.to_string() }).to_string(),
+        ),
+    }
+}
+
+fn agent_handle_localization_offline_proof_start(body: &str) -> (&'static str, String) {
+    let paths = match agent_headless_isolated_app_paths() {
+        Ok(paths) => paths,
+        Err(response) => return response,
+    };
+    let request = match serde_json::from_str::<
+        voxvulgi_engine::localization_offline_proof::OfflineLocalizationProofRequest,
+    >(body)
+    {
+        Ok(request) => request,
+        Err(error) => {
+            return (
+                "400 Bad Request",
+                serde_json::json!({ "error": format!("invalid proof request: {error}") })
+                    .to_string(),
+            )
+        }
+    };
+    let media_path = match std::fs::canonicalize(request.media_path.trim()) {
+        Ok(path) if path.is_file() => path,
+        Ok(path) => {
+            return (
+                "400 Bad Request",
+                serde_json::json!({
+                    "error": format!("media_path is not a local file: {}", path.display())
+                })
+                .to_string(),
+            )
+        }
+        Err(error) => {
+            return (
+                "400 Bad Request",
+                serde_json::json!({ "error": format!("media_path cannot be opened: {error}") })
+                    .to_string(),
+            )
+        }
+    };
+
+    let run_id = format!("{}-{}", std::process::id(), now_epoch_ms_i64());
+    {
+        let mut status = agent_localization_offline_proof_status()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if status.state == "running" {
+            return (
+                "409 Conflict",
+                serde_json::json!({
+                    "error": "an installed-app localization proof is already running",
+                    "run_id": status.run_id,
+                })
+                .to_string(),
+            );
+        }
+        *status = AgentLocalizationOfflineProofStatus {
+            state: "running".to_string(),
+            run_id: Some(run_id.clone()),
+            started_at_ms: Some(now_epoch_ms_i64()),
+            finished_at_ms: None,
+            media_path: Some(media_path.to_string_lossy().to_string()),
+            error: None,
+            summary: None,
+        };
+    }
+
+    let mut owned_request = request;
+    owned_request.media_path = media_path.to_string_lossy().to_string();
+    let worker_run_id = run_id.clone();
+    match std::thread::Builder::new()
+        .name("voxvulgi-agent-localization-offline-proof".to_string())
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                voxvulgi_engine::localization_offline_proof::run_offline_localization_proof(
+                    &paths,
+                    owned_request,
+                )
+            }));
+            let mut status = agent_localization_offline_proof_status()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            status.finished_at_ms = Some(now_epoch_ms_i64());
+            match result {
+                Ok(Ok(summary)) => {
+                    status.state = "succeeded".to_string();
+                    status.summary = Some(summary);
+                    status.error = None;
+                }
+                Ok(Err(error)) => {
+                    status.state = "failed".to_string();
+                    status.error = Some(error.to_string());
+                }
+                Err(_) => {
+                    status.state = "failed".to_string();
+                    status.error = Some("localization proof worker panicked".to_string());
+                }
+            }
+        }) {
+        Ok(_) => (
+            "202 Accepted",
+            serde_json::json!({
+                "state": "running",
+                "run_id": run_id,
+                "status_path": "/agent/localization_offline_proof",
+            })
+            .to_string(),
+        ),
+        Err(error) => {
+            let mut status = agent_localization_offline_proof_status()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if status.run_id.as_deref() == Some(worker_run_id.as_str()) {
+                status.state = "failed".to_string();
+                status.finished_at_ms = Some(now_epoch_ms_i64());
+                status.error = Some(format!("proof worker failed to start: {error}"));
+            }
+            (
+                "500 Internal Server Error",
+                serde_json::json!({ "error": error.to_string(), "run_id": run_id }).to_string(),
+            )
+        }
+    }
 }
 
 static AGENT_PROVIDER_VERIFY_WORKER_ACTIVE: std::sync::atomic::AtomicBool =
@@ -622,7 +2160,10 @@ fn agent_handle_state() -> String {
         "editor_item_id": state.editor_item_id,
         "safe_mode": state.safe_mode,
         "agent_headless": state.agent_headless,
+        "agent_background": state.agent_background,
         "app_version": env!("CARGO_PKG_VERSION"),
+        "live_agent_actions_enabled": agent_live_actions_enabled(),
+        "runtime": state.runtime,
     })
     .to_string()
 }
@@ -1102,13 +2643,28 @@ fn agent_handle_dump(body: &str) -> (&'static str, String) {
 }
 
 fn validate_agent_ui_request(
+    operation: &str,
     agent_headless: bool,
+    live_actions_enabled: bool,
+    expected_action_token: Option<&str>,
     body: &str,
 ) -> Result<serde_json::Value, (&'static str, String)> {
-    if !agent_headless {
+    if operation != "audit" && operation != "action" {
+        return Err((
+            "400 Bad Request",
+            r#"{"error":"unsupported semantic UI operation"}"#.to_string(),
+        ));
+    }
+    if operation == "action" && !agent_headless && !live_actions_enabled {
         return Err((
             "403 Forbidden",
-            r#"{"error":"UI audit routes require --agent-headless"}"#.to_string(),
+            serde_json::json!({
+                "error": format!(
+                    "live semantic UI actions are disabled by {}; remove the explicit opt-out or set it to 1",
+                    AGENT_LIVE_ACTIONS_ENV
+                )
+            })
+            .to_string(),
         ));
     }
     if body.len() > 16 * 1024 {
@@ -1117,7 +2673,7 @@ fn validate_agent_ui_request(
             r#"{"error":"UI audit request exceeds 16 KiB"}"#.to_string(),
         ));
     }
-    let parsed: serde_json::Value = serde_json::from_str(body)
+    let mut parsed: serde_json::Value = serde_json::from_str(body)
         .map_err(|_| ("400 Bad Request", r#"{"error":"invalid json"}"#.to_string()))?;
     if !parsed.is_object() {
         return Err((
@@ -1125,12 +2681,52 @@ fn validate_agent_ui_request(
             r#"{"error":"UI audit request must be a JSON object"}"#.to_string(),
         ));
     }
+    let supplied_token = parsed
+        .get("bridge_token")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let token_matches = expected_action_token
+        .filter(|expected| !expected.is_empty())
+        .map(|expected| constant_time_token_eq(expected.as_bytes(), supplied_token.as_bytes()))
+        .unwrap_or(false);
+    if !token_matches {
+        return Err((
+            "403 Forbidden",
+            r#"{"error":"invalid or missing bridge token"}"#.to_string(),
+        ));
+    }
+    if let Some(object) = parsed.as_object_mut() {
+        object.remove("bridge_token");
+    }
     Ok(parsed)
+}
+
+fn constant_time_token_eq(expected: &[u8], supplied: &[u8]) -> bool {
+    if expected.len() != supplied.len() {
+        return false;
+    }
+    expected
+        .iter()
+        .zip(supplied)
+        .fold(0_u8, |difference, (left, right)| difference | (left ^ right))
+        == 0
+}
+
+fn agent_live_actions_enabled() -> bool {
+    std::env::var(AGENT_LIVE_ACTIONS_ENV)
+        .map(|value| matches!(value.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(true)
 }
 
 fn agent_handle_ui_request(operation: &'static str, body: &str) -> (&'static str, String) {
     let agent_headless = agent_bridge_state().lock().unwrap().agent_headless;
-    let request = match validate_agent_ui_request(agent_headless, body) {
+    let request = match validate_agent_ui_request(
+        operation,
+        agent_headless,
+        agent_live_actions_enabled(),
+        AGENT_UI_ACTION_TOKEN.get().map(String::as_str),
+        body,
+    ) {
         Ok(value) => value,
         Err(response) => return response,
     };
@@ -1572,9 +3168,9 @@ fn agent_handle_freeze_dump(body: &str) -> (&'static str, String) {
 }
 
 use voxvulgi_engine::models::ModelStore;
-use voxvulgi_engine::paths::AppPaths;
+use voxvulgi_engine::paths::{AppPaths, RuntimeProvenance};
 use voxvulgi_engine::{
-    config, db, diagnostics, instagram_subscriptions, jobs, library, media_cleanup,
+    config, db, diagnostics, download_engines, instagram_subscriptions, jobs, library, media_cleanup,
     provider_metadata, root_rebind, speakers, subscriptions, subtitle_tracks, subtitles,
     tiktok_subscriptions, tools, translate, video_libraries, voice_backend_adapters,
     voice_backends, voice_benchmarks, voice_cast_packs, voice_cleanup, voice_library, voice_plans,
@@ -1695,9 +3291,35 @@ fn runtime_background_work_enabled(safe_mode_enabled: bool, agent_headless: bool
     !safe_mode_enabled && !agent_headless
 }
 
+fn minimize_agent_background_window(window: &tauri::WebviewWindow) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWMINNOACTIVE;
+        let handle = window.window_handle().map_err(|e| e.to_string())?;
+        let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+            return Err("background launch requires a Win32 window".into());
+        };
+        if unsafe { ShowWindowAsync(handle.hwnd.get() as HWND, SW_SHOWMINNOACTIVE) } == 0 {
+            return Err("background window minimization failed".into());
+        }
+        Ok(())
+    }
+    #[cfg(not(target_os = "windows"))]
+    window.minimize().map_err(|e| e.to_string())
+}
+
+fn agent_background_requested(args: &[String]) -> Result<bool, String> {
+    let background = args.iter().any(|s| s.trim() == "--agent-background");
+    if background && args.iter().any(|s| s.trim() == "--agent-headless") {
+        return Err("--agent-background uses production state and cannot be combined with isolated --agent-headless".into());
+    }
+    Ok(background)
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 struct DiagnosticsInfo {
     app_data_dir: String,
+    runtime: RuntimeProvenance,
     db_path: String,
     app_name: String,
     app_version: String,
@@ -2175,6 +3797,22 @@ struct DiagnosticsProcessSnapshot {
     virtual_bytes: Option<u64>,
     system_used_bytes: Option<u64>,
     system_total_bytes: Option<u64>,
+    // WP-0320 MT-2: thread count + direct child processes, attached only for
+    // `database_locked`/`database_busy` rows so a lock incident carries the
+    // process context that caused it. Capped defensively (see
+    // `capped_process_snapshot`) so a busy system cannot blow the trace row
+    // cap on its own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    thread_count: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    children: Option<Vec<DiagnosticsChildProcessSnapshot>>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct DiagnosticsChildProcessSnapshot {
+    pid: u32,
+    name: String,
+    cmd: String,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -3439,20 +5077,110 @@ fn cancel_superseded_panel_capture(
     Ok(true)
 }
 
-fn capture_process_snapshot() -> Option<DiagnosticsProcessSnapshot> {
+/// `include_children` attaches thread count and direct child processes
+/// (WP-0320 MT-2); only `database_locked`/`database_busy` rows ask for it, so
+/// every other trace row keeps the small, cheap snapshot it always had.
+fn capture_process_snapshot(include_children: bool) -> Option<DiagnosticsProcessSnapshot> {
     let pid = sysinfo::get_current_pid().ok()?;
     let mut system = System::new();
     system.refresh_memory();
-    system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+    if include_children {
+        system.refresh_processes(ProcessesToUpdate::All, true);
+    } else {
+        system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
+    }
     let process = system.process(pid)?;
+    let thread_count = process.tasks().map(|tasks| tasks.len());
+    let cpu_percent = process.cpu_usage();
+    let rss_bytes = process.memory();
+    let virtual_bytes = process.virtual_memory();
+    let children = include_children.then(|| {
+        // Defensively bounded even in the "full" snapshot: a runaway spawn
+        // storm must not make this probe itself pathological. The trace-row
+        // cap below still applies its own 25-entry cap on top of this.
+        const MAX_CAPTURED_CHILDREN: usize = 1000;
+        let mut found: Vec<DiagnosticsChildProcessSnapshot> = system
+            .processes()
+            .values()
+            .filter(|candidate| candidate.parent() == Some(pid))
+            .take(MAX_CAPTURED_CHILDREN)
+            .map(|candidate| DiagnosticsChildProcessSnapshot {
+                pid: candidate.pid().as_u32(),
+                name: candidate.name().to_string_lossy().to_string(),
+                cmd: candidate
+                    .cmd()
+                    .iter()
+                    .map(|part| part.to_string_lossy().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+            })
+            .collect();
+        found.sort_by_key(|child| child.pid);
+        found
+    });
     Some(DiagnosticsProcessSnapshot {
         pid: Some(pid.as_u32()),
-        cpu_percent: Some(process.cpu_usage()),
-        rss_bytes: Some(process.memory()),
-        virtual_bytes: Some(process.virtual_memory()),
+        cpu_percent: Some(cpu_percent),
+        rss_bytes: Some(rss_bytes),
+        virtual_bytes: Some(virtual_bytes),
         system_used_bytes: Some(system.used_memory()),
         system_total_bytes: Some(system.total_memory()),
+        thread_count,
+        children,
     })
+}
+
+/// Shrinks a process snapshot for the trace-row size cap (WP-0320 MT-2):
+/// keeps pid/thread count and at most 25 children, with each child's command
+/// line truncated to 200 characters.
+fn capped_process_snapshot(process: &DiagnosticsProcessSnapshot) -> DiagnosticsProcessSnapshot {
+    const MAX_CAPPED_CHILDREN: usize = 25;
+    const MAX_CHILD_CMD_CHARS: usize = 200;
+    let mut capped = process.clone();
+    if let Some(children) = capped.children.as_mut() {
+        children.truncate(MAX_CAPPED_CHILDREN);
+        for child in children.iter_mut() {
+            if child.cmd.chars().count() > MAX_CHILD_CMD_CHARS {
+                child.cmd = child.cmd.chars().take(MAX_CHILD_CMD_CHARS).collect::<String>() + "...";
+            }
+        }
+    }
+    capped
+}
+
+/// Shrinks an oversized `database_locked`/`database_busy` row in stages so
+/// the lock evidence survives the trace-row cap instead of being replaced
+/// wholesale (WP-0320 MT-2, evidence: three ~264 KB rows dropped entirely).
+/// Stage 1 caps the process snapshot's child list; stage 2 drops `process`
+/// entirely. `details` (cmd/message/busy attribution) is never touched by
+/// either stage. Returns the row to write and whether the row is still over
+/// cap even without `process`, in which case the caller must fall back to
+/// the generic details-truncation path.
+fn fit_lock_row_to_cap(
+    mut row: DiagnosticsTraceEntry,
+    max_bytes: usize,
+) -> (DiagnosticsTraceEntry, bool) {
+    let fits = |row: &DiagnosticsTraceEntry| {
+        serde_json::to_string(row)
+            .map(|line| line.len().saturating_add(1) <= max_bytes)
+            .unwrap_or(false)
+    };
+    if fits(&row) {
+        return (row, false);
+    }
+    if let Some(process) = row.process.as_ref() {
+        row.process = Some(capped_process_snapshot(process));
+        if fits(&row) {
+            return (row, false);
+        }
+    }
+    if row.process.is_some() {
+        row.process = None;
+        if fits(&row) {
+            return (row, false);
+        }
+    }
+    (row, true)
 }
 
 fn append_diagnostics_trace_row(
@@ -3486,23 +5214,27 @@ fn append_diagnostics_trace_row(
             }
         }
     }
-    let include_process_snapshot = matches!(
-        event.as_str(),
-        "runtime_sample"
-            | "freeze_detected"
-            | "freeze_recovered"
-            | "event_loop_skew"
-            | "command_slow"
-            | "database_locked"
-            | "database_busy"
-    );
+    // `database_locked`/`database_busy` rows must survive the row cap (WP-0320
+    // MT-2): their `process` snapshot is captured with children so
+    // `fit_lock_row_to_cap` below has something to shrink, and their
+    // `details` (cmd/message/busy attribution) must never be replaced.
+    let is_lock_row = matches!(event.as_str(), "database_locked" | "database_busy");
+    let include_process_snapshot = is_lock_row
+        || matches!(
+            event.as_str(),
+            "runtime_sample"
+                | "freeze_detected"
+                | "freeze_recovered"
+                | "event_loop_skew"
+                | "command_slow"
+        );
     let mut row = DiagnosticsTraceEntry {
         ts_ms: now_epoch_ms_i64(),
         event,
         level,
         details: redact_diagnostics_value(details),
         process: include_process_snapshot
-            .then(capture_process_snapshot)
+            .then(|| capture_process_snapshot(is_lock_row))
             .flatten(),
         incident_id: incident_id.clone(),
         span_id,
@@ -3510,17 +5242,29 @@ fn append_diagnostics_trace_row(
 
     let mut line = serde_json::to_string(&row).map_err(|e| e.to_string())?;
     if line.len().saturating_add(1) > DIAGNOSTICS_TRACE_MAX_ROW_BYTES {
-        let original_bytes = line.len().saturating_add(1);
-        row.details = serde_json::json!({
-            "reason": "trace_row_too_large",
-            "original_event": row.event,
-            "original_bytes": original_bytes,
-            "max_row_bytes": DIAGNOSTICS_TRACE_MAX_ROW_BYTES,
-        });
-        row.event = "diagnostics_event_truncated".to_string();
-        row.level = "warn".to_string();
-        line = serde_json::to_string(&row).map_err(|e| e.to_string())?;
-        record_diagnostics_loss(None);
+        let mut needs_generic_truncation = true;
+        if is_lock_row {
+            let (fitted, still_over) =
+                fit_lock_row_to_cap(row.clone(), DIAGNOSTICS_TRACE_MAX_ROW_BYTES);
+            row = fitted;
+            needs_generic_truncation = still_over;
+            if !needs_generic_truncation {
+                line = serde_json::to_string(&row).map_err(|e| e.to_string())?;
+            }
+        }
+        if needs_generic_truncation {
+            let original_bytes = line.len().saturating_add(1);
+            row.details = serde_json::json!({
+                "reason": "trace_row_too_large",
+                "original_event": row.event,
+                "original_bytes": original_bytes,
+                "max_row_bytes": DIAGNOSTICS_TRACE_MAX_ROW_BYTES,
+            });
+            row.event = "diagnostics_event_truncated".to_string();
+            row.level = "warn".to_string();
+            line = serde_json::to_string(&row).map_err(|e| e.to_string())?;
+            record_diagnostics_loss(None);
+        }
     }
     let line_bytes = line.len().saturating_add(1) as u64;
     rotate_diagnostics_trace_if_needed(&path, max_trace_bytes, line_bytes)?;
@@ -4399,6 +6143,27 @@ fn ensure_startup_database_ready(
     }
 }
 
+fn spawn_download_engine_startup_update(paths: AppPaths) {
+    std::thread::spawn(move || {
+        let started = Instant::now();
+        let result = download_engines::check_and_update_packaged_ytdlp(&paths, false);
+        let update_ok = result.error.is_none();
+        append_diagnostics_trace_row_best_effort(
+            &paths,
+            "download_engine_startup_update",
+            serde_json::json!({
+                "outcome": if update_ok { "checked" } else { "unavailable" },
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+                "status": result.status,
+                "latest_version": result.latest_version,
+                "updated": result.updated,
+                "error": result.error,
+            }),
+            if update_ok { "info" } else { "warn" },
+        );
+    });
+}
+
 fn is_safe_relative_path(path: &std::path::Path) -> bool {
     !path.components().any(|c| {
         matches!(
@@ -4444,7 +6209,7 @@ fn extract_payload_zip_best_effort(
         } else if let Some(rest) = name.strip_prefix("models/") {
             (paths.models_dir(), rest)
         } else if let Some(rest) = name.strip_prefix("cache/huggingface/") {
-            (paths.cache_dir().join("huggingface"), rest)
+            (paths.huggingface_cache_dir(), rest)
         } else {
             continue;
         };
@@ -4549,7 +6314,7 @@ fn read_offline_bundle_manifest(
 fn sha256_hex_file(path: &std::path::Path) -> Result<String, String> {
     let mut file = std::fs::File::open(path).map_err(|e| {
         format!(
-            "failed to open payload zip {} for hashing: {e}",
+            "failed to open file {} for hashing: {e}",
             path.to_string_lossy()
         )
     })?;
@@ -4559,7 +6324,7 @@ fn sha256_hex_file(path: &std::path::Path) -> Result<String, String> {
         use std::io::Read as _;
         let read = file.read(&mut buf).map_err(|e| {
             format!(
-                "failed to read payload zip {} for hashing: {e}",
+                "failed to read file {} for hashing: {e}",
                 path.to_string_lossy()
             )
         })?;
@@ -4898,6 +6663,9 @@ fn apply_offline_bundle_if_present(
     paths: &AppPaths,
     resource_dir: &std::path::Path,
 ) -> Result<(), String> {
+    if paths.managed_offline() {
+        return Ok(());
+    }
     let Some(bundle_root) = find_offline_bundle_root(resource_dir) else {
         return Ok(());
     };
@@ -4967,7 +6735,7 @@ fn apply_offline_bundle_if_present(
 
     let tools_sum = copy_tree_best_effort(&tools_src, &paths.tools_dir())?;
     let models_sum = copy_tree_best_effort(&models_src, &paths.models_dir())?;
-    let hf_sum = copy_tree_best_effort(&hf_cache_src, &paths.cache_dir().join("huggingface"))?;
+    let hf_sum = copy_tree_best_effort(&hf_cache_src, &paths.huggingface_cache_dir())?;
 
     patch_venv_pyvenv_cfg_best_effort(paths)?;
     write_offline_bundle_marker(paths, &bundle_root, &manifest.bundle_id)?;
@@ -5683,6 +7451,64 @@ mod tests {
         let rows = read_recent_diagnostics_trace_entries(&paths, 5).expect("tail rows");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].event, "diagnostics_event_truncated");
+    }
+
+    #[test]
+    fn database_locked_row_survives_cap_with_details_intact() {
+        // WP-0320 MT-2: evidence showed three ~264 KB `database_locked` rows
+        // dropped entirely by the generic oversized-row replacement. Build a
+        // synthetic row whose process snapshot alone exceeds 300 KB and
+        // assert the staged shrink keeps it under the cap without touching
+        // `details`.
+        let mut children = Vec::new();
+        for i in 0..600u32 {
+            children.push(DiagnosticsChildProcessSnapshot {
+                pid: 1000 + i,
+                name: format!("child_{i}.exe"),
+                cmd: "x".repeat(600),
+            });
+        }
+        let row = DiagnosticsTraceEntry {
+            ts_ms: 0,
+            event: "database_locked".to_string(),
+            level: "warn".to_string(),
+            details: serde_json::json!({
+                "cmd": "jobs_overview",
+                "message": "database is locked",
+                "contention": { "classification": "internal_candidates" },
+            }),
+            process: Some(DiagnosticsProcessSnapshot {
+                pid: Some(4242),
+                cpu_percent: Some(1.5),
+                rss_bytes: Some(123_456),
+                virtual_bytes: Some(654_321),
+                system_used_bytes: Some(1),
+                system_total_bytes: Some(2),
+                thread_count: Some(12),
+                children: Some(children),
+            }),
+            incident_id: None,
+            span_id: None,
+        };
+        let original_len = serde_json::to_string(&row)
+            .expect("serialize original")
+            .len();
+        assert!(
+            original_len > 300 * 1024,
+            "fixture must exceed 300 KB, got {original_len}"
+        );
+
+        let (fitted, needs_generic_truncation) =
+            fit_lock_row_to_cap(row, DIAGNOSTICS_TRACE_MAX_ROW_BYTES);
+        assert!(
+            !needs_generic_truncation,
+            "capping the process snapshot must be enough to fit under the cap"
+        );
+        let line = serde_json::to_string(&fitted).expect("serialize fitted");
+        assert!(line.len().saturating_add(1) <= DIAGNOSTICS_TRACE_MAX_ROW_BYTES);
+        assert_eq!(fitted.event, "database_locked");
+        assert_eq!(fitted.details["cmd"], "jobs_overview");
+        assert_eq!(fitted.details["message"], "database is locked");
     }
 
     #[test]
@@ -6500,20 +8326,75 @@ mod tests {
     }
 
     #[test]
-    fn agent_ui_request_validation_is_headless_bounded_and_object_only() {
-        let foreground = validate_agent_ui_request(false, "{}").expect_err("foreground rejected");
-        assert_eq!(foreground.0, "403 Forbidden");
+    fn agent_ui_request_validation_allows_live_audit_but_gates_live_actions() {
+        let missing_audit_token =
+            validate_agent_ui_request("audit", false, false, Some("secret"), "{}")
+                .expect_err("read-only audit still requires bridge token");
+        assert_eq!(missing_audit_token.0, "403 Forbidden");
+        let wrong_audit_token = validate_agent_ui_request(
+            "audit",
+            false,
+            false,
+            Some("secret"),
+            r#"{"bridge_token":"wrong"}"#,
+        )
+        .expect_err("wrong audit token rejected");
+        assert_eq!(wrong_audit_token.0, "403 Forbidden");
+        let accepted_audit = validate_agent_ui_request(
+            "audit",
+            false,
+            false,
+            Some("secret"),
+            r#"{"bridge_token":"secret","limit":700}"#,
+        )
+        .expect("read-only live audit with token accepted");
+        assert_eq!(accepted_audit["limit"], 700);
+        assert!(accepted_audit.get("bridge_token").is_none());
+        let foreground_action =
+            validate_agent_ui_request("action", false, false, Some("secret"), "{}")
+            .expect_err("live action requires explicit enablement");
+        assert_eq!(foreground_action.0, "403 Forbidden");
+        let missing_token = validate_agent_ui_request("action", false, true, Some("secret"), "{}")
+            .expect_err("action token is required");
+        assert_eq!(missing_token.0, "403 Forbidden");
+        let wrong_token = validate_agent_ui_request(
+            "action",
+            true,
+            false,
+            Some("secret"),
+            r#"{"bridge_token":"wrong"}"#,
+        )
+        .expect_err("wrong action token rejected");
+        assert_eq!(wrong_token.0, "403 Forbidden");
+        let accepted_action = validate_agent_ui_request(
+            "action",
+            false,
+            true,
+            Some("secret"),
+            r#"{"bridge_token":"secret","action":"scroll_content"}"#,
+        )
+        .expect("explicitly enabled live action with token accepted");
+        assert_eq!(accepted_action["action"], "scroll_content");
+        assert!(accepted_action.get("bridge_token").is_none());
 
-        let invalid = validate_agent_ui_request(true, "[]").expect_err("array rejected");
+        let invalid = validate_agent_ui_request("audit", true, false, Some("secret"), "[]")
+            .expect_err("array rejected");
         assert_eq!(invalid.0, "400 Bad Request");
 
         let oversized = format!(r#"{{"value":"{}"}}"#, "x".repeat(17 * 1024));
         let too_large =
-            validate_agent_ui_request(true, &oversized).expect_err("oversized rejected");
+            validate_agent_ui_request("audit", true, false, Some("secret"), &oversized)
+            .expect_err("oversized rejected");
         assert_eq!(too_large.0, "413 Payload Too Large");
 
-        let accepted = validate_agent_ui_request(true, r#"{"limit":700,"include_offscreen":true}"#)
-            .expect("headless object accepted");
+        let accepted = validate_agent_ui_request(
+            "audit",
+            true,
+            false,
+            Some("secret"),
+            r#"{"bridge_token":"secret","limit":700,"include_offscreen":true}"#,
+        )
+        .expect("headless object accepted");
         assert_eq!(accepted["limit"], 700);
         assert_eq!(accepted["include_offscreen"], true);
     }
@@ -6584,6 +8465,15 @@ mod tests {
         assert!(!runtime_background_work_enabled(true, false));
         assert!(!runtime_background_work_enabled(false, true));
         assert!(!runtime_background_work_enabled(true, true));
+    }
+
+    #[test]
+    fn background_launch_retains_production_runtime_without_weakening_headless_isolation() {
+        assert!(!agent_background_requested(&[]).unwrap());
+        assert!(agent_background_requested(&["--agent-background".into()]).unwrap());
+        assert!(agent_background_requested(&["--agent-background".into(), "--agent-headless".into()]).is_err());
+        assert!(runtime_background_work_enabled(false, false));
+        assert!(!runtime_background_work_enabled(false, true));
     }
 
     #[test]
@@ -7911,9 +9801,25 @@ fn render_diagnostics_app_state_snapshot_markdown(
 
     md.push_str("## Roots\n\n");
     md.push_str(&format!(
-        "- App data: `{}`\n- DB: `{}`\n- Download root: `{}`\n- Diagnostics trace: `{}`\n\n",
+        "- App data: `{}`\n- DB: `{}`\n- Runtime root: `{}`\n- Runtime mode: `{:?}`\n- Runtime generation: `{}`\n- Runtime manifest: `{}` / `{}`\n- Dependency fallback: `{}`\n- Download root: `{}`\n- Diagnostics trace: `{}`\n\n",
         snapshot.app.app_data_dir,
         snapshot.app.db_path,
+        snapshot.app.runtime.runtime_root,
+        snapshot.app.runtime.mode,
+        snapshot
+            .app
+            .runtime
+            .runtime_id
+            .as_deref()
+            .unwrap_or("legacy / none"),
+        snapshot.app.runtime.manifest_status,
+        snapshot
+            .app
+            .runtime
+            .manifest_sha256
+            .as_deref()
+            .unwrap_or("-"),
+        snapshot.app.runtime.fallback_policy,
         snapshot.download_roots.current_dir,
         snapshot.diagnostics_trace_dir.current_dir
     ));
@@ -8079,6 +9985,7 @@ fn build_diagnostics_app_state_snapshot(
 ) -> Result<DiagnosticsAppStateSnapshot, String> {
     let app = DiagnosticsInfo {
         app_data_dir: paths.base_dir.to_string_lossy().to_string(),
+        runtime: paths.runtime_provenance(),
         db_path: paths
             .db_dir()
             .join("app.sqlite")
@@ -8196,6 +10103,7 @@ fn diagnostics_info(app: tauri::AppHandle, state: State<'_, AppState>) -> Diagno
     let package = app.package_info();
     DiagnosticsInfo {
         app_data_dir: state.paths.base_dir.to_string_lossy().to_string(),
+        runtime: state.paths.runtime_provenance(),
         db_path: state
             .paths
             .db_dir()
@@ -8665,6 +10573,7 @@ ORDER BY item_id ASC, created_at_ms DESC
                     retry_of_job_id: None,
                     retry_replacement_job_id: None,
                     track: jobs::durable_job_track_label(persisted_track.as_deref()),
+                    attempt_no: 1,
                 })
             },
         )
@@ -11216,16 +13125,22 @@ fn instagram_auth_open_sign_in(
 }
 
 #[tauri::command]
-fn config_youtube_auth_preflight(
+async fn config_youtube_auth_preflight(
     state: State<'_, AppState>,
     url: Option<String>,
 ) -> Result<jobs::YoutubeAuthPreflightResult, String> {
-    let _operation_guard = YOUTUBE_AUTH_OPERATION_LOCK
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .map_err(|_| "youtube auth operation lock is poisoned".to_string())?;
-    jobs::youtube_auth_preflight(&state.paths, url)
-        .map_err(|e| jobs::redact_auth_credential_locators(&e.to_string()))
+    let _timer = InvokeTimer::start(state.paths.clone(), "config_youtube_auth_preflight");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation_guard = YOUTUBE_AUTH_OPERATION_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .map_err(|_| "youtube auth operation lock is poisoned".to_string())?;
+        jobs::youtube_auth_preflight(&paths, url)
+            .map_err(|e| jobs::redact_auth_credential_locators(&e.to_string()))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 // ---- WP-0263: global Instagram auth in Options (mirrors config_youtube_auth_*) ----
@@ -11298,12 +13213,18 @@ fn config_instagram_auth_set(
 
 /// "Test saved Instagram session" — mirrors `config_youtube_auth_preflight`.
 #[tauri::command]
-fn config_instagram_auth_preflight(
+async fn config_instagram_auth_preflight(
     state: State<'_, AppState>,
     url: Option<String>,
 ) -> Result<jobs::InstagramAuthPreflightResult, String> {
-    jobs::instagram_auth_preflight(&state.paths, url)
-        .map_err(|e| jobs::redact_auth_credential_locators(&e.to_string()))
+    let _timer = InvokeTimer::start(state.paths.clone(), "config_instagram_auth_preflight");
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        jobs::instagram_auth_preflight(&paths, url)
+            .map_err(|e| jobs::redact_auth_credential_locators(&e.to_string()))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -11362,11 +13283,19 @@ fn models_install(state: State<'_, AppState>, model_id: String) -> Result<(), St
 #[tauri::command]
 async fn tools_ffmpeg_status(
     state: State<'_, AppState>,
+    force: Option<bool>,
 ) -> Result<tools::FfmpegToolsStatus, String> {
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || Ok(tools::ffmpeg_tools_status(&paths)))
-        .await
-        .map_err(|e| e.to_string())?
+    let force = force.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(if force {
+            tools::ffmpeg_tools_status_forced(&paths)
+        } else {
+            tools::ffmpeg_tools_status(&paths)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -11375,11 +13304,106 @@ fn tools_ffmpeg_install(state: State<'_, AppState>) -> Result<tools::FfmpegTools
 }
 
 #[tauri::command]
-async fn tools_ytdlp_status(state: State<'_, AppState>) -> Result<tools::YtDlpToolsStatus, String> {
+async fn tools_ytdlp_status(
+    state: State<'_, AppState>,
+    force: Option<bool>,
+) -> Result<tools::YtDlpToolsStatus, String> {
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || Ok(tools::ytdlp_tools_status(&paths)))
+    let force = force.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(if force {
+            tools::ytdlp_tools_status_forced(&paths)
+        } else {
+            tools::ytdlp_tools_status(&paths)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn download_engine_status(
+    state: State<'_, AppState>,
+) -> Result<download_engines::DownloadEngineStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(download_engines::engine_status(&paths)))
         .await
-        .map_err(|e| e.to_string())?
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn download_engine_select(
+    state: State<'_, AppState>,
+    engine_id: String,
+) -> Result<download_engines::DownloadEngineStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        download_engines::select_engine(&paths, engine_id.trim()).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn download_engine_select_packaged(
+    state: State<'_, AppState>,
+) -> Result<download_engines::DownloadEngineStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        download_engines::select_packaged_engine(&paths).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn download_engine_set_custom(
+    state: State<'_, AppState>,
+    executable_path: String,
+) -> Result<download_engines::DownloadEngineStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        download_engines::set_custom_engine(&paths, std::path::Path::new(executable_path.trim()))
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn download_engine_update_now(
+    state: State<'_, AppState>,
+) -> Result<download_engines::DownloadEngineUpdateResult, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(download_engines::check_and_update_packaged_ytdlp(&paths, true))
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn download_engine_probe_selected(
+    state: State<'_, AppState>,
+) -> Result<download_engines::DownloadEngineCompatibilityReceipt, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        download_engines::probe_selected_engine(&paths).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+async fn download_engine_rollback(
+    state: State<'_, AppState>,
+) -> Result<download_engines::DownloadEngineStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        download_engines::rollback_engine(&paths).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -11390,11 +13414,19 @@ fn tools_ytdlp_install(state: State<'_, AppState>) -> Result<tools::YtDlpToolsSt
 #[tauri::command]
 async fn tools_js_runtime_status(
     state: State<'_, AppState>,
+    force: Option<bool>,
 ) -> Result<tools::JsRuntimeToolsStatus, String> {
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || Ok(tools::js_runtime_tools_status(&paths)))
-        .await
-        .map_err(|e| e.to_string())?
+    let force = force.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(if force {
+            tools::js_runtime_tools_status_forced(&paths)
+        } else {
+            tools::js_runtime_tools_status(&paths)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -11407,11 +13439,19 @@ fn tools_js_runtime_install(
 #[tauri::command]
 async fn tools_python_status(
     state: State<'_, AppState>,
+    force: Option<bool>,
 ) -> Result<tools::PythonToolchainStatus, String> {
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || Ok(tools::python_toolchain_status(&paths)))
-        .await
-        .map_err(|e| e.to_string())?
+    let force = force.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(if force {
+            tools::python_toolchain_status_forced(&paths)
+        } else {
+            tools::python_toolchain_status(&paths)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -11424,11 +13464,19 @@ fn tools_python_install(
 #[tauri::command]
 async fn tools_python_portable_status(
     state: State<'_, AppState>,
+    force: Option<bool>,
 ) -> Result<tools::PortablePythonStatus, String> {
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || Ok(tools::portable_python_status(&paths)))
-        .await
-        .map_err(|e| e.to_string())?
+    let force = force.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(if force {
+            tools::portable_python_status_forced(&paths)
+        } else {
+            tools::portable_python_status(&paths)
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -13245,6 +15293,36 @@ fn youtube_subscriptions_export_json(
     .map_err(|e| e.to_string())
 }
 
+// WP-0322 A: engine-owned subscription export settings + on-demand export. Options (Video
+// Archiver module) reads/writes these; the runner also calls `export_subscriptions_snapshot`
+// daily on its own thread.
+#[tauri::command]
+fn subscriptions_export_settings_get(
+    state: State<'_, AppState>,
+) -> Result<subscriptions::SubscriptionsExportSettings, String> {
+    subscriptions::get_subscriptions_export_settings(&state.paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn subscriptions_export_settings_set(
+    state: State<'_, AppState>,
+    dir: Option<String>,
+) -> Result<subscriptions::SubscriptionsExportSettings, String> {
+    subscriptions::set_subscriptions_export_dir(&state.paths, dir).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn subscriptions_export_now(
+    state: State<'_, AppState>,
+) -> Result<subscriptions::SubscriptionsExportReceipt, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        subscriptions::export_subscriptions_snapshot(&paths).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[tauri::command]
 fn youtube_subscriptions_import_json(
     state: State<'_, AppState>,
@@ -13872,6 +15950,12 @@ fn subtitles_export_doc_vtt(
 ) -> Result<(), String> {
     let out_path = std::path::PathBuf::from(out_path);
     subtitle_tracks::export_document_vtt(&doc, &out_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn jobs_activity_page(state: State<'_, AppState>, source: String, view: String, offset: usize, limit: usize) -> Result<serde_json::Value, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || jobs::operator_activity_page(&paths, &source, &view, offset, limit).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -14955,6 +17039,14 @@ async fn youtube_protection_status_get(
 }
 
 #[tauri::command]
+async fn youtube_controlled_probe(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        serde_json::to_value(jobs::request_youtube_controlled_probe(&paths).map_err(|e|e.to_string())?).map_err(|e|e.to_string())
+    }).await.map_err(|e|e.to_string())?
+}
+
+#[tauri::command]
 async fn youtube_protection_return_to_baseline(
     state: State<'_, AppState>,
     operation: Option<String>,
@@ -15111,7 +17203,7 @@ async fn youtube_protection_tuning_get(
     state: State<'_, AppState>,
     request_id: Option<String>,
     span_id: Option<String>,
-) -> Result<voxvulgi_engine::youtube_protection::YoutubeProtectionTuning, String> {
+) -> Result<voxvulgi_engine::youtube_protection::YoutubeCooldownSettings, String> {
     let _timer = InvokeTimer::start_with_context(
         state.paths.clone(),
         "youtube_protection_tuning_get",
@@ -15129,11 +17221,11 @@ async fn youtube_protection_tuning_get(
 #[tauri::command]
 async fn youtube_protection_tuning_set(
     state: State<'_, AppState>,
-    tuning: voxvulgi_engine::youtube_protection::YoutubeProtectionTuning,
+    settings: voxvulgi_engine::youtube_protection::YoutubeCooldownSettings,
     mutation_generation: u64,
     request_id: Option<String>,
     span_id: Option<String>,
-) -> Result<voxvulgi_engine::youtube_protection::YoutubeProtectionTuning, String> {
+) -> Result<voxvulgi_engine::youtube_protection::YoutubeCooldownSettings, String> {
     let _timer = InvokeTimer::start_with_context(
         state.paths.clone(),
         "youtube_protection_tuning_set",
@@ -15143,7 +17235,7 @@ async fn youtube_protection_tuning_set(
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
         run_youtube_protection_mutation("tuning", mutation_generation, || {
-            jobs::set_youtube_protection_tuning_with_generation(&paths, tuning, mutation_generation)
+            jobs::set_youtube_protection_tuning_with_generation(&paths, settings, mutation_generation)
                 .map_err(|e| e.to_string())
         })
     })
@@ -15157,7 +17249,7 @@ async fn youtube_protection_tuning_reset(
     mutation_generation: u64,
     request_id: Option<String>,
     span_id: Option<String>,
-) -> Result<voxvulgi_engine::youtube_protection::YoutubeProtectionTuning, String> {
+) -> Result<voxvulgi_engine::youtube_protection::YoutubeCooldownSettings, String> {
     let _timer = InvokeTimer::start_with_context(
         state.paths.clone(),
         "youtube_protection_tuning_reset",
@@ -15254,6 +17346,38 @@ fn jobs_flush_cache(
     options: Option<jobs::JobCleanupOptions>,
 ) -> Result<jobs::JobCleanupSummary, String> {
     jobs::flush_jobs_cache(&state.paths, options).map_err(|e| e.to_string())
+}
+
+/// WP-0320: backup-first terminal job-history purge. Dry-run reports the exact selection without
+/// writing; execute backs up via `VACUUM INTO` before the first delete. Runs on a blocking
+/// worker because a real execute run does a full-database `VACUUM INTO` copy.
+#[tauri::command]
+async fn jobs_purge_terminal_history(
+    state: State<'_, AppState>,
+    older_than_days: u32,
+    include_succeeded: bool,
+    dry_run: bool,
+) -> Result<jobs::PurgeTerminalHistoryReceipt, String> {
+    let _timer = InvokeTimer::start(state.paths.clone(), "jobs_purge_terminal_history");
+    let paths = state.paths.clone();
+    let trace_paths = paths.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        jobs::purge_terminal_job_history(&paths, older_than_days, include_succeeded, dry_run)
+            .map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    result.map_err(|e| trace_database_command_error(&trace_paths, "jobs_purge_terminal_history", e))
+}
+
+#[tauri::command]
+fn jobs_terminal_retention_get(state: State<'_, AppState>) -> Result<u32, String> {
+    jobs::get_terminal_job_retention_days(&state.paths).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn jobs_terminal_retention_set(state: State<'_, AppState>, days: u32) -> Result<u32, String> {
+    jobs::set_terminal_job_retention_days(&state.paths, days).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -16115,19 +18239,114 @@ pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
             let cli_args = std::env::args().collect::<Vec<_>>();
+            let cli_offline_localization_proof =
+                parse_offline_localization_proof_cli(&cli_args).map_err(std::io::Error::other)?;
+            let cli_offline_update_preservation_seed =
+                parse_offline_update_preservation_seed_cli(&cli_args)
+                    .map_err(std::io::Error::other)?;
             let cli_agent_headless = cli_args
                 .iter()
                 .any(|value| value.trim() == "--agent-headless");
+            let cli_agent_background = agent_background_requested(&cli_args).map_err(std::io::Error::other)?;
             if cli_agent_headless {
                 if let Some(window) = app.get_webview_window("main") {
                     hide_agent_headless_window(&window).map_err(std::io::Error::other)?;
+                }
+            }
+            if cli_agent_background {
+                if let Some(window) = app.get_webview_window("main") {
+                    minimize_agent_background_window(&window).map_err(std::io::Error::other)?;
+                }
+            }
+            if !cli_agent_headless && !cli_agent_background {
+                if let Some(window) = app.get_webview_window("main") {
+                    window.show().map_err(std::io::Error::other)?;
+                    window.set_focus().map_err(std::io::Error::other)?;
                 }
             }
             let base_dir = resolve_agent_headless_base_dir(
                 app.path().app_data_dir()?,
                 cli_agent_headless,
             )?;
-            let paths = AppPaths::new(AppPaths::normalize_base_dir(&base_dir));
+            // Headless isolation redirects mutable user state only. The managed runtime is an
+            // immutable installed input, so exact-installer proof must select the same
+            // LocalAppData generation as a normal launch instead of an empty synthetic tree.
+            let runtime_root = app.path().app_local_data_dir()?.join("runtime");
+            let normalized_base = AppPaths::normalize_base_dir(&base_dir);
+            let normalized_runtime = AppPaths::normalize_base_dir(&runtime_root);
+            let paths = AppPaths::installed(
+                normalized_base.clone(),
+                normalized_runtime.clone(),
+                &app.package_info().version.to_string(),
+            )
+            .unwrap_or_else(|error| {
+                AppPaths::invalid_managed(normalized_base, normalized_runtime, error)
+            });
+            #[cfg(not(target_os = "windows"))]
+            if cli_offline_localization_proof.is_some()
+                || cli_offline_update_preservation_seed.is_some()
+            {
+                return Err(std::io::Error::other(
+                    "offline proof one-shot ownership requires Windows FILE_ID_INFO and named mutexes",
+                )
+                .into());
+            }
+            #[cfg(target_os = "windows")]
+            let offline_proof_root = cli_offline_localization_proof
+                .as_ref()
+                .map(|cli| cli.proof_root.as_path())
+                .or_else(|| {
+                    cli_offline_update_preservation_seed
+                        .as_ref()
+                        .map(|cli| cli.seed_root.as_path())
+                });
+            #[cfg(target_os = "windows")]
+            let offline_proof_ownership = match offline_proof_root {
+                Some(root) => match acquire_offline_proof_root(root)
+                    .map_err(std::io::Error::other)?
+                {
+                    OfflineProofRootAcquire::Acquired(ownership) => Some(ownership),
+                    OfflineProofRootAcquire::Concurrent => {
+                        eprintln!("offline proof root is already owned by another process");
+                        std::process::exit(OFFLINE_LOCALIZATION_PROOF_EXIT_CONCURRENT);
+                    }
+                },
+                None => None,
+            };
+            #[cfg(target_os = "windows")]
+            let mut prepared_offline_localization_proof = match (
+                cli_offline_localization_proof.as_ref(),
+                offline_proof_ownership.as_ref(),
+            ) {
+                (Some(cli), Some(ownership)) => Some(
+                    prepare_offline_localization_proof_one_shot(cli, ownership)
+                        .map_err(std::io::Error::other)?,
+                ),
+                (None, _) => None,
+                (Some(_), None) => {
+                    return Err(std::io::Error::other(
+                        "offline localization proof root ownership is missing",
+                    )
+                    .into())
+                }
+            };
+            #[cfg(target_os = "windows")]
+            let mut prepared_offline_update_seed = match (
+                cli_offline_update_preservation_seed.as_ref(),
+                offline_proof_ownership.as_ref(),
+            ) {
+                (Some(_), Some(ownership)) => Some(
+                    prepare_offline_update_seed_output(ownership)
+                        .map_err(std::io::Error::other)?,
+                ),
+                (None, _) => None,
+                (Some(_), None) => {
+                    return Err(std::io::Error::other(
+                        "offline update-preservation seed root ownership is missing",
+                    )
+                    .into())
+                }
+            };
             let _ = voxvulgi_engine::diagnostics::install_trace_sink(Arc::new(
                 |paths, event, level, details| {
                     let _ = append_diagnostics_trace_row_best_effort(paths, event, details, level);
@@ -16149,6 +18368,42 @@ pub fn run() {
             // during first launch after an update.
             let _database_ready = ensure_startup_database_ready(&paths, &startup)?;
             let database = db::AppDatabase::for_paths(&paths)?;
+            #[cfg(target_os = "windows")]
+            if let Some(cli) = cli_offline_localization_proof {
+                let ownership = offline_proof_ownership
+                    .as_ref()
+                    .expect("offline localization proof ownership was prepared");
+                let (output, status, media_path) = prepared_offline_localization_proof
+                    .take()
+                    .expect("offline localization proof running status was prepared");
+                let exit_code = run_offline_localization_proof_one_shot(
+                    &paths,
+                    &database,
+                    cli,
+                    ownership,
+                    output,
+                    status,
+                    media_path,
+                );
+                std::process::exit(exit_code);
+            }
+            #[cfg(target_os = "windows")]
+            if let Some(cli) = cli_offline_update_preservation_seed {
+                let ownership = offline_proof_ownership
+                    .as_ref()
+                    .expect("offline update-preservation ownership was prepared");
+                let output = prepared_offline_update_seed
+                    .take()
+                    .expect("offline update-preservation output ownership was prepared");
+                let exit_code = run_offline_update_preservation_seed_one_shot(
+                    &paths,
+                    &database,
+                    cli,
+                    ownership,
+                    output,
+                );
+                std::process::exit(exit_code);
+            }
             spawn_agent_bridge(&AppPaths::normalize_base_dir(&base_dir));
 
             let cli_safe_mode = cli_args.iter().any(|value| value.trim() == "--safe-mode");
@@ -16159,10 +18414,18 @@ pub fn run() {
             {
                 let mut bridge_state = agent_bridge_state().lock().unwrap();
                 bridge_state.agent_headless = cli_agent_headless;
+                bridge_state.agent_background = cli_agent_background;
                 bridge_state.safe_mode = safe_mode_enabled;
+                bridge_state.runtime = Some(paths.runtime_provenance());
             }
             let runtime_background_work =
                 runtime_background_work_enabled(safe_mode_enabled, cli_agent_headless);
+            if runtime_background_work {
+                // This is deliberately detached and failure-tolerant: database readiness remains
+                // the startup predecessor, while an offline network or rejected candidate must
+                // never hold the UI or change startup success.
+                spawn_download_engine_startup_update(paths.clone());
+            }
             if !runtime_background_work {
                 set_startup_hydration_progress(
                     &startup,
@@ -16753,6 +19016,9 @@ pub fn run() {
             youtube_subscriptions_recurring_paused,
             youtube_subscriptions_queue_group,
             youtube_subscriptions_export_json,
+            subscriptions_export_settings_get,
+            subscriptions_export_settings_set,
+            subscriptions_export_now,
             youtube_subscriptions_import_json,
             youtube_subscriptions_import_4kvdp_dir,
             youtube_subscriptions_import_4kvdp_state,
@@ -16813,8 +19079,12 @@ pub fn run() {
             jobs_enqueue_translate_local,
             jobs_cleanup_preview,
             jobs_flush_cache,
+            jobs_purge_terminal_history,
+            jobs_terminal_retention_get,
+            jobs_terminal_retention_set,
             jobs_clear_failed_for_item,
             jobs_list,
+            jobs_activity_page,
             jobs_list_for_item,
             jobs_search,
             jobs_list_live,
@@ -16849,6 +19119,7 @@ pub fn run() {
             provider_verification_foreground_demand,
             youtube_protection_status_get,
             youtube_protection_return_to_baseline,
+            youtube_controlled_probe,
             youtube_protection_history_get,
             youtube_protection_snapshot_get,
             youtube_protection_history_replay,
@@ -16935,6 +19206,13 @@ pub fn run() {
             shell_reveal_path,
             tools_ffmpeg_install,
             tools_ffmpeg_status,
+            download_engine_status,
+            download_engine_select,
+            download_engine_select_packaged,
+            download_engine_set_custom,
+            download_engine_update_now,
+            download_engine_probe_selected,
+            download_engine_rollback,
             tools_js_runtime_install,
             tools_js_runtime_status,
             tools_python_install,
@@ -16993,12 +19271,12 @@ pub fn run() {
                 signal_watcher_stop();
                 cleanup_agent_bridge_files();
                 if let Some(state) = app_handle.try_state::<AppState>() {
-                    let mut runner_join_succeeded = true;
+                    let mut runner_join_succeeded = agent_control::stop_explicit_runner();
                     if let Some(runner) = &state.runner {
                         let runner_join_started = std::time::Instant::now();
                         let runner_join =
                             runner.stop_and_join(jobs::JOB_RUNNER_SHUTDOWN_TIMEOUT);
-                        runner_join_succeeded = runner_join.is_ok();
+                        runner_join_succeeded &= runner_join.is_ok();
                         let runner_panic_count = runner_join
                             .as_ref()
                             .ok()

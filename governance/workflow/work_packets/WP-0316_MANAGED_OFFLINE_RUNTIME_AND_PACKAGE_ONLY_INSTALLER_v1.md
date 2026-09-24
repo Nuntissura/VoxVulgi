@@ -1,0 +1,73 @@
+---
+file_id: WP-0316-v1
+file_kind: work-packet
+updated_at: 2026-08-30
+---
+
+<topic id="contract" status="in-progress" version="v1" wp="WP-0316" updated_at="2026-08-30">
+
+# Work Packet: WP-0316 — Managed offline runtime and package-only installer
+
+## Metadata
+
+- ID: WP-0316
+- Owner: Codex
+- Status: IN_PROGRESS
+- Created: 2026-08-30
+- Refinement: `WP-0316_MANAGED_OFFLINE_RUNTIME_AND_PACKAGE_ONLY_INSTALLER_v1_REFINEMENT.md`
+- Board: `../TASK_BOARD.md#wp-0316`
+- Supersedes as active delivery authority: WP-0265, WP-0308
+- Detailed installer authority: `../../../offline-installer-runtime/GUIDE.md`
+- Failure evidence: `../../release/OFFLINE_INSTALLER_BUILD_POSTMORTEM_2026-08-28.md`, `../../release/OFFLINE_INSTALLER_RELEASE_FAILURE_POSTMORTEM_2026-08-30.md`
+
+## Intent
+
+Ship one offline ISO for non-technical users by packaging an explicit already-built app and already-qualified reusable runtime. Decouple replaceable runtime generations from durable user data and remove developer-machine fallbacks that can conceal an incomplete release.
+
+## Required order
+
+1. Retire the stale fast-release script and conflicting active guidance; preserve historical postmortem references only when labelled historical/nonconforming.
+2. Split roaming user data from LocalAppData managed runtime generations; add manifest validation, atomic activation/rollback, strict managed resolution, test isolation, and existing-surface diagnostics provenance.
+3. Qualify the existing working dependency/model trees into reusable non-solid component archives from explicit inputs. Qualification may build/repair only when separately authorized; it is not installer packaging.
+4. Implement one conforming package-only entrypoint from `offline-installer-runtime/GUIDE.md`. It verifies explicit input hashes, builds the wrapper and ISO, and never invokes product/runtime creation.
+5. Test the exact ISO offline on disposable roots/VM, publish only its passing hash, and record failure state here when any gate fails.
+
+## Ordered microtasks
+
+1. Update PRODUCT_SPEC, TECHNICAL_DESIGN, build rules, guide references, taskboard, and conflicting packet statuses.
+2. Add `AppPaths` user-data/runtime separation with compatibility-preserving isolated constructors.
+3. Add runtime manifest/current-pointer schema, path confinement, hash binding, compatibility checks, immutable generation selection, and atomic pointer helpers.
+4. Route tools/models/Hugging Face/voice backends/Python through the selected runtime generation.
+5. Disable PATH, current-directory, repo, automatic install/download, and runtime repair fallbacks in managed mode; preserve explicit developer/legacy behavior outside managed mode.
+6. Expose runtime provenance and health through existing Diagnostics rows/export and `GET /agent/state`; add no card.
+7. Guard installer/qualification/performance/proof paths against production APPDATA/LocalAppData and require disposable headless roots.
+8. Define and produce separately qualified, content-addressed, non-solid archives plus runtime manifest/receipts.
+9. Replace the retired entrypoint with one package-only script; add source/process contract tests that reject build/download/warmup behavior.
+10. Build wrapper and ISO from frozen inputs; verify topology, hashes, exact input lineage, and unchanged product version/changelog.
+11. Run exact-ISO clean/offline install, default workflow, update/reinstall-keep, interruption/rollback, long-path, and data-preservation proof.
+12. Run independent adversarial review; repair findings and rerun affected gates.
+13. Remove automatic semantic-version and release-changelog mutation from desktop/installer builds; require callers to name the already-assigned product version and prove those release-identity files remain unchanged.
+14. Cover migration from legacy machine-wide installs: a current-user installer must detect and log the HKLM installation, remain confined to its LocalAppData target even when stale state or `/D` names Program Files, preserve user data, and prove the exact mixed-scope machine case.
+
+## Proof contract
+
+- Proof root: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0316/<run-id>/`.
+- Required evidence: spec/authority diff; runtime manifest and pointer schemas; path-confinement/hash/compatibility tests; strict fallback negative tests; production-root sentinel proof; Diagnostics/agent-state receipts; qualified archive identities and reuse proof; desktop-build and package transcripts; product-version/changelog non-mutation receipts for desktop/installer builds and packaging; independent ISO listing/hash; exact-ISO blocked-network clean install/default workflow; keep-data hashes; rollback/interruption matrix; and adversarial review.
+- Component tests cannot replace exact packaged app or exact ISO proof. A package build is not a desktop build and must not change the semantic version or build changelog.
+- Status remains `IN_PROGRESS` until the exact public ISO hash passes every required gate; a failed attempt must append its phase, input IDs, evidence path, root cause, and next action below.
+
+</topic>
+
+<topic id="attempt-ledger" status="active" version="v1" wp="WP-0316" updated_at="2026-08-30">
+
+# Attempt and state ledger
+
+- 2026-08-30 / `WP-0316-A001` / `IN_PROGRESS`: retired the stale fast entrypoint; updated the sole guide, specs, build rules, taskboard, and postmortem warnings; implemented split roaming user data and LocalAppData immutable runtime generations, hash-bound manifest activation/rollback, strict managed resolution, mandatory disposable headless user-data roots, and runtime provenance in existing Diagnostics/agent-state surfaces. Added separate qualification and package-only entrypoints plus a four-archive Inno wrapper. Focused proof passed: six managed-runtime unit tests, strict no-fallback test, TypeScript compilation, 37 installer/runtime contracts, PowerShell parsing, desktop/engine Cargo checks, real Inno 7.1 compilation, reparse/overlap negative probes, and a final tiny frozen-input package-only run that produced and independently opened `simple-offline-installer.iso` SHA-256 `69ec839d167d8e5bc03e0c8f94c26c3365e9d09b91acf77efded2cd01223f42d` without changing the app version or changelog and with zero partial package stages left behind. This tiny ISO proves the package boundary only and is not a release candidate.
+- 2026-08-30 / `WP-0316-A001` / `BLOCKED_GATE`: canonical desktop payload validation fails because `product/desktop/src-tauri/offline/manifest.json` is absent. No desktop build, version bump, real runtime qualification, or exact-ISO acceptance was attempted. Reconstructing dependencies during packaging is forbidden. Next action: separately identify or qualify the explicit existing working payload and core setup, then run the package-only command and the exact resulting ISO through microtasks 10–12.
+- 2026-08-30 / `WP-0316-A001` / `APP_SLICE_PASS`: superseded the app-build portion of the prior blocked gate by adding `-CoreOnly`. The governed desktop build now skips payload validation/refresh and pack warmups, keeps compiler artifacts in stable `build_target/cargo_cache`, and publishes only app deliverables to `Current`. Version `0.1.201` built successfully while `offline/manifest.json` remained absent. Exact outputs: `desktop.exe` SHA-256 `78970a543bf2f159ce96b22527278dde1e9e726820566fa2701bbff4960e8309`; normal NSIS setup SHA-256 `d27d4ef87466953f4426fc9aabda6b41e4aa9e2346226947e8a8fa3e429518f6`. Hidden headless proof reported `app_version=0.1.201`, isolated user data, and LocalAppData runtime root; Diagnostics screenshots show the runtime provenance without adding a card. Real runtime qualification and exact-ISO acceptance remain outstanding.
+- 2026-08-30 / `WP-0316-A002` / `INSTALLER_MAINTENANCE_PASS`: diagnosed the reported keep-data reinstall failure from the live machine: the v0.1.188 uninstaller had removed program files and registry state while preserving the 1.11 GB database/settings, but the parent installer had no durable phase log. Reworked both reinstall actions into one CRC-checked NSIS process, changed compression from LZMA to zlib, added `/VVMAINTENANCE=<action>`, and added an error-state-preserving phase log. Exact v0.1.204 setup SHA-256 `a7d29e9a51153c69e4cc5d7498030a79f08e66292eba682aad7d2eca19b77736` completed `reinstall_keep` in 47 seconds with exit 0; installed app/registry report `0.1.204`; database SHA-256 `2a7f87e0beb807b0a955863319bc39b6e5baeb6687ac8afcaa5c4f194968ee03` was unchanged; 10/10 configuration files were unchanged; 7/7 required log phases were present; the packaged headless app returned health `ok`; and all 328 contracts passed. Evidence: `../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0316/20260830_installer_maintenance_v0_1_204/summary.md`. This closes the normal core-installer maintenance defect only; real runtime qualification and exact-ISO acceptance remain outstanding.
+- 2026-08-30 / `WP-0316-A003` / `VERSION_GUARD_PASS`: removed automatic patch-version calculation/writes and automatic release-changelog publication from `build_desktop_target.ps1`. Actual builds now require an exact `-ExpectedVersion`, retain that already-assigned version, and hash-check all three product-version files plus `BUILD_CHANGELOG.md` after packaging. Proof: PowerShell parse passed; six focused managed-runtime/build contracts and all 329 repository contracts passed; a real invocation without `-ExpectedVersion` failed before build/archive/publish work; all four protected hashes remained unchanged throughout. No desktop build or version change was performed.
+- 2026-09-23 / `WP-0316-A005` / `OPERATOR_DECISION`: the operator reviewed the no-bump policy this packet authored (`AGENTS.md`/`CLAUDE.md` VV-CODEX-VERSION-001…003, `build_rules.md` VV-BUILD-VERSION-001…004, `-ExpectedVersion` guard in `build_desktop_target.ps1`) after noticing builds had stopped incrementing, and confirmed it as intended authority: versions change only by an explicit operator release action. These authority edits are still uncommitted as of this note.
+- 2026-08-30 / `WP-0316-A004` / `LEGACY_MACHINE_MIGRATION_PASS`: fixed the exact mixed-scope failure shown by the operator. Live state contained current-user v0.1.204 under LocalAppData plus stale machine-wide v0.1.179 under Program Files; the old Program Files executable was administrator-owned and not writable by the current-user installer. The current-user NSIS initializer now treats HKLM as separate migration evidence, logs it, and unconditionally confines `$INSTDIR` to `%LOCALAPPDATA%\\VoxVulgi`, including against stale saved state and `/D`. Package-only recompilation reused the existing v0.1.204 desktop binary and produced setup SHA-256 `0dda2e70bf1e5db092ed28f296c3808b8c8507fe36d43938309a8a258e3b8ad8` (279,373,871 bytes) without a desktop build, version change, or changelog entry. The exact mixed-state passive reinstall exited 0 and logged the detected v0.1.179 path, enforced LocalAppData target, in-process cleanup, binary write, metadata write, and success; 14/14 protected database/config files (1,111,426,220 bytes) remained byte-identical. The legacy HKLM registration, public shortcuts, Program Files binary, and abandoned 1.83 GB offline payload were then removed while HKCU v0.1.204 remained. Installed-app proof on an isolated C: root returned health `ok`, `agent_headless=true`, and `app_version=0.1.204`; all 330 contracts passed. Evidence: `../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0316/20260830_legacy_machine_migration_v0_1_204/summary.md`. This closes the core-installer mixed-scope migration defect only; real runtime qualification and exact-ISO acceptance remain outstanding.
+
+</topic>

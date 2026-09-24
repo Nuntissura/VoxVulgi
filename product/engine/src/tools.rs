@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 
 trait OwnedCommandOutputExt {
@@ -33,6 +34,119 @@ const PYTHON_LOCKFILE_INSTALL_TIMEOUT_SECS: u64 = 60 * 60;
 const PYTHON_POST_INSTALL_VERSION_CHECK_RETRIES: usize = 10;
 const PYTHON_POST_INSTALL_VERSION_CHECK_DELAY_MS: u64 = 2_000;
 
+fn reject_managed_runtime_mutation(paths: &AppPaths, action: &str) -> Result<()> {
+    if paths.managed_offline() {
+        return Err(EngineError::InstallFailed(format!(
+            "{action} is disabled for an installer-managed offline runtime; install a qualified runtime generation instead"
+        )));
+    }
+    Ok(())
+}
+
+// --- Bounded version probes + status cache (WP-0320 MT-2) -----------------
+// Diagnostics status probes must not repeat a slow child-process spawn on
+// every poll (evidence: `diagnostics.tools-core` flights took 56-84 s).
+// `probe_version_output` bounds short-lived `--version`/`-version` probes to
+// 15 s; installers and other long-running operations keep the 3600 s
+// `owned_output()` helper. The status cache below memoizes the five status
+// functions per-process, keyed by function name plus the probed executable
+// path(s) and their mtime, so a fresh install/repair invalidates the entry
+// automatically even without the explicit `tool_probe_cache_invalidate`
+// calls installers also make.
+// Thread-local (not a shared global) so parallel `cargo test` threads cannot
+// inflate each other's spawn counts.
+#[cfg(test)]
+thread_local! {
+    static TOOL_PROBE_SPAWN_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn probe_version_output(
+    command: &mut std::process::Command,
+) -> std::io::Result<std::process::Output> {
+    #[cfg(test)]
+    TOOL_PROBE_SPAWN_COUNT.with(|count| count.set(count.get() + 1));
+    crate::cmd::run_owned_output(
+        command,
+        std::time::Duration::from_secs(15),
+        crate::jobs::external_command_cancel_requested,
+    )
+}
+
+const TOOL_PROBE_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+#[derive(Clone)]
+enum CachedProbeValue {
+    Ffmpeg(FfmpegToolsStatus),
+    Ytdlp(YtDlpToolsStatus),
+    JsRuntime(JsRuntimeToolsStatus),
+    PythonToolchain(PythonToolchainStatus),
+    PortablePython(PortablePythonStatus),
+}
+
+struct CachedProbe {
+    cached_at: std::time::Instant,
+    value: CachedProbeValue,
+}
+
+fn tool_probe_cache() -> &'static Mutex<HashMap<String, CachedProbe>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, CachedProbe>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn path_mtime_fingerprint(path: &Path) -> String {
+    std::fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .ok()
+        .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_nanos().to_string())
+        .unwrap_or_else(|| "absent".to_string())
+}
+
+fn tool_probe_cache_key(function_name: &str, probed_paths: &[&Path]) -> String {
+    let mut key = function_name.to_string();
+    for path in probed_paths {
+        key.push('|');
+        key.push_str(&path.to_string_lossy());
+        key.push('@');
+        key.push_str(&path_mtime_fingerprint(path));
+    }
+    key
+}
+
+fn tool_probe_cache_get(key: &str) -> Option<CachedProbeValue> {
+    let cache = tool_probe_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache
+        .get(key)
+        .filter(|entry| entry.cached_at.elapsed() < TOOL_PROBE_CACHE_TTL)
+        .map(|entry| entry.value.clone())
+}
+
+fn tool_probe_cache_put(key: String, value: CachedProbeValue) {
+    let mut cache = tool_probe_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.insert(
+        key,
+        CachedProbe {
+            cached_at: std::time::Instant::now(),
+            value,
+        },
+    );
+}
+
+/// Drops every cache entry for `function_name` regardless of which
+/// executable path(s)/mtime produced the key. Install functions call this
+/// after a successful install so a stale probe cannot survive it.
+fn tool_probe_cache_invalidate(function_name: &str) {
+    let prefix = format!("{function_name}|");
+    let mut cache = tool_probe_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.retain(|key, _| !key.starts_with(&prefix));
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct FfmpegToolsStatus {
     pub installed: bool,
@@ -43,22 +157,41 @@ pub struct FfmpegToolsStatus {
 }
 
 pub fn ffmpeg_tools_status(paths: &AppPaths) -> FfmpegToolsStatus {
+    ffmpeg_tools_status_impl(paths, false)
+}
+
+/// Bypasses and refreshes the cached status (Diagnostics "Refresh" button).
+pub fn ffmpeg_tools_status_forced(paths: &AppPaths) -> FfmpegToolsStatus {
+    ffmpeg_tools_status_impl(paths, true)
+}
+
+fn ffmpeg_tools_status_impl(paths: &AppPaths, force: bool) -> FfmpegToolsStatus {
     let ffmpeg_path = paths.ffmpeg_bin_path();
     let ffprobe_path = paths.ffprobe_bin_path();
+    let key = tool_probe_cache_key("ffmpeg_tools_status", &[&ffmpeg_path, &ffprobe_path]);
+    if !force {
+        if let Some(CachedProbeValue::Ffmpeg(cached)) = tool_probe_cache_get(&key) {
+            return cached;
+        }
+    }
+
     let installed = ffmpeg_path.exists() && ffprobe_path.exists();
     let ffmpeg_version = tool_version_first_line(paths.ffmpeg_cmd());
     let ffprobe_version = tool_version_first_line(paths.ffprobe_cmd());
 
-    FfmpegToolsStatus {
+    let status = FfmpegToolsStatus {
         installed,
         ffmpeg_path: ffmpeg_path.to_string_lossy().to_string(),
         ffprobe_path: ffprobe_path.to_string_lossy().to_string(),
         ffmpeg_version,
         ffprobe_version,
-    }
+    };
+    tool_probe_cache_put(key, CachedProbeValue::Ffmpeg(status.clone()));
+    status
 }
 
 pub fn install_ffmpeg_tools(paths: &AppPaths) -> Result<FfmpegToolsStatus> {
+    reject_managed_runtime_mutation(paths, "FFmpeg download/install")?;
     paths.ensure_dirs()?;
 
     let destination = paths.ffmpeg_dir();
@@ -79,6 +212,7 @@ pub fn install_ffmpeg_tools(paths: &AppPaths) -> Result<FfmpegToolsStatus> {
     ffmpeg_sidecar::download::unpack_ffmpeg(&archive_path, &destination)
         .map_err(|e| EngineError::InstallFailed(e.to_string()))?;
 
+    tool_probe_cache_invalidate("ffmpeg_tools_status");
     Ok(ffmpeg_tools_status(paths))
 }
 
@@ -152,10 +286,9 @@ fn download_url_to_file_with_curl(url: &str, output_path: &Path, label: &str) ->
 }
 
 fn tool_version_first_line(program: impl AsRef<std::ffi::OsStr>) -> Option<String> {
-    let output = crate::cmd::command(program)
-        .arg("-version")
-        .owned_output()
-        .ok()?;
+    let mut cmd = crate::cmd::command(program);
+    cmd.arg("-version");
+    let output = probe_version_output(&mut cmd).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -202,36 +335,35 @@ struct ResolvedJsRuntime {
 }
 
 pub fn ytdlp_tools_status(paths: &AppPaths) -> YtDlpToolsStatus {
+    ytdlp_tools_status_impl(paths, false)
+}
+
+/// Bypasses and refreshes the cached status (Diagnostics "Refresh" button).
+pub fn ytdlp_tools_status_forced(paths: &AppPaths) -> YtDlpToolsStatus {
+    ytdlp_tools_status_impl(paths, true)
+}
+
+fn ytdlp_tools_status_impl(paths: &AppPaths, force: bool) -> YtDlpToolsStatus {
     let bundled = bundled_ytdlp_path(paths);
-    let bundled_installed = bundled.exists();
-
-    let mut resolved_path = String::new();
-    let mut resolved_version: Option<String> = None;
-    let mut available = false;
-
-    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
-    if bundled_installed {
-        candidates.push(bundled.clone());
-    }
-    candidates.push(std::path::PathBuf::from("yt-dlp"));
-
-    for candidate in candidates {
-        let version = tool_version_first_line_with_arg(&candidate, "--version");
-        if version.is_some() {
-            available = true;
-            resolved_path = candidate.to_string_lossy().to_string();
-            resolved_version = version;
-            break;
+    let key = tool_probe_cache_key("ytdlp_tools_status", &[&bundled]);
+    if !force {
+        if let Some(CachedProbeValue::Ytdlp(cached)) = tool_probe_cache_get(&key) {
+            return cached;
         }
     }
 
-    YtDlpToolsStatus {
-        available,
+    let bundled_installed = bundled.exists();
+    let status = crate::download_engines::engine_status(paths);
+
+    let result = YtDlpToolsStatus {
+        available: status.verified,
         bundled_installed,
         bundled_path: bundled.to_string_lossy().to_string(),
-        ytdlp_path: resolved_path,
-        ytdlp_version: resolved_version,
-    }
+        ytdlp_path: status.path,
+        ytdlp_version: status.version,
+    };
+    tool_probe_cache_put(key, CachedProbeValue::Ytdlp(result.clone()));
+    result
 }
 
 pub fn install_ytdlp_tools(paths: &AppPaths) -> Result<YtDlpToolsStatus> {
@@ -249,12 +381,9 @@ pub fn install_ytdlp_tools(paths: &AppPaths) -> Result<YtDlpToolsStatus> {
     {
         let pin = &pinned_dependency_manifest::manifest().yt_dlp_windows;
 
-        let destination = bundled_ytdlp_path(paths);
-        if let Some(parent) = destination.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let tmp_path = destination.with_extension("download");
+        let download_dir = paths.cache_dir().join("download_engine_updates");
+        std::fs::create_dir_all(&download_dir)?;
+        let tmp_path = download_dir.join(format!("yt-dlp-{}.download", uuid::Uuid::new_v4()));
 
         let primary_download = (|| -> Result<()> {
             let resp = ureq::get(&pin.url)
@@ -306,14 +435,11 @@ pub fn install_ytdlp_tools(paths: &AppPaths) -> Result<YtDlpToolsStatus> {
             });
         }
 
-        if destination.exists() {
-            let _ = std::fs::remove_file(&destination);
-        }
-        if std::fs::rename(&tmp_path, &destination).is_err() {
-            std::fs::copy(&tmp_path, &destination)?;
-            let _ = std::fs::remove_file(&tmp_path);
-        }
-
+        let staged =
+            crate::download_engines::stage_and_activate_ytdlp(paths, &tmp_path, Some(&pin.version));
+        let _ = std::fs::remove_file(&tmp_path);
+        staged?;
+        tool_probe_cache_invalidate("ytdlp_tools_status");
         Ok(ytdlp_tools_status(paths))
     }
 }
@@ -357,6 +483,17 @@ fn preferred_ytdlp_js_runtime(paths: &AppPaths) -> Option<ResolvedJsRuntime> {
         }
     }
 
+    let bundled_node = paths.node_exe();
+    if bundled_node.exists() {
+        if let Some(runtime) = resolve_js_runtime_candidate("node", bundled_node, true) {
+            return Some(runtime);
+        }
+    }
+
+    if paths.managed_offline() {
+        return None;
+    }
+
     if let Some(runtime) =
         resolve_js_runtime_candidate("deno", std::path::PathBuf::from("deno"), false)
     {
@@ -371,20 +508,43 @@ pub fn preferred_ytdlp_js_runtime_arg(paths: &AppPaths) -> Option<String> {
 }
 
 pub fn js_runtime_tools_status(paths: &AppPaths) -> JsRuntimeToolsStatus {
+    js_runtime_tools_status_impl(paths, false)
+}
+
+/// Bypasses and refreshes the cached status (Diagnostics "Refresh" button).
+pub fn js_runtime_tools_status_forced(paths: &AppPaths) -> JsRuntimeToolsStatus {
+    js_runtime_tools_status_impl(paths, true)
+}
+
+fn js_runtime_tools_status_impl(paths: &AppPaths, force: bool) -> JsRuntimeToolsStatus {
     let bundled_deno = bundled_deno_path(paths);
+    let bundled_node = paths.node_exe();
+    let key = tool_probe_cache_key("js_runtime_tools_status", &[&bundled_deno, &bundled_node]);
+    if !force {
+        if let Some(CachedProbeValue::JsRuntime(cached)) = tool_probe_cache_get(&key) {
+            return cached;
+        }
+    }
+
     let bundled_deno_version = if bundled_deno.exists() {
         tool_version_first_line_with_arg(&bundled_deno, "--version")
     } else {
         None
     };
 
-    let deno_resolution =
-        resolve_js_runtime_candidate("deno", std::path::PathBuf::from("deno"), false);
-    let node_resolution =
-        resolve_js_runtime_candidate("node", std::path::PathBuf::from("node"), false);
+    let deno_resolution = if paths.managed_offline() {
+        None
+    } else {
+        resolve_js_runtime_candidate("deno", std::path::PathBuf::from("deno"), false)
+    };
+    let node_resolution = if paths.managed_offline() {
+        None
+    } else {
+        resolve_js_runtime_candidate("node", std::path::PathBuf::from("node"), false)
+    };
     let preferred = preferred_ytdlp_js_runtime(paths);
 
-    JsRuntimeToolsStatus {
+    let result = JsRuntimeToolsStatus {
         available: preferred.is_some(),
         preferred_runtime: preferred
             .as_ref()
@@ -414,10 +574,13 @@ pub fn js_runtime_tools_status(paths: &AppPaths) -> JsRuntimeToolsStatus {
         node_version: node_resolution
             .as_ref()
             .map(|runtime| runtime.version.clone()),
-    }
+    };
+    tool_probe_cache_put(key, CachedProbeValue::JsRuntime(result.clone()));
+    result
 }
 
 pub fn install_js_runtime_tools(paths: &AppPaths) -> Result<JsRuntimeToolsStatus> {
+    reject_managed_runtime_mutation(paths, "JavaScript runtime download/install")?;
     #[cfg(not(windows))]
     {
         let _ = paths;
@@ -518,6 +681,7 @@ pub fn install_js_runtime_tools(paths: &AppPaths) -> Result<JsRuntimeToolsStatus
         )?;
 
         let _ = generate_pack_integrity_manifest(paths);
+        tool_probe_cache_invalidate("js_runtime_tools_status");
         Ok(js_runtime_tools_status(paths))
     }
 }
@@ -588,6 +752,7 @@ pub fn instagram_profile_provider_status(paths: &AppPaths) -> InstagramProfilePr
 pub fn install_instagram_profile_provider(
     paths: &AppPaths,
 ) -> Result<InstagramProfileProviderStatus> {
+    reject_managed_runtime_mutation(paths, "Instagram provider download/install")?;
     let current = instagram_profile_provider_status(paths);
     if current.installed
         && std::fs::read(paths.instagram_profile_enumerator_script())
@@ -635,6 +800,7 @@ pub fn install_instagram_profile_provider(
 pub fn install_instagram_profile_enumerator(
     paths: &AppPaths,
 ) -> Result<InstagramProfileProviderStatus> {
+    reject_managed_runtime_mutation(paths, "Instagram enumerator install")?;
     let pin = &pinned_dependency_manifest::manifest().instagram_profile_enumerator;
     let python = python_venv_python_path(paths)?;
     let install_dir = paths.instagram_profile_provider_dir();
@@ -731,6 +897,28 @@ struct ProviderNodeModulesProcessAttestation {
     tree_sha256_hex: String,
     verified_at_ms: i64,
 }
+
+// WP-0321 S3: persisted file-identity receipt for the provider node/application trees. See the
+// comment on `accept_provider_tree_identity_receipt` for the accepted security trade-off.
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+struct ProviderTreeFileStat {
+    path: String,
+    size: u64,
+    mtime_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct ProviderTreeIdentityReceipt {
+    schema_version: u32,
+    install_generation: String,
+    node_tree_sha256: String,
+    provider_tree_sha256: String,
+    verified_at_ms: i64,
+    node_files: Vec<ProviderTreeFileStat>,
+    provider_files: Vec<ProviderTreeFileStat>,
+}
+
+const PROVIDER_TREE_IDENTITY_RECEIPT_MAX_AGE_MS: i64 = 7 * 24 * 60 * 60 * 1000;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProviderVerificationProgress {
@@ -1040,6 +1228,51 @@ fn provider_verification_terminal_errors(
 
 fn provider_node_modules_integrity_receipt_path(server_dir: &Path) -> PathBuf {
     server_dir.join(".node_modules_integrity.json")
+}
+
+fn provider_tree_identity_receipt_path(server_dir: &Path) -> PathBuf {
+    server_dir.join(".provider_tree_identity_receipt.json")
+}
+
+fn read_provider_tree_identity_receipt(server_dir: &Path) -> Option<ProviderTreeIdentityReceipt> {
+    let bytes = std::fs::read(provider_tree_identity_receipt_path(server_dir)).ok()?;
+    let receipt: ProviderTreeIdentityReceipt = serde_json::from_slice(&bytes).ok()?;
+    (receipt.schema_version == 1 && receipt.install_generation == provider_install_generation())
+        .then_some(receipt)
+}
+
+fn write_provider_tree_identity_receipt(
+    server_dir: &Path,
+    node_tree_sha256: &str,
+    provider_tree_sha256: &str,
+    node_files: Vec<ProviderTreeFileStat>,
+    provider_files: Vec<ProviderTreeFileStat>,
+) -> Result<()> {
+    let receipt = ProviderTreeIdentityReceipt {
+        schema_version: 1,
+        install_generation: provider_install_generation(),
+        node_tree_sha256: node_tree_sha256.to_ascii_uppercase(),
+        provider_tree_sha256: provider_tree_sha256.to_ascii_uppercase(),
+        verified_at_ms: now_ms(),
+        node_files,
+        provider_files,
+    };
+    Ok(crate::persistence::atomic_write_text(
+        &provider_tree_identity_receipt_path(server_dir),
+        &serde_json::to_string_pretty(&receipt)?,
+    )?)
+}
+
+/// WP-0321 S3: invalidate the fast-path receipt wherever the provider is (re)installed or
+/// repaired, so the next verification always does a full authenticated walk of the fresh bytes.
+fn delete_provider_tree_identity_receipt(server_dir: &Path) {
+    let _ = std::fs::remove_file(provider_tree_identity_receipt_path(server_dir));
+}
+
+#[cfg(test)]
+fn provider_tree_full_walk_count() -> &'static std::sync::atomic::AtomicU64 {
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    &COUNT
 }
 
 fn provider_install_generation() -> String {
@@ -1365,14 +1598,27 @@ fn authenticate_authoritative_installed_provider_identity(
                 .to_string(),
         ));
     }
+    let node_root = paths.node_runtime_dir();
+    let provider_root = paths.youtube_po_provider_dir();
+    let server_dir = paths.youtube_po_provider_server_dir();
+
+    // WP-0321 S3 fast path: if the persisted receipt proves nothing changed, skip both full
+    // tree walks below and accept exactly as a successful full hash would. See the comment on
+    // `accept_provider_tree_identity_receipt` for the accepted security trade-off.
+    if accept_provider_tree_identity_receipt(&server_dir, &node_root, &provider_root, &identity) {
+        if let Some(key) = progress_key {
+            update_provider_verification_progress(key, "provider_receipt_verified_unchanged", 0, 0);
+        }
+        return Ok(());
+    }
+
     verify_published_directory_lineage(
-        &paths.node_runtime_dir(),
+        &node_root,
         &identity.node_directory_identity,
         &identity.node_tree_sha256,
         canonical_provider_node_tree_sha256_hex,
         "Node",
     )?;
-    let provider_root = paths.youtube_po_provider_dir();
     let actual_directory_identity = provider_directory_identity(&provider_root)?;
     if actual_directory_identity != identity.provider_directory_identity {
         return Err(EngineError::InstallFailed(
@@ -1384,18 +1630,26 @@ fn authenticate_authoritative_installed_provider_identity(
             canonical_provider_application_tree_sha256_hex_with_progress(&provider_root, key)
         }
         None => canonical_provider_application_tree_sha256_hex(&provider_root),
-    }
-    .ok_or_else(|| {
-        EngineError::InstallFailed(
-            "provider complete published tree could not be authenticated".to_string(),
-        )
-    })?;
+    }?;
     if !actual_tree.eq_ignore_ascii_case(&identity.provider_tree_sha256) {
         return Err(EngineError::HashMismatch {
             path: provider_root,
             expected: identity.provider_tree_sha256,
             actual: actual_tree,
         });
+    }
+    // Persist the receipt so the next launch can take the fast path above, if nothing changes.
+    if let (Some(node_files), Some(provider_files)) = (
+        provider_tree_file_stats(&node_root, PROVIDER_NODE_TREE_EXCLUSIONS),
+        provider_tree_file_stats(&provider_root, PROVIDER_APPLICATION_TREE_EXCLUSIONS),
+    ) {
+        let _ = write_provider_tree_identity_receipt(
+            &server_dir,
+            &identity.node_tree_sha256,
+            &identity.provider_tree_sha256,
+            node_files,
+            provider_files,
+        );
     }
     Ok(())
 }
@@ -1442,12 +1696,7 @@ fn authenticate_complete_provider_trees_against_with_progress(
     expected_provider_tree_sha256: &str,
     progress_key: Option<&Path>,
 ) -> Result<ProviderInstalledIdentity> {
-    let node_tree_sha256 = canonical_provider_node_tree_sha256_hex(&paths.node_runtime_dir())
-        .ok_or_else(|| {
-            EngineError::InstallFailed(
-                "offline provider Node tree could not be completely authenticated".to_string(),
-            )
-        })?;
+    let node_tree_sha256 = canonical_provider_node_tree_sha256_hex(&paths.node_runtime_dir())?;
     if !node_tree_sha256.eq_ignore_ascii_case(expected_node_tree_sha256) {
         return Err(EngineError::HashMismatch {
             path: paths.node_runtime_dir(),
@@ -1461,12 +1710,7 @@ fn authenticate_complete_provider_trees_against_with_progress(
             canonical_provider_application_tree_sha256_hex_with_progress(&provider_root, key)
         }
         None => canonical_provider_application_tree_sha256_hex(&provider_root),
-    }
-    .ok_or_else(|| {
-        EngineError::InstallFailed(
-            "offline provider application tree could not be completely authenticated".to_string(),
-        )
-    })?;
+    }?;
     if !provider_tree_sha256.eq_ignore_ascii_case(expected_provider_tree_sha256) {
         return Err(EngineError::HashMismatch {
             path: paths.youtube_po_provider_dir(),
@@ -1543,20 +1787,36 @@ fn commit_adopted_provider_identity(
             {
                 return Ok(());
             }
-            return Err(EngineError::InstallFailed(
-                "provider installed identity conflicts with the authenticated destination bytes"
-                    .to_string(),
-            ));
+            require_exact_committed_provider_identity_lineage(paths, &existing)?;
+            if existing.install_generation != verified.install_generation
+                || !existing
+                    .node_tree_sha256
+                    .eq_ignore_ascii_case(&verified.node_tree_sha256)
+                || !existing
+                    .provider_tree_sha256
+                    .eq_ignore_ascii_case(&verified.provider_tree_sha256)
+            {
+                return Err(EngineError::InstallFailed(
+                    "provider installed identity conflicts with the authenticated destination bytes"
+                        .to_string(),
+                ));
+            }
+            // A managed-runtime update or reinstall publishes the same executable-pinned bytes
+            // into a new immutable generation, so its directory object identities legitimately
+            // change. The caller has already authenticated both complete trees against the
+            // executable pins. Commit a fresh lineage for those exact bytes; never carry the old
+            // directory identities across generations.
         }
-        if existing.install_generation != verified.install_generation
-            || existing.node_directory_identity != verified.node_directory_identity
-            || existing.provider_directory_identity != verified.provider_directory_identity
-            || !existing
-                .node_tree_sha256
-                .eq_ignore_ascii_case(&verified.node_tree_sha256)
-            || !existing
-                .provider_tree_sha256
-                .eq_ignore_ascii_case(&verified.provider_tree_sha256)
+        if legacy_unbound
+            && (existing.install_generation != verified.install_generation
+                || existing.node_directory_identity != verified.node_directory_identity
+                || existing.provider_directory_identity != verified.provider_directory_identity
+                || !existing
+                    .node_tree_sha256
+                    .eq_ignore_ascii_case(&verified.node_tree_sha256)
+                || !existing
+                    .provider_tree_sha256
+                    .eq_ignore_ascii_case(&verified.provider_tree_sha256))
         {
             return Err(EngineError::InstallFailed(
                 "legacy provider identity does not match the executable-pinned destination bytes"
@@ -1702,6 +1962,9 @@ fn commit_adopted_provider_identity(
         [attempt_id.as_str()],
     )?;
     tx.commit()?;
+    // WP-0321 S3: a commit here means the provider was freshly installed, reinstalled, or
+    // repaired; the previous receipt no longer describes trustworthy on-disk bytes.
+    delete_provider_tree_identity_receipt(&paths.youtube_po_provider_server_dir());
     Ok(())
 }
 
@@ -1735,13 +1998,15 @@ fn reconcile_provider_lineage_before_verification(paths: &AppPaths) -> Result<()
                 load_provider_installed_identity(paths)?.is_none_or(|identity| {
                     identity.lineage_attempt_id.is_empty() && identity.commit_nonce.is_empty()
                 });
-            if !legacy_or_absent {
-                return Err(error);
+            match adopt_embedded_complete_provider_payload_with_progress(paths, Some(&progress_key)) {
+                Ok(()) => Ok(()),
+                Err(adoption_error) if !legacy_or_absent => Err(EngineError::InstallFailed(
+                    format!(
+                        "{error}; authenticated managed-runtime identity rebind failed: {adoption_error}"
+                    ),
+                )),
+                Err(adoption_error) => Err(adoption_error),
             }
-            // The adoption transaction commits the exact complete-tree identity authenticated by
-            // the single progress-aware pass above. Rewalking the same provider bytes here would
-            // make first-run verification two full scans and invalidate the producer receipt.
-            adopt_embedded_complete_provider_payload_with_progress(paths, Some(&progress_key))
         }
     }
 }
@@ -1772,6 +2037,7 @@ fn verify_youtube_po_provider_node_modules_inner(
     update_provider_verification_progress(&server_dir, "provider_manifest_load", 0, 0);
     if let Err(error) = reconcile_provider_lineage_before_verification(paths) {
         let _ = std::fs::remove_file(provider_node_modules_integrity_receipt_path(&server_dir));
+        delete_provider_tree_identity_receipt(&server_dir);
         provider_node_modules_process_invalidations()
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -1867,12 +2133,15 @@ const PROVIDER_NODE_TREE_EXCLUSIONS: &[&str] = &[".voxvulgi_provider_install_att
 const PROVIDER_APPLICATION_TREE_EXCLUSIONS: &[&str] = &[
     ".voxvulgi_provider_install_attempt",
     "server/.node_modules_integrity.json",
+    // WP-0321 S3: the identity receipt lives inside the hashed tree; it must never be part of
+    // the pinned digest or the recorded file set, or writing it would invalidate both.
+    "server/.provider_tree_identity_receipt.json",
 ];
 
 fn canonical_directory_tree_sha256_hex_with_exclusions(
     root: &Path,
     exact_excluded_files: &[&str],
-) -> Option<String> {
+) -> Result<String> {
     canonical_directory_tree_sha256_hex_with_exclusions_and_progress(
         root,
         exact_excluded_files,
@@ -1880,26 +2149,206 @@ fn canonical_directory_tree_sha256_hex_with_exclusions(
     )
 }
 
+fn provider_tree_authentication_error(path: &Path, reason: impl std::fmt::Display) -> EngineError {
+    EngineError::InstallFailed(format!(
+        "provider tree authentication failed at {}: {reason}",
+        path.display()
+    ))
+}
+
+const PROVIDER_TREE_MAX_TOTAL_ELAPSED: std::time::Duration =
+    std::time::Duration::from_secs(60 * 60);
+const PROVIDER_TREE_MAX_NO_PROGRESS_ELAPSED: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
+
+fn provider_tree_scan_timeout_reason(
+    total_elapsed: std::time::Duration,
+    no_progress_elapsed: std::time::Duration,
+) -> Option<&'static str> {
+    if total_elapsed > PROVIDER_TREE_MAX_TOTAL_ELAPSED {
+        Some("scan exceeded the 3600 second absolute time limit")
+    } else if no_progress_elapsed > PROVIDER_TREE_MAX_NO_PROGRESS_ELAPSED {
+        Some("scan made no file-hash progress for 600 seconds")
+    } else {
+        None
+    }
+}
+
+fn provider_tree_post_hash_timeout_reason(
+    total_elapsed: std::time::Duration,
+) -> Option<&'static str> {
+    if total_elapsed > PROVIDER_TREE_MAX_TOTAL_ELAPSED {
+        Some("scan exceeded the 3600 second absolute time limit")
+    } else {
+        None
+    }
+}
+
 fn canonical_directory_tree_sha256_hex_with_exclusions_and_progress(
     root: &Path,
     exact_excluded_files: &[&str],
     mut progress: Option<&mut dyn FnMut(u64, u64)>,
-) -> Option<String> {
+) -> Result<String> {
     use sha2::Digest;
+    // WP-0321 S3: counts every full byte-hashing tree walk, so tests can prove the receipt fast
+    // path in `accept_provider_tree_identity_receipt` skipped this expensive function entirely.
+    #[cfg(test)]
+    provider_tree_full_walk_count().fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     const MAX_FILES: usize = 12_000;
     const MAX_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
     const MAX_FILE_BYTES: u64 = 128 * 1024 * 1024;
     const MAX_DEPTH: usize = 32;
-    const MAX_ELAPSED: std::time::Duration = std::time::Duration::from_secs(10 * 60);
     let started = std::time::Instant::now();
+    let mut last_file_progress = started;
     let mut total_bytes = 0_u64;
     let mut files = std::collections::BTreeMap::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(directory) = stack.pop() {
-        for entry in std::fs::read_dir(&directory).ok()? {
-            if started.elapsed() > MAX_ELAPSED {
-                return None;
+        let entries = std::fs::read_dir(&directory).map_err(|error| {
+            provider_tree_authentication_error(
+                &directory,
+                format!("directory read failed: {error}"),
+            )
+        })?;
+        for entry in entries {
+            if let Some(reason) =
+                provider_tree_scan_timeout_reason(started.elapsed(), last_file_progress.elapsed())
+            {
+                return Err(provider_tree_authentication_error(&directory, reason));
             }
+            let entry = entry.map_err(|error| {
+                provider_tree_authentication_error(
+                    &directory,
+                    format!("directory entry read failed: {error}"),
+                )
+            })?;
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                provider_tree_authentication_error(&path, format!("metadata read failed: {error}"))
+            })?;
+            if metadata.file_type().is_symlink() || provider_metadata_is_reparse_point(&metadata) {
+                return Err(provider_tree_authentication_error(
+                    &path,
+                    "symbolic links and reparse points are forbidden",
+                ));
+            }
+            if metadata.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !metadata.is_file() {
+                return Err(provider_tree_authentication_error(
+                    &path,
+                    "filesystem object is neither a regular file nor a directory",
+                ));
+            }
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|error| {
+                    provider_tree_authentication_error(
+                        &path,
+                        format!("path is outside the authenticated root: {error}"),
+                    )
+                })?
+                .to_string_lossy()
+                .replace('\\', "/");
+            if exact_excluded_files.contains(&relative.as_str()) {
+                continue;
+            }
+            if relative.split('/').count() > MAX_DEPTH {
+                return Err(provider_tree_authentication_error(
+                    &path,
+                    format!("path exceeds the maximum tree depth of {MAX_DEPTH}"),
+                ));
+            }
+            if metadata.len() > MAX_FILE_BYTES {
+                return Err(provider_tree_authentication_error(
+                    &path,
+                    format!(
+                        "file size {} exceeds the {} byte limit",
+                        metadata.len(),
+                        MAX_FILE_BYTES
+                    ),
+                ));
+            }
+            if files.len() >= MAX_FILES {
+                return Err(provider_tree_authentication_error(
+                    &path,
+                    format!("tree exceeds the {MAX_FILES} file limit"),
+                ));
+            }
+            total_bytes = total_bytes.checked_add(metadata.len()).ok_or_else(|| {
+                provider_tree_authentication_error(&path, "total byte count overflowed")
+            })?;
+            if total_bytes > MAX_TOTAL_BYTES {
+                return Err(provider_tree_authentication_error(
+                    &path,
+                    format!("tree exceeds the {MAX_TOTAL_BYTES} byte limit"),
+                ));
+            }
+            let hash = sha256_file(&path).map(hex::encode_upper).map_err(|error| {
+                provider_tree_authentication_error(&path, format!("file hash read failed: {error}"))
+            })?;
+            if let Some(reason) = provider_tree_post_hash_timeout_reason(started.elapsed()) {
+                return Err(provider_tree_authentication_error(&path, reason));
+            }
+            files.insert(relative, hash);
+            last_file_progress = std::time::Instant::now();
+            let files_completed = files.len() as u64;
+            if let Some(callback) = progress.as_deref_mut() {
+                callback(files_completed, total_bytes);
+            }
+            // Bound continuous filesystem/AV pressure without weakening complete-byte hashing.
+            // The current process remains interactive and the single-flight retains ownership.
+            if files_completed % 32 == 0 {
+                std::thread::yield_now();
+            }
+            if files_completed % 256 == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+        }
+    }
+    if files.is_empty() {
+        return Err(provider_tree_authentication_error(
+            root,
+            "authenticated tree contains no files",
+        ));
+    }
+    let mut hasher = sha2::Sha256::new();
+    for (path, hash) in files {
+        hasher.update(path.as_bytes());
+        hasher.update([0]);
+        hasher.update(hash.as_bytes());
+        hasher.update(b"\n");
+    }
+    Ok(hex::encode_upper(hasher.finalize()))
+}
+
+#[cfg(windows)]
+fn provider_metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
+    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+#[cfg(not(windows))]
+fn provider_metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// WP-0321 S3: cheap stat-only walk mirroring the traversal/exclusion/symlink rules of
+/// `canonical_directory_tree_sha256_hex_with_exclusions_and_progress`, but recording
+/// (relative path, size, mtime) instead of reading and hashing file bytes. Returns `None` on any
+/// read/metadata/mtime error, a reparse point, or a non-file/non-directory object, which forces
+/// the caller back onto the full-hash path.
+fn provider_tree_file_stats(
+    root: &Path,
+    exact_excluded_files: &[&str],
+) -> Option<Vec<ProviderTreeFileStat>> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(directory) = stack.pop() {
+        for entry in std::fs::read_dir(&directory).ok()? {
             let entry = entry.ok()?;
             let path = entry.path();
             let metadata = std::fs::symlink_metadata(&path).ok()?;
@@ -1921,72 +2370,89 @@ fn canonical_directory_tree_sha256_hex_with_exclusions_and_progress(
             if exact_excluded_files.contains(&relative.as_str()) {
                 continue;
             }
-            if relative.split('/').count() > MAX_DEPTH
-                || metadata.len() > MAX_FILE_BYTES
-                || files.len() >= MAX_FILES
-            {
-                return None;
-            }
-            total_bytes = total_bytes.checked_add(metadata.len())?;
-            if total_bytes > MAX_TOTAL_BYTES {
-                return None;
-            }
-            files.insert(relative, file_sha256_hex(&path)?);
-            let files_completed = files.len() as u64;
-            if let Some(callback) = progress.as_deref_mut() {
-                callback(files_completed, total_bytes);
-            }
-            // Bound continuous filesystem/AV pressure without weakening complete-byte hashing.
-            // The current process remains interactive and the single-flight retains ownership.
-            if files_completed % 32 == 0 {
-                std::thread::yield_now();
-            }
-            if files_completed % 256 == 0 {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
+            let mtime_ms = metadata
+                .modified()
+                .ok()?
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_millis() as i64;
+            files.push(ProviderTreeFileStat {
+                path: relative,
+                size: metadata.len(),
+                mtime_ms,
+            });
         }
     }
-    if files.is_empty() {
-        return None;
+    files.sort_by(|a, b| a.path.cmp(&b.path));
+    Some(files)
+}
+
+// WP-0321 S3: skip the multi-minute full SHA-256 walk of the provider node/application trees
+// (live evidence: ~85 MB, thousands of files, 7 minutes on 2026-09-23) when a persisted receipt
+// proves the exact same file set is still installed. Accepted security trade-off (operator
+// decision 2026-09-23): a same-size, same-mtime byte forgery within the 7-day receipt window
+// would not be caught by this stat compare; a mandatory full re-hash at least every 7 days (plus
+// on any generation change, missing receipt, added/removed/resized/retimed file, reparse point,
+// or stat error) bounds that exposure instead of eliminating it.
+fn accept_provider_tree_identity_receipt(
+    server_dir: &Path,
+    node_root: &Path,
+    provider_root: &Path,
+    identity: &ProviderInstalledIdentity,
+) -> bool {
+    let Some(receipt) = read_provider_tree_identity_receipt(server_dir) else {
+        return false;
+    };
+    if now_ms().saturating_sub(receipt.verified_at_ms) > PROVIDER_TREE_IDENTITY_RECEIPT_MAX_AGE_MS
+    {
+        return false;
     }
-    let mut hasher = sha2::Sha256::new();
-    for (path, hash) in files {
-        hasher.update(path.as_bytes());
-        hasher.update([0]);
-        hasher.update(hash.as_bytes());
-        hasher.update(b"\n");
+    if !receipt
+        .node_tree_sha256
+        .eq_ignore_ascii_case(&identity.node_tree_sha256)
+        || !receipt
+            .provider_tree_sha256
+            .eq_ignore_ascii_case(&identity.provider_tree_sha256)
+    {
+        return false;
     }
-    Some(hex::encode_upper(hasher.finalize()))
+    if provider_directory_identity(node_root).ok().as_deref()
+        != Some(identity.node_directory_identity.as_str())
+        || provider_directory_identity(provider_root).ok().as_deref()
+            != Some(identity.provider_directory_identity.as_str())
+    {
+        return false;
+    }
+    let Some(node_now) = provider_tree_file_stats(node_root, PROVIDER_NODE_TREE_EXCLUSIONS) else {
+        return false;
+    };
+    if node_now != receipt.node_files {
+        return false;
+    }
+    let Some(provider_now) =
+        provider_tree_file_stats(provider_root, PROVIDER_APPLICATION_TREE_EXCLUSIONS)
+    else {
+        return false;
+    };
+    provider_now == receipt.provider_files
 }
 
-#[cfg(windows)]
-fn provider_metadata_is_reparse_point(metadata: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0000_0400;
-    metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-#[cfg(not(windows))]
-fn provider_metadata_is_reparse_point(_metadata: &std::fs::Metadata) -> bool {
-    false
-}
-
-fn canonical_directory_tree_sha256_hex(root: &Path) -> Option<String> {
+fn canonical_directory_tree_sha256_hex(root: &Path) -> Result<String> {
     canonical_directory_tree_sha256_hex_with_exclusions(root, &[])
 }
 
-fn canonical_provider_node_tree_sha256_hex(root: &Path) -> Option<String> {
+fn canonical_provider_node_tree_sha256_hex(root: &Path) -> Result<String> {
     canonical_directory_tree_sha256_hex_with_exclusions(root, PROVIDER_NODE_TREE_EXCLUSIONS)
 }
 
-fn canonical_provider_application_tree_sha256_hex(root: &Path) -> Option<String> {
+fn canonical_provider_application_tree_sha256_hex(root: &Path) -> Result<String> {
     canonical_directory_tree_sha256_hex_with_exclusions(root, PROVIDER_APPLICATION_TREE_EXCLUSIONS)
 }
 
 fn canonical_provider_application_tree_sha256_hex_with_progress(
     root: &Path,
     progress_key: &Path,
-) -> Option<String> {
+) -> Result<String> {
     mark_provider_verification_scan_started(progress_key);
     let mut last_revision_files = 0_u64;
     let mut demand = provider_verification_foreground_demand_for_key(progress_key, 0);
@@ -2061,13 +2527,7 @@ fn authenticate_provider_node_modules_tree_impl(
     progress: Option<&mut dyn FnMut(u64, u64)>,
 ) -> Result<String> {
     let actual =
-        canonical_directory_tree_sha256_hex_with_exclusions_and_progress(root, &[], progress)
-            .ok_or_else(|| {
-                EngineError::InstallFailed(
-                    "installed provider production dependency tree could not be authenticated"
-                        .to_string(),
-                )
-            })?;
+        canonical_directory_tree_sha256_hex_with_exclusions_and_progress(root, &[], progress)?;
     if !actual.eq_ignore_ascii_case(expected) {
         #[cfg(test)]
         if let Some(capture_root) =
@@ -2275,7 +2735,87 @@ pub fn youtube_po_provider_install_status(paths: &AppPaths) -> YoutubePoProvider
     }
 }
 
-fn download_verified_file(
+pub fn download_verified_file(
+    url: &str,
+    destination: &Path,
+    expected_bytes: u64,
+    expected_sha256_hex: &str,
+    label: &str,
+) -> Result<()> {
+    if exact_regular_file_matches(destination, expected_bytes, expected_sha256_hex) {
+        return Ok(());
+    }
+
+    if let Some(cache_root) = std::env::var_os("VOXVULGI_OFFLINE_COMPONENT_CACHE_ROOT") {
+        let normalized_sha = expected_sha256_hex.to_ascii_lowercase();
+        if normalized_sha.len() != 64
+            || !normalized_sha
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "{label} has an invalid expected SHA-256 pin"
+            )));
+        }
+        let cache_path = PathBuf::from(cache_root)
+            .join(&normalized_sha)
+            .join(expected_bytes.to_string())
+            .join("component.bin");
+        if !exact_regular_file_matches(&cache_path, expected_bytes, expected_sha256_hex) {
+            if cache_path.exists() {
+                std::fs::remove_file(&cache_path)?;
+            }
+            if let Some(parent) = cache_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let cache_temp = unique_download_temp_path(&cache_path);
+            let download_result = download_verified_file_to_path(
+                url,
+                &cache_temp,
+                expected_bytes,
+                expected_sha256_hex,
+                label,
+            );
+            if let Err(error) = download_result {
+                let _ = std::fs::remove_file(&cache_temp);
+                return Err(error);
+            }
+            if let Err(promote_error) = std::fs::rename(&cache_temp, &cache_path) {
+                let _ = std::fs::remove_file(&cache_temp);
+                if !exact_regular_file_matches(&cache_path, expected_bytes, expected_sha256_hex) {
+                    return Err(EngineError::InstallFailed(format!(
+                        "{label} immutable component-cache promotion failed: {promote_error}"
+                    )));
+                }
+            }
+        }
+        return materialize_verified_component(
+            &cache_path,
+            destination,
+            expected_bytes,
+            expected_sha256_hex,
+            label,
+        );
+    }
+
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let temp = unique_download_temp_path(destination);
+    let download_result =
+        download_verified_file_to_path(url, &temp, expected_bytes, expected_sha256_hex, label);
+    if let Err(error) = download_result {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    if destination.exists() {
+        std::fs::remove_file(destination)?;
+    }
+    std::fs::rename(&temp, destination)?;
+    Ok(())
+}
+
+fn download_verified_file_to_path(
     url: &str,
     destination: &Path,
     expected_bytes: u64,
@@ -2311,6 +2851,67 @@ fn download_verified_file(
             actual: actual_hash,
         });
     }
+    Ok(())
+}
+
+fn exact_regular_file_matches(path: &Path, expected_bytes: u64, expected_sha256_hex: &str) -> bool {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => return false,
+    };
+    metadata.file_type().is_file()
+        && !metadata.file_type().is_symlink()
+        && metadata.len() == expected_bytes
+        && file_sha256_hex(path)
+            .as_deref()
+            .is_some_and(|hash| hash.eq_ignore_ascii_case(expected_sha256_hex))
+}
+
+fn unique_download_temp_path(path: &Path) -> PathBuf {
+    static NONCE: AtomicU64 = AtomicU64::new(0);
+    let sequence = NONCE.fetch_add(1, Ordering::Relaxed);
+    let name = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("component");
+    path.with_file_name(format!(
+        ".{name}.voxvulgi-download-{}-{sequence}",
+        std::process::id()
+    ))
+}
+
+fn materialize_verified_component(
+    cache_path: &Path,
+    destination: &Path,
+    expected_bytes: u64,
+    expected_sha256_hex: &str,
+    label: &str,
+) -> Result<()> {
+    if !exact_regular_file_matches(cache_path, expected_bytes, expected_sha256_hex) {
+        return Err(EngineError::InstallFailed(format!(
+            "{label} immutable component cache failed verification before reuse"
+        )));
+    }
+    if exact_regular_file_matches(destination, expected_bytes, expected_sha256_hex) {
+        return Ok(());
+    }
+    if let Some(parent) = destination.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if destination.exists() {
+        std::fs::remove_file(destination)?;
+    }
+    let temp = unique_download_temp_path(destination);
+    if std::fs::hard_link(cache_path, &temp).is_err() {
+        std::fs::copy(cache_path, &temp)?;
+    }
+    if !exact_regular_file_matches(&temp, expected_bytes, expected_sha256_hex) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(EngineError::InstallFailed(format!(
+            "{label} changed while materializing from immutable component cache"
+        )));
+    }
+    std::fs::rename(&temp, destination)?;
     Ok(())
 }
 
@@ -2449,6 +3050,116 @@ fn installed_provider_runtime_lifecycle_packages_are_exact(server_dir: &Path) ->
     let swc_dir = server_dir.join("node_modules").join("@swc").join("core");
     installed_provider_package_version(server_dir, "canvas").as_deref() == Some("3.2.3")
         && !swc_dir.exists()
+}
+
+#[cfg(windows)]
+fn install_provider_canvas_prebuilt(archive: &Path, server_dir: &Path) -> Result<()> {
+    let canvas_dir = server_dir.join("node_modules").join("canvas");
+    if !canvas_dir.is_dir() {
+        return Err(EngineError::InstallFailed(
+            "provider npm install did not create node_modules/canvas before prebuilt extraction"
+                .to_string(),
+        ));
+    }
+
+    let members = require_success(
+        crate::cmd::command("tar.exe")
+            .args(["-tzf"])
+            .arg(archive)
+            .owned_output()
+            .map_err(|error| {
+                EngineError::InstallFailed(format!(
+                    "provider canvas archive listing failed to start: {error}"
+                ))
+            })?,
+        "provider canvas archive listing",
+    )?;
+    let member_names = String::from_utf8(members.stdout).map_err(|error| {
+        EngineError::InstallFailed(format!(
+            "provider canvas archive member list is not UTF-8: {error}"
+        ))
+    })?;
+    let mut member_count = 0_usize;
+    for raw_name in member_names.lines() {
+        let name = raw_name.trim_end_matches('/');
+        if name.is_empty() {
+            continue;
+        }
+        member_count += 1;
+        if name.contains('\\') || name.contains(':') {
+            return Err(EngineError::InstallFailed(format!(
+                "provider canvas archive contains an unsafe member path: {raw_name:?}"
+            )));
+        }
+        let mut components = Path::new(name).components();
+        if !matches!(components.next(), Some(std::path::Component::Normal(first)) if first == "build")
+            || components.any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "provider canvas archive member must be a relative build/... path: {raw_name:?}"
+            )));
+        }
+    }
+    if member_count == 0 {
+        return Err(EngineError::InstallFailed(
+            "provider canvas archive contains no members".to_string(),
+        ));
+    }
+
+    let verbose = require_success(
+        crate::cmd::command("tar.exe")
+            .args(["-tvzf"])
+            .arg(archive)
+            .owned_output()
+            .map_err(|error| {
+                EngineError::InstallFailed(format!(
+                    "provider canvas archive type listing failed to start: {error}"
+                ))
+            })?,
+        "provider canvas archive type listing",
+    )?;
+    let verbose_listing = String::from_utf8_lossy(&verbose.stdout);
+    let type_count = verbose_listing
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| line.as_bytes().first().copied().unwrap_or_default())
+        .try_fold(0_usize, |count, kind| {
+            if matches!(kind, b'-' | b'd') {
+                Ok(count + 1)
+            } else {
+                Err(EngineError::InstallFailed(format!(
+                    "provider canvas archive contains a non-file/non-directory member type: {}",
+                    kind as char
+                )))
+            }
+        })?;
+    if type_count != member_count {
+        return Err(EngineError::InstallFailed(
+            "provider canvas archive member/type listings disagree".to_string(),
+        ));
+    }
+
+    require_success(
+        crate::cmd::command("tar.exe")
+            .args(["-xzf"])
+            .arg(archive)
+            .arg("-C")
+            .arg(&canvas_dir)
+            .owned_output()
+            .map_err(|error| {
+                EngineError::InstallFailed(format!(
+                    "provider canvas prebuilt extraction failed to start: {error}"
+                ))
+            })?,
+        "provider canvas prebuilt extraction",
+    )?;
+    if !canvas_dir.join("build").is_dir() {
+        return Err(EngineError::InstallFailed(
+            "provider canvas prebuilt archive did not materialize node_modules/canvas/build"
+                .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn remove_provider_build_only_artifacts(server_dir: &Path) -> Result<()> {
@@ -3822,7 +4533,7 @@ fn verify_published_directory_lineage(
     path: &Path,
     expected_directory_identity: &str,
     expected_tree_sha256: &str,
-    tree_hash: fn(&Path) -> Option<String>,
+    tree_hash: fn(&Path) -> Result<String>,
     label: &str,
 ) -> Result<()> {
     if expected_directory_identity.is_empty() || expected_tree_sha256.is_empty() {
@@ -3836,9 +4547,9 @@ fn verify_published_directory_lineage(
             "{label} published directory is a different filesystem object than the sealed staging directory"
         )));
     }
-    let actual_tree = tree_hash(path).ok_or_else(|| {
+    let actual_tree = tree_hash(path).map_err(|error| {
         EngineError::InstallFailed(format!(
-            "{label} complete published tree could not be authenticated"
+            "{label} complete published tree could not be authenticated: {error}"
         ))
     })?;
     if !actual_tree.eq_ignore_ascii_case(expected_tree_sha256) {
@@ -4189,6 +4900,7 @@ where
 
 #[cfg(windows)]
 pub fn install_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProviderInstallStatus> {
+    reject_managed_runtime_mutation(paths, "YouTube provider download/install")?;
     let _lifecycle_guard = youtube_po_provider_lifecycle_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -4366,26 +5078,6 @@ pub fn install_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProvider
             actual: lock_hash,
         });
     }
-    let audit = require_success(
-        run_provider_npm(
-            &node_stage,
-            &server_stage,
-            &["audit", "--omit=dev", "--json"],
-        )?,
-        "provider production dependency audit",
-    )?;
-    let audit_json: serde_json::Value = serde_json::from_slice(&audit.stdout).map_err(|error| {
-        EngineError::InstallFailed(format!("provider audit returned invalid JSON: {error}"))
-    })?;
-    let vulnerability_total = audit_json
-        .pointer("/metadata/vulnerabilities/total")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(u64::MAX);
-    if vulnerability_total != 0 {
-        return Err(EngineError::InstallFailed(format!(
-            "provider production audit reported {vulnerability_total} vulnerabilities"
-        )));
-    }
     require_success(
         run_provider_npm(&node_stage, &server_stage, &provider_npm_ci_args())?,
         "provider reproducible npm install",
@@ -4396,28 +5088,31 @@ pub fn install_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProvider
                 .to_string(),
         ));
     }
-    require_success(
-        run_provider_npm(
-            &node_stage,
-            &server_stage,
-            &["rebuild", "canvas", "--ignore-scripts=false"],
-        )?,
-        "reviewed canvas lifecycle build",
+    let canvas_prebuilt = stage_root.join("canvas_prebuilt.tar.gz");
+    download_verified_file(
+        &provider_pin.canvas_prebuilt_url,
+        &canvas_prebuilt,
+        provider_pin.canvas_prebuilt_file_bytes,
+        &provider_pin.canvas_prebuilt_sha256_hex,
+        "provider canvas prebuilt",
     )?;
+    install_provider_canvas_prebuilt(&canvas_prebuilt, &server_stage)?;
     require_success(
-        crate::cmd::command(
-            server_stage
-                .join("node_modules")
-                .join(".bin")
-                .join("tsc.cmd"),
-        )
-        .current_dir(&server_stage)
-        .owned_output()
-        .map_err(|error| {
-            EngineError::InstallFailed(format!(
-                "provider TypeScript compiler failed to start: {error}"
-            ))
-        })?,
+        crate::cmd::command(node_stage.join("node.exe"))
+            .arg(
+                server_stage
+                    .join("node_modules")
+                    .join("typescript")
+                    .join("bin")
+                    .join("tsc"),
+            )
+            .current_dir(&server_stage)
+            .owned_output()
+            .map_err(|error| {
+                EngineError::InstallFailed(format!(
+                    "provider TypeScript compiler failed to start: {error}"
+                ))
+            })?,
         "provider TypeScript build",
     )?;
     require_success(
@@ -4439,29 +5134,6 @@ pub fn install_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProvider
             expected: provider_pin.derived_lock_sha256_hex.clone(),
             actual: restored_lock_hash,
         });
-    }
-    let installed_audit = require_success(
-        run_provider_npm(
-            &node_stage,
-            &server_stage,
-            &["audit", "--omit=dev", "--json"],
-        )?,
-        "installed provider production dependency audit",
-    )?;
-    let installed_audit_json: serde_json::Value = serde_json::from_slice(&installed_audit.stdout)
-        .map_err(|error| {
-        EngineError::InstallFailed(format!(
-            "installed provider audit returned invalid JSON: {error}"
-        ))
-    })?;
-    let installed_vulnerability_total = installed_audit_json
-        .pointer("/metadata/vulnerabilities/total")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or(u64::MAX);
-    if installed_vulnerability_total != 0 {
-        return Err(EngineError::InstallFailed(format!(
-            "installed provider production audit reported {installed_vulnerability_total} vulnerabilities"
-        )));
     }
     // npm's cache indexes/logs and TypeScript's incremental-build index contain run-specific
     // timestamps, staging paths, and ambient parent-workspace declarations. They are build inputs,
@@ -4531,16 +5203,16 @@ pub fn install_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProvider
     let node_directory_identity = provider_directory_identity(&node_stage)?;
     let provider_directory_identity = provider_directory_identity(&provider_stage)?;
     let node_tree_sha256 =
-        canonical_provider_node_tree_sha256_hex(&node_stage).ok_or_else(|| {
-            EngineError::InstallFailed(
-                "complete pinned-derived Node distribution tree could not be sealed".to_string(),
-            )
+        canonical_provider_node_tree_sha256_hex(&node_stage).map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "complete pinned-derived Node distribution tree could not be sealed: {error}"
+            ))
         })?;
     let provider_tree_sha256 = canonical_provider_application_tree_sha256_hex(&provider_stage)
-        .ok_or_else(|| {
-            EngineError::InstallFailed(
-                "complete pinned-derived provider application tree could not be sealed".to_string(),
-            )
+        .map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "complete pinned-derived provider application tree could not be sealed: {error}"
+            ))
         })?;
     seal_provider_install_lineage(
         paths,
@@ -4880,6 +5552,15 @@ fn provider_install_identity(status: &YoutubePoProviderInstallStatus) -> String 
     )
 }
 
+/// The launch reader must not observe the temporary attestation gap during another
+/// consumer's full-byte verification. Verification failures remain fail-closed.
+pub fn youtube_po_provider_execution_status(paths: &AppPaths) -> YoutubePoProviderInstallStatus {
+    let _guard = youtube_po_provider_lifecycle_lock()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    youtube_po_provider_install_status(paths)
+}
+
 pub fn youtube_po_provider_runtime_status(paths: &AppPaths) -> YoutubePoProviderRuntimeStatus {
     let installed = youtube_po_provider_install_status(paths);
     let identity = provider_install_identity(&installed);
@@ -4895,9 +5576,9 @@ pub fn youtube_po_provider_runtime_status(paths: &AppPaths) -> YoutubePoProvider
         let healthy = managed.server_dir == paths.youtube_po_provider_server_dir()
             && health_version.as_deref() == Some(managed.provider_version.as_str())
             && managed.install_identity == identity;
-        clear = !running
-            || managed.server_dir != paths.youtube_po_provider_server_dir()
-            || managed.install_identity != identity;
+        // Passive polling must not kill a living provider during the temporary
+        // attestation gap. The serialized execution gate owns tamper teardown.
+        clear = !running;
         YoutubePoProviderRuntimeStatus {
             installed: installed.installed,
             running,
@@ -5156,6 +5837,585 @@ fn locate_pack_lockfile(pack_name: &str) -> Option<&'static str> {
     python_lockfile::bundled_lockfile_for_pack(pack_name)
 }
 
+struct DiarizationWheelWorkspace {
+    path: PathBuf,
+}
+
+impl DiarizationWheelWorkspace {
+    fn create(parent: &Path) -> Result<Self> {
+        static NONCE: AtomicU64 = AtomicU64::new(0);
+        let sequence = NONCE.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!(
+            ".diarization-wheelhouse-{}-{sequence}",
+            std::process::id()
+        ));
+        std::fs::create_dir(&path).map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "failed to create diarization wheel workspace {}: {error}",
+                path.display()
+            ))
+        })?;
+        Ok(Self { path })
+    }
+}
+
+impl Drop for DiarizationWheelWorkspace {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn is_safe_component_filename(filename: &str) -> bool {
+    let path = Path::new(filename);
+    matches!(
+        path.components().collect::<Vec<_>>().as_slice(),
+        [std::path::Component::Normal(_)]
+    ) && path.file_name().and_then(|value| value.to_str()) == Some(filename)
+}
+
+fn sha256_contract(parts: &[&str]) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    for part in parts {
+        hasher.update(part.as_bytes());
+        hasher.update([0]);
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn diarization_source_contract_sha256(
+    source_build: &crate::python_lockfile::LockedSourceBuild,
+    source: &crate::python_lockfile::LockedSourcePackage,
+    package: &crate::python_lockfile::LockedPackage,
+) -> String {
+    let backend = &source_build.build_backend;
+    sha256_contract(&[
+        "voxvulgi.diarization-source-wheel.v1",
+        &source_build.python_tag,
+        &source_build.platform_tag,
+        &backend.name,
+        &backend.version,
+        &backend.filename,
+        &backend.url,
+        &backend.file_bytes.to_string(),
+        &backend.sha256,
+        &source.name,
+        &package.version,
+        &source.source_filename,
+        package.url.as_deref().unwrap_or(""),
+        &source.source_file_bytes.to_string(),
+        package.sha256.as_deref().unwrap_or(""),
+        &source.expected_wheel_filename,
+    ])
+}
+
+fn cached_diarization_source_wheel(
+    cache_root: &Path,
+    contract_sha256: &str,
+    expected_wheel_filename: &str,
+) -> Result<Option<(PathBuf, u64, String)>> {
+    let contract_dir = cache_root
+        .join("derived-wheels")
+        .join("diarization")
+        .join(contract_sha256);
+    let contract_metadata = match std::fs::symlink_metadata(&contract_dir) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    if !contract_metadata.file_type().is_dir() || contract_metadata.file_type().is_symlink() {
+        return Err(EngineError::InstallFailed(format!(
+            "diarization derived-wheel cache contract path is not a plain directory: {}",
+            contract_dir.display()
+        )));
+    }
+
+    let mut candidates = Vec::new();
+    for entry in std::fs::read_dir(&contract_dir)? {
+        let entry = entry?;
+        let output_sha256 = entry.file_name().to_string_lossy().to_ascii_lowercase();
+        if output_sha256.len() != 64
+            || !output_sha256
+                .chars()
+                .all(|character| character.is_ascii_hexdigit())
+        {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+            continue;
+        }
+        let wheel = entry.path().join(expected_wheel_filename);
+        let wheel_metadata = match std::fs::symlink_metadata(&wheel) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if wheel_metadata.file_type().is_file()
+            && !wheel_metadata.file_type().is_symlink()
+            && exact_regular_file_matches(&wheel, wheel_metadata.len(), &output_sha256)
+        {
+            candidates.push((wheel, wheel_metadata.len(), output_sha256));
+        }
+    }
+    candidates.sort_by(|left, right| left.2.cmp(&right.2));
+    Ok(candidates.into_iter().next())
+}
+
+fn promote_diarization_source_wheel(
+    cache_root: &Path,
+    contract_sha256: &str,
+    built_wheel: &Path,
+    expected_wheel_filename: &str,
+    output_bytes: u64,
+    output_sha256: &str,
+) -> Result<(PathBuf, u64, String)> {
+    let metadata = std::fs::symlink_metadata(built_wheel)?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() != output_bytes
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "diarization source build did not produce a plain wheel: {}",
+            built_wheel.display()
+        )));
+    }
+    let output_sha256 = output_sha256.to_ascii_lowercase();
+    let cache_path = cache_root
+        .join("derived-wheels")
+        .join("diarization")
+        .join(contract_sha256)
+        .join(&output_sha256)
+        .join(expected_wheel_filename);
+    if exact_regular_file_matches(&cache_path, output_bytes, &output_sha256) {
+        return Ok((cache_path, output_bytes, output_sha256));
+    }
+    let parent = cache_path.parent().ok_or_else(|| {
+        EngineError::InstallFailed("diarization derived-wheel cache path has no parent".to_string())
+    })?;
+    std::fs::create_dir_all(parent)?;
+    let temporary = unique_download_temp_path(&cache_path);
+    if std::fs::hard_link(built_wheel, &temporary).is_err() {
+        std::fs::copy(built_wheel, &temporary)?;
+    }
+    if !exact_regular_file_matches(&temporary, output_bytes, &output_sha256) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(EngineError::InstallFailed(
+            "generated diarization wheel changed before immutable-cache promotion".to_string(),
+        ));
+    }
+    if let Err(promote_error) = std::fs::rename(&temporary, &cache_path) {
+        let _ = std::fs::remove_file(&temporary);
+        if !exact_regular_file_matches(&cache_path, output_bytes, &output_sha256) {
+            return Err(EngineError::InstallFailed(format!(
+                "diarization derived-wheel immutable-cache promotion failed: {promote_error}"
+            )));
+        }
+    }
+    if !exact_regular_file_matches(&cache_path, output_bytes, &output_sha256) {
+        return Err(EngineError::InstallFailed(
+            "diarization derived wheel failed verification after immutable-cache promotion"
+                .to_string(),
+        ));
+    }
+    Ok((cache_path, output_bytes, output_sha256))
+}
+
+fn run_isolated_pip_checked(
+    paths: &AppPaths,
+    python: &Path,
+    pip_args: &[String],
+    error_prefix: &str,
+) -> Result<()> {
+    let mut command = crate::cmd::command(python);
+    command.args([
+        "-I",
+        "-m",
+        "pip",
+        "--isolated",
+        "--disable-pip-version-check",
+        "--no-input",
+    ]);
+    command.args(pip_args);
+    for (name, _) in std::env::vars_os() {
+        if name
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("PIP_")
+        {
+            command.env_remove(name);
+        }
+    }
+    command.env("PIP_CONFIG_FILE", "NUL");
+    command.env("PYTHONNOUSERSITE", "1");
+    command.env(
+        "PIP_CACHE_DIR",
+        paths.cache_dir().join("pip").to_string_lossy().to_string(),
+    );
+    let output = crate::cmd::run_owned_output(
+        &mut command,
+        std::time::Duration::from_secs(PYTHON_LOCKFILE_INSTALL_TIMEOUT_SECS),
+        crate::jobs::external_command_cancel_requested,
+    )
+    .map_err(|error| EngineError::InstallFailed(format!("{error_prefix}: {error}")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    Err(EngineError::InstallFailed(format!(
+        "{error_prefix} (code={:?}): {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    )))
+}
+
+fn validate_diarization_source_build_contract(
+    lockfile: &PythonLockfile,
+    source_build: &crate::python_lockfile::LockedSourceBuild,
+) -> Result<()> {
+    if source_build.python_tag != "cp311" || source_build.platform_tag != "win_amd64" {
+        return Err(EngineError::InstallFailed(
+            "diarization source-build target must remain cp311/win_amd64".to_string(),
+        ));
+    }
+    let expected_sources = [
+        (
+            "typing",
+            "typing-3.7.4.3.tar.gz",
+            78_592_u64,
+            "typing-3.7.4.3-py3-none-any.whl",
+        ),
+        (
+            "webrtcvad",
+            "webrtcvad-2.0.10.tar.gz",
+            66_156_u64,
+            "webrtcvad-2.0.10-cp311-cp311-win_amd64.whl",
+        ),
+    ];
+    if source_build.packages.len() != expected_sources.len() || lockfile.packages.len() != 37 {
+        return Err(EngineError::InstallFailed(
+            "diarization lock must contain exactly two source builds and 35 binary packages"
+                .to_string(),
+        ));
+    }
+    for (name, source_filename, source_bytes, wheel_filename) in expected_sources {
+        let source = source_build
+            .packages
+            .iter()
+            .find(|source| normalize_python_package_name(&source.name) == name)
+            .ok_or_else(|| {
+                EngineError::InstallFailed(format!(
+                    "diarization source-build contract is missing {name}"
+                ))
+            })?;
+        if source.source_filename != source_filename
+            || source.source_file_bytes != source_bytes
+            || source.expected_wheel_filename != wheel_filename
+            || !is_safe_component_filename(&source.source_filename)
+            || !is_safe_component_filename(&source.expected_wheel_filename)
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "diarization source-build contract drifted for {name}"
+            )));
+        }
+        let package = lockfile
+            .packages
+            .iter()
+            .find(|package| normalize_python_package_name(&package.name) == name)
+            .ok_or_else(|| {
+                EngineError::InstallFailed(format!("diarization lock is missing {name}"))
+            })?;
+        if !package
+            .url
+            .as_deref()
+            .is_some_and(|url| url.ends_with(&source.source_filename))
+            || package.sha256.as_deref().map(str::len) != Some(64)
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "diarization source archive pin is incomplete for {name}"
+            )));
+        }
+    }
+    let backend = &source_build.build_backend;
+    if normalize_python_package_name(&backend.name) != "setuptools"
+        || backend.version != "82.0.1"
+        || backend.filename != "setuptools-82.0.1-py3-none-any.whl"
+        || backend.file_bytes != 1_006_223
+        || backend.sha256 != "a59e362652f08dcd477c78bb6e7bd9d80a7995bc73ce773050228a348ce2e5bb"
+        || !is_safe_component_filename(&backend.filename)
+    {
+        return Err(EngineError::InstallFailed(
+            "diarization setuptools build-backend contract drifted".to_string(),
+        ));
+    }
+    let locked_backend = lockfile
+        .packages
+        .iter()
+        .find(|package| normalize_python_package_name(&package.name) == "setuptools")
+        .ok_or_else(|| {
+            EngineError::InstallFailed("diarization lock is missing setuptools".to_string())
+        })?;
+    if locked_backend.version != backend.version
+        || locked_backend.url.as_deref() != Some(backend.url.as_str())
+        || locked_backend.sha256.as_deref() != Some(backend.sha256.as_str())
+    {
+        return Err(EngineError::InstallFailed(
+            "diarization setuptools build backend does not match its locked package".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn install_diarization_from_lockfile(
+    paths: &AppPaths,
+    python: &Path,
+    lockfile: &PythonLockfile,
+    install_mode_flag: &str,
+    req_dir: &Path,
+    error_prefix: &str,
+) -> Result<()> {
+    let source_build = lockfile.source_build.as_ref().ok_or_else(|| {
+        EngineError::InstallFailed(
+            "diarization lock is missing its exact source-build contract".to_string(),
+        )
+    })?;
+    validate_diarization_source_build_contract(lockfile, source_build)?;
+    let workspace = DiarizationWheelWorkspace::create(req_dir)?;
+    let exact_inputs = workspace.path.join("exact_inputs");
+    let acquired_wheels = workspace.path.join("acquired_wheels");
+    let built_wheels = workspace.path.join("built_wheels");
+    std::fs::create_dir(&exact_inputs)?;
+    std::fs::create_dir(&acquired_wheels)?;
+    std::fs::create_dir(&built_wheels)?;
+
+    let backend = &source_build.build_backend;
+    let backend_path = exact_inputs.join(&backend.filename);
+    download_verified_file(
+        &backend.url,
+        &backend_path,
+        backend.file_bytes,
+        &backend.sha256,
+        "diarization setuptools build backend",
+    )?;
+
+    let mut source_archives = std::collections::BTreeMap::new();
+    for source in &source_build.packages {
+        let normalized_name = normalize_python_package_name(&source.name);
+        let package = lockfile
+            .packages
+            .iter()
+            .find(|package| normalize_python_package_name(&package.name) == normalized_name)
+            .ok_or_else(|| {
+                EngineError::InstallFailed(format!(
+                    "diarization source package disappeared from lock: {}",
+                    source.name
+                ))
+            })?;
+        let source_path = exact_inputs.join(&source.source_filename);
+        download_verified_file(
+            package.url.as_deref().unwrap_or(""),
+            &source_path,
+            source.source_file_bytes,
+            package.sha256.as_deref().unwrap_or(""),
+            &format!("diarization {} source archive", source.name),
+        )?;
+        source_archives.insert(normalized_name, source_path);
+    }
+
+    run_isolated_pip_checked(
+        paths,
+        python,
+        &[
+            "install".to_string(),
+            "--no-index".to_string(),
+            "--no-deps".to_string(),
+            install_mode_flag.to_string(),
+            backend_path.to_string_lossy().to_string(),
+        ],
+        &format!("{error_prefix}: exact local setuptools install failed"),
+    )?;
+
+    let cache_root = std::env::var_os("VOXVULGI_OFFLINE_COMPONENT_CACHE_ROOT").map(PathBuf::from);
+    let mut local_source_wheels = Vec::new();
+    for source in &source_build.packages {
+        let normalized_name = normalize_python_package_name(&source.name);
+        let package = lockfile
+            .packages
+            .iter()
+            .find(|package| normalize_python_package_name(&package.name) == normalized_name)
+            .ok_or_else(|| {
+                EngineError::InstallFailed(format!(
+                    "diarization source package disappeared from lock: {}",
+                    source.name
+                ))
+            })?;
+        let contract_sha256 = diarization_source_contract_sha256(source_build, source, package);
+        let local_wheel = built_wheels.join(&source.expected_wheel_filename);
+        if let Some(cache_root) = cache_root.as_deref() {
+            if let Some((cached, bytes, sha256)) = cached_diarization_source_wheel(
+                cache_root,
+                &contract_sha256,
+                &source.expected_wheel_filename,
+            )? {
+                materialize_verified_component(
+                    &cached,
+                    &local_wheel,
+                    bytes,
+                    &sha256,
+                    &format!("cached diarization {} wheel", source.name),
+                )?;
+                local_source_wheels.push(local_wheel);
+                continue;
+            }
+        }
+
+        let source_archive = source_archives.get(&normalized_name).ok_or_else(|| {
+            EngineError::InstallFailed(format!(
+                "diarization source archive was not acquired for {}",
+                source.name
+            ))
+        })?;
+        let source_output = workspace.path.join(format!("build_{normalized_name}"));
+        std::fs::create_dir(&source_output)?;
+        run_isolated_pip_checked(
+            paths,
+            python,
+            &[
+                "wheel".to_string(),
+                "--no-index".to_string(),
+                "--no-deps".to_string(),
+                "--no-build-isolation".to_string(),
+                "--wheel-dir".to_string(),
+                source_output.to_string_lossy().to_string(),
+                source_archive.to_string_lossy().to_string(),
+            ],
+            &format!("{error_prefix}: offline {} wheel build failed", source.name),
+        )?;
+        let generated = source_output.join(&source.expected_wheel_filename);
+        let generated_metadata = std::fs::symlink_metadata(&generated).map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "{error_prefix}: expected {} wheel was not produced at {}: {error}",
+                source.name,
+                generated.display()
+            ))
+        })?;
+        if !generated_metadata.file_type().is_file() || generated_metadata.file_type().is_symlink()
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "{error_prefix}: generated {} wheel is not a plain file",
+                source.name
+            )));
+        }
+        let generated_sha256 = file_sha256_hex(&generated).ok_or_else(|| {
+            EngineError::InstallFailed(format!(
+                "{error_prefix}: failed to hash generated {} wheel",
+                source.name
+            ))
+        })?;
+        let (install_source, output_bytes, output_sha256) =
+            if let Some(cache_root) = cache_root.as_deref() {
+                promote_diarization_source_wheel(
+                    cache_root,
+                    &contract_sha256,
+                    &generated,
+                    &source.expected_wheel_filename,
+                    generated_metadata.len(),
+                    &generated_sha256,
+                )?
+            } else {
+                (generated, generated_metadata.len(), generated_sha256)
+            };
+        materialize_verified_component(
+            &install_source,
+            &local_wheel,
+            output_bytes,
+            &output_sha256,
+            &format!("generated diarization {} wheel", source.name),
+        )?;
+        local_source_wheels.push(local_wheel);
+    }
+
+    let source_names = source_build
+        .packages
+        .iter()
+        .map(|source| normalize_python_package_name(&source.name))
+        .collect::<std::collections::BTreeSet<_>>();
+    let acquisition_requirements = lockfile
+        .render_hashed_requirements_matching(true, |package| {
+            let name = normalize_python_package_name(&package.name);
+            !source_names.contains(&name) && name != "setuptools"
+        })
+        .map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "{error_prefix}: failed to render diarization wheel acquisition lock: {error}"
+            ))
+        })?;
+    let acquisition_requirements_path = workspace.path.join("acquire.requirements.txt");
+    std::fs::write(&acquisition_requirements_path, acquisition_requirements)?;
+    run_isolated_pip_checked(
+        paths,
+        python,
+        &[
+            "download".to_string(),
+            "--only-binary=:all:".to_string(),
+            "--no-deps".to_string(),
+            "--require-hashes".to_string(),
+            "--dest".to_string(),
+            acquired_wheels.to_string_lossy().to_string(),
+            "-r".to_string(),
+            acquisition_requirements_path.to_string_lossy().to_string(),
+        ],
+        &format!("{error_prefix}: exact binary wheel acquisition failed"),
+    )?;
+
+    let binary_requirements = lockfile
+        .render_hashed_requirements_matching(false, |package| {
+            !source_names.contains(&normalize_python_package_name(&package.name))
+        })
+        .map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "{error_prefix}: failed to render diarization binary install lock: {error}"
+            ))
+        })?;
+    let binary_requirements_path = workspace.path.join("install.requirements.txt");
+    std::fs::write(&binary_requirements_path, binary_requirements)?;
+    run_isolated_pip_checked(
+        paths,
+        python,
+        &[
+            "install".to_string(),
+            "--no-index".to_string(),
+            "--find-links".to_string(),
+            acquired_wheels.to_string_lossy().to_string(),
+            "--find-links".to_string(),
+            exact_inputs.to_string_lossy().to_string(),
+            "--only-binary=:all:".to_string(),
+            "--require-hashes".to_string(),
+            "--no-deps".to_string(),
+            install_mode_flag.to_string(),
+            "-r".to_string(),
+            binary_requirements_path.to_string_lossy().to_string(),
+        ],
+        &format!("{error_prefix}: offline binary wheel install failed"),
+    )?;
+
+    let mut local_wheel_install = vec![
+        "install".to_string(),
+        "--no-index".to_string(),
+        "--no-deps".to_string(),
+        install_mode_flag.to_string(),
+    ];
+    local_wheel_install.extend(
+        local_source_wheels
+            .iter()
+            .map(|wheel| wheel.to_string_lossy().to_string()),
+    );
+    run_isolated_pip_checked(
+        paths,
+        python,
+        &local_wheel_install,
+        &format!("{error_prefix}: cached source-wheel install failed"),
+    )
+}
+
 /// WP-0232: install a Python pack from its hashed lockfile.
 /// WP-0234: also journals install state and promotes `--upgrade` to `--force-reinstall`
 /// when the prior install attempt is recorded as crashed (in_progress without finish) or
@@ -5178,11 +6438,27 @@ fn install_pack_from_lockfile(
             "{error_prefix}: failed to parse bundled lockfile for {pack_name}: {e}"
         ))
     })?;
-    let rendered = lockfile.render_hashed_requirements().map_err(|e| {
+    let canonical_rendered = lockfile.render_hashed_requirements().map_err(|e| {
         EngineError::InstallFailed(format!(
             "{error_prefix}: failed to render lockfile for {pack_name}: {e}"
         ))
     })?;
+    let rendered = if pack_name == "tts_voice_preserving_local_v1" {
+        lockfile
+            .render_hashed_requirements_matching(false, |package| {
+                !matches!(
+                    normalize_python_package_name(&package.name).as_str(),
+                    "eng-to-ipa" | "jieba"
+                )
+            })
+            .map_err(|e| {
+                EngineError::InstallFailed(format!(
+                    "{error_prefix}: failed to render build-free lockfile subset for {pack_name}: {e}"
+                ))
+            })?
+    } else {
+        canonical_rendered.clone()
+    };
 
     // Write the rendered requirements to a temp file inside the venv tooling dir so the
     // path is short and stable; pip on Windows occasionally barfs on TEMP paths with
@@ -5203,7 +6479,7 @@ fn install_pack_from_lockfile(
     })?;
 
     // WP-0234: decide upgrade mode based on prior install state.
-    let lockfile_sha = pack_install_state::lockfile_sha_of(&rendered);
+    let lockfile_sha = pack_install_state::lockfile_sha_of(&canonical_rendered);
     let prior = pack_install_state::load(paths, pack_name);
     let version_drift_before_install =
         !lockfile_source_pin_mismatches(python, pack_name).is_empty();
@@ -5218,24 +6494,43 @@ fn install_pack_from_lockfile(
     }
     let _ = pack_install_state::mark_started(paths, pack_name, &lockfile_sha);
 
-    let req_path_str = req_path.to_string_lossy().to_string();
-    let args: [&str; 8] = [
-        "-m",
-        "pip",
-        "install",
-        "--require-hashes",
-        "--no-deps",
-        install_mode_flag,
-        "-r",
-        req_path_str.as_str(),
-    ];
-    let mut result = run_python_checked_with_timeout(
-        paths,
-        python,
-        &args,
-        &format!("{error_prefix}: pip install --require-hashes failed for {pack_name}"),
-        PYTHON_LOCKFILE_INSTALL_TIMEOUT_SECS,
-    );
+    let mut result = if cfg!(windows) && pack_name == "diarization" {
+        install_diarization_from_lockfile(
+            paths,
+            python,
+            &lockfile,
+            install_mode_flag,
+            &req_dir,
+            error_prefix,
+        )
+    } else {
+        let req_path_str = req_path.to_string_lossy().to_string();
+        let args: [&str; 8] = [
+            "-m",
+            "pip",
+            "install",
+            "--require-hashes",
+            "--no-deps",
+            install_mode_flag,
+            "-r",
+            req_path_str.as_str(),
+        ];
+        run_python_checked_with_timeout(
+            paths,
+            python,
+            &args,
+            &format!("{error_prefix}: pip install --require-hashes failed for {pack_name}"),
+            PYTHON_LOCKFILE_INSTALL_TIMEOUT_SECS,
+        )
+    };
+    if result.is_ok() && pack_name == "tts_voice_preserving_local_v1" {
+        result = install_governed_voice_preserving_wheels(
+            paths,
+            python,
+            install_mode_flag,
+            error_prefix,
+        );
+    }
     if result.is_ok() {
         let mismatches = lockfile_source_pin_mismatches_with_retries(python, pack_name);
         if let Some(first) = mismatches.first() {
@@ -5257,6 +6552,94 @@ fn install_pack_from_lockfile(
         }
     }
     result
+}
+
+fn materialize_embedded_governed_wheel(
+    paths: &AppPaths,
+    filename: &str,
+    bytes: &[u8],
+    expected_bytes: u64,
+    expected_sha256: &str,
+) -> Result<PathBuf> {
+    if bytes.len() as u64 != expected_bytes || cosyvoice_sha256_bytes(bytes) != expected_sha256 {
+        return Err(EngineError::InstallFailed(format!(
+            "embedded governed wheel identity drifted: {filename}"
+        )));
+    }
+
+    let wheel_dir = paths.cache_dir().join("verified_wheels");
+    std::fs::create_dir_all(&wheel_dir)?;
+    let wheel_path = wheel_dir.join(filename);
+    if exact_regular_file_matches(&wheel_path, expected_bytes, expected_sha256) {
+        return Ok(wheel_path);
+    }
+
+    let temporary = unique_download_temp_path(&wheel_path);
+    std::fs::write(&temporary, bytes)?;
+    if !exact_regular_file_matches(&temporary, expected_bytes, expected_sha256) {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(EngineError::InstallFailed(format!(
+            "embedded governed wheel changed while materializing: {filename}"
+        )));
+    }
+    if wheel_path.exists() {
+        std::fs::remove_file(&wheel_path)?;
+    }
+    std::fs::rename(&temporary, &wheel_path)?;
+    if !exact_regular_file_matches(&wheel_path, expected_bytes, expected_sha256) {
+        return Err(EngineError::InstallFailed(format!(
+            "materialized governed wheel failed exact verification: {filename}"
+        )));
+    }
+    Ok(wheel_path)
+}
+
+fn install_governed_voice_preserving_wheels(
+    paths: &AppPaths,
+    python: &Path,
+    install_mode_flag: &str,
+    error_prefix: &str,
+) -> Result<()> {
+    let wheels = [
+        materialize_embedded_governed_wheel(
+            paths,
+            "MyShell_OpenVoice-0.0.0-py3-none-any.whl",
+            GOVERNED_OPENVOICE_WHEEL,
+            GOVERNED_OPENVOICE_WHEEL_BYTES,
+            GOVERNED_OPENVOICE_WHEEL_SHA256,
+        )?,
+        materialize_embedded_governed_wheel(
+            paths,
+            "eng_to_ipa-0.0.2-py3-none-any.whl",
+            GOVERNED_ENG_TO_IPA_WHEEL,
+            GOVERNED_ENG_TO_IPA_WHEEL_BYTES,
+            GOVERNED_ENG_TO_IPA_WHEEL_SHA256,
+        )?,
+        materialize_embedded_governed_wheel(
+            paths,
+            "jieba-0.42.1-py3-none-any.whl",
+            GOVERNED_JIEBA_WHEEL,
+            GOVERNED_JIEBA_WHEEL_BYTES,
+            GOVERNED_JIEBA_WHEEL_SHA256,
+        )?,
+    ];
+    let mut args = vec![
+        "install".to_string(),
+        "--no-index".to_string(),
+        "--no-deps".to_string(),
+        install_mode_flag.to_string(),
+    ];
+    args.extend(
+        wheels
+            .iter()
+            .map(|wheel| wheel.to_string_lossy().to_string()),
+    );
+    run_isolated_pip_checked(
+        paths,
+        python,
+        &args,
+        &format!("{error_prefix}: governed local wheel install failed"),
+    )
 }
 
 fn current_lockfile_sha(pack_name: &str) -> Option<String> {
@@ -5621,7 +7004,9 @@ fn tool_version_first_line_with_arg(
     program: impl AsRef<std::ffi::OsStr>,
     arg: &str,
 ) -> Option<String> {
-    let output = crate::cmd::command(program).arg(arg).owned_output().ok()?;
+    let mut cmd = crate::cmd::command(program);
+    cmd.arg(arg);
+    let output = probe_version_output(&mut cmd).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -5686,6 +7071,23 @@ pub fn phase2_packs_setup_estimate() -> Phase2PacksSetupEstimate {
 }
 
 pub fn python_toolchain_status(paths: &AppPaths) -> PythonToolchainStatus {
+    python_toolchain_status_impl(paths, false)
+}
+
+/// Bypasses and refreshes the cached status (Diagnostics "Refresh" button).
+pub fn python_toolchain_status_forced(paths: &AppPaths) -> PythonToolchainStatus {
+    python_toolchain_status_impl(paths, true)
+}
+
+fn python_toolchain_status_impl(paths: &AppPaths, force: bool) -> PythonToolchainStatus {
+    let venv_python = venv_python_path(&paths.python_venv_dir());
+    let key = tool_probe_cache_key("python_toolchain_status", &[&venv_python]);
+    if !force {
+        if let Some(CachedProbeValue::PythonToolchain(cached)) = tool_probe_cache_get(&key) {
+            return cached;
+        }
+    }
+
     let resolved = resolve_base_python(paths);
     let base_available = resolved.is_some();
     let (base_program, base_args, base_version) = match &resolved {
@@ -5699,13 +7101,12 @@ pub fn python_toolchain_status(paths: &AppPaths) -> PythonToolchainStatus {
 
     let venv_dir = paths.python_venv_dir();
     let venv_exists = venv_dir.exists() && venv_dir.is_dir();
-    let venv_python = venv_python_path(&venv_dir);
     let venv_python_version = python_version(&venv_python, &[]);
     let venv_pip_version = venv_python_version
         .as_ref()
         .and_then(|_| pip_version(&venv_python));
 
-    PythonToolchainStatus {
+    let status = PythonToolchainStatus {
         base_available,
         base_program,
         base_args,
@@ -5715,7 +7116,9 @@ pub fn python_toolchain_status(paths: &AppPaths) -> PythonToolchainStatus {
         venv_python_path: venv_python.to_string_lossy().to_string(),
         venv_python_version,
         venv_pip_version,
-    }
+    };
+    tool_probe_cache_put(key, CachedProbeValue::PythonToolchain(status.clone()));
+    status
 }
 
 pub fn phase2_packs_install_plan() -> Vec<Phase2PackPlanItem> {
@@ -6451,17 +7854,36 @@ fn detect_torch_cuda(paths: &AppPaths) -> std::result::Result<(Option<bool>, Opt
 }
 
 pub fn portable_python_status(paths: &AppPaths) -> PortablePythonStatus {
+    portable_python_status_impl(paths, false)
+}
+
+/// Bypasses and refreshes the cached status (Diagnostics "Refresh" button).
+pub fn portable_python_status_forced(paths: &AppPaths) -> PortablePythonStatus {
+    portable_python_status_impl(paths, true)
+}
+
+fn portable_python_status_impl(paths: &AppPaths, force: bool) -> PortablePythonStatus {
     let exe = paths.python_portable_python_exe();
+    let key = tool_probe_cache_key("portable_python_status", &[&exe]);
+    if !force {
+        if let Some(CachedProbeValue::PortablePython(cached)) = tool_probe_cache_get(&key) {
+            return cached;
+        }
+    }
+
     let version = python_version(&exe, &[]);
-    PortablePythonStatus {
+    let status = PortablePythonStatus {
         installed: version.is_some() && exe.exists(),
         python_path: exe.to_string_lossy().to_string(),
         python_version: version,
         install_dir: paths.python_portable_dir().to_string_lossy().to_string(),
-    }
+    };
+    tool_probe_cache_put(key, CachedProbeValue::PortablePython(status.clone()));
+    status
 }
 
 pub fn install_portable_python(paths: &AppPaths) -> Result<PortablePythonStatus> {
+    reject_managed_runtime_mutation(paths, "portable Python download/install")?;
     let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     #[cfg(not(windows))]
     {
@@ -6550,11 +7972,13 @@ pub fn install_portable_python(paths: &AppPaths) -> Result<PortablePythonStatus>
         )?;
 
         let _ = generate_pack_integrity_manifest(paths);
+        tool_probe_cache_invalidate("portable_python_status");
         Ok(portable_python_status(paths))
     }
 }
 
 pub fn install_python_toolchain(paths: &AppPaths) -> Result<PythonToolchainStatus> {
+    reject_managed_runtime_mutation(paths, "Python environment creation/repair")?;
     let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     paths.ensure_dirs()?;
 
@@ -6602,6 +8026,7 @@ pub fn install_python_toolchain(paths: &AppPaths) -> Result<PythonToolchainStatu
 
     let _ = (venv_version, pip);
     let _ = generate_pack_integrity_manifest(paths);
+    tool_probe_cache_invalidate("python_toolchain_status");
     Ok(python_toolchain_status(paths))
 }
 
@@ -6615,7 +8040,7 @@ pub fn python_venv_python_path(paths: &AppPaths) -> Result<std::path::PathBuf> {
     Ok(venv_python)
 }
 
-/// Interpreter for the isolated CosyVoice venv (torch 2.3.1 stack), kept separate
+/// Interpreter for the isolated CosyVoice venv, kept separate
 /// from the main venv because their dependency pins conflict.
 pub fn cosyvoice_venv_python_path(paths: &AppPaths) -> Result<std::path::PathBuf> {
     let venv_python = venv_python_path(&paths.python_cosyvoice_venv_dir());
@@ -6635,13 +8060,15 @@ struct ResolvedPython {
 }
 
 fn resolve_base_python(paths: &AppPaths) -> Option<ResolvedPython> {
-    if let Ok(Some(override_path)) = paths.python_exe_override() {
-        if let Some(version) = python_version(&override_path, &[]) {
-            return Some(ResolvedPython {
-                program: override_path,
-                args: Vec::new(),
-                version,
-            });
+    if !paths.managed_offline() {
+        if let Ok(Some(override_path)) = paths.python_exe_override() {
+            if let Some(version) = python_version(&override_path, &[]) {
+                return Some(ResolvedPython {
+                    program: override_path,
+                    args: Vec::new(),
+                    version,
+                });
+            }
         }
     }
 
@@ -6652,6 +8079,10 @@ fn resolve_base_python(paths: &AppPaths) -> Option<ResolvedPython> {
             args: Vec::new(),
             version,
         });
+    }
+
+    if paths.managed_offline() {
+        return None;
     }
 
     let mut candidates: Vec<(std::path::PathBuf, Vec<String>)> = Vec::new();
@@ -6685,7 +8116,16 @@ fn resolve_base_python(paths: &AppPaths) -> Option<ResolvedPython> {
 
 fn venv_python_path(venv_dir: &std::path::Path) -> std::path::PathBuf {
     if cfg!(windows) {
-        venv_dir.join("Scripts").join("python.exe")
+        let self_contained = venv_dir
+            .file_name()
+            .and_then(|value| value.to_str())
+            .map(|value| value.starts_with("runtime_"))
+            .unwrap_or(false);
+        if self_contained {
+            venv_dir.join("python.exe")
+        } else {
+            venv_dir.join("Scripts").join("python.exe")
+        }
     } else {
         venv_dir.join("bin").join("python")
     }
@@ -6791,7 +8231,8 @@ fn python_version(program: &std::path::Path, base_args: &[String]) -> Option<Str
     for arg in base_args {
         cmd.arg(arg);
     }
-    let output = cmd.arg("--version").owned_output().ok()?;
+    cmd.arg("--version");
+    let output = probe_version_output(&mut cmd).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -6812,10 +8253,9 @@ fn python_version(program: &std::path::Path, base_args: &[String]) -> Option<Str
 }
 
 fn pip_version(venv_python: &std::path::Path) -> Option<String> {
-    let output = crate::cmd::command(venv_python)
-        .args(["-m", "pip", "--version"])
-        .owned_output()
-        .ok()?;
+    let mut cmd = crate::cmd::command(venv_python);
+    cmd.args(["-m", "pip", "--version"]);
+    let output = probe_version_output(&mut cmd).ok()?;
     if !output.status.success() {
         return None;
     }
@@ -6865,6 +8305,7 @@ pub fn spleeter_pack_status(paths: &AppPaths) -> SpleeterPackStatus {
 }
 
 pub fn install_spleeter_pack(paths: &AppPaths) -> Result<SpleeterPackStatus> {
+    reject_managed_runtime_mutation(paths, "Spleeter pack install/repair")?;
     let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     // Ensure venv exists first.
     let _ = install_python_toolchain(paths)?;
@@ -7071,16 +8512,6 @@ print("spleeter_model_download_ok")
                     "Spleeter model download failed",
                 )?;
 
-                // Best-effort warmup.
-                let _ = run_python_checked(
-                    paths,
-                    &venv_python,
-                    &[
-                        "-c",
-                        "from spleeter.separator import Separator; Separator('spleeter:2stems'); print('ok')",
-                    ],
-                    "spleeter warmup failed",
-                );
                 let status = spleeter_pack_status(paths);
                 let _ = generate_pack_integrity_manifest(paths);
                 return Ok(status);
@@ -7151,23 +8582,6 @@ print("spleeter_model_download_ok")
                         prior.push('\n');
                     }
                     prior.push_str(&context);
-                    continue;
-                }
-
-                if let Err(err) = run_python_checked(
-                    paths,
-                    &venv_python,
-                    &[
-                        "-c",
-                        "from spleeter.separator import Separator; Separator('spleeter:2stems'); print('ok')",
-                    ],
-                    "spleeter warmup failed",
-                ) {
-                    let prior = last_error.get_or_insert_with(String::new);
-                    if !prior.is_empty() {
-                        prior.push('\n');
-                    }
-                    prior.push_str(&err.to_string());
                     continue;
                 }
 
@@ -7573,6 +8987,7 @@ pub fn demucs_pack_status(paths: &AppPaths) -> DemucsPackStatus {
 }
 
 pub fn install_demucs_pack(paths: &AppPaths) -> Result<DemucsPackStatus> {
+    reject_managed_runtime_mutation(paths, "Demucs pack install/repair")?;
     let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     // Ensure venv exists first.
     let _ = install_python_toolchain(paths)?;
@@ -7842,6 +9257,7 @@ pub fn diarization_pack_status(paths: &AppPaths) -> DiarizationPackStatus {
 }
 
 pub fn install_diarization_pack(paths: &AppPaths) -> Result<DiarizationPackStatus> {
+    reject_managed_runtime_mutation(paths, "diarization pack install/repair")?;
     let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     // Ensure venv exists first.
     let _ = install_python_toolchain(paths)?;
@@ -7908,8 +9324,6 @@ pub fn install_diarization_pack(paths: &AppPaths) -> Result<DiarizationPackStatu
 
     vendor_patches::patch_webrtcvad_pkg_resources_import(&venv_python)?;
 
-    validate_diarization_runtime(paths, &venv_python)?;
-
     let status = diarization_pack_status(paths);
     let _ = generate_pack_integrity_manifest(paths);
     Ok(status)
@@ -7949,6 +9363,7 @@ pub fn tts_preview_pack_status(paths: &AppPaths) -> TtsPreviewPackStatus {
 }
 
 pub fn install_tts_preview_pack(paths: &AppPaths) -> Result<TtsPreviewPackStatus> {
+    reject_managed_runtime_mutation(paths, "TTS preview pack install/repair")?;
     let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     // Ensure venv exists first.
     let _ = install_python_toolchain(paths)?;
@@ -7983,13 +9398,6 @@ pub fn install_tts_preview_pack(paths: &AppPaths) -> Result<TtsPreviewPackStatus
         )?;
     }
 
-    let _ = run_python_checked(
-        paths,
-        &venv_python,
-        &["-c", "import pyttsx3; pyttsx3.init(); print('ok')"],
-        "pyttsx3 warmup failed",
-    );
-
     let status = tts_preview_pack_status(paths);
     let _ = generate_pack_integrity_manifest(paths);
     Ok(status)
@@ -8003,6 +9411,7 @@ pub struct TtsNeuralLocalV1PackStatus {
     pub package_version: Option<String>,
     pub transformers_version: Option<String>,
     pub huggingface_hub_version: Option<String>,
+    pub spacy_model_version: Option<String>,
     pub expected_lockfile_sha: Option<String>,
     pub installed_lockfile_sha: Option<String>,
     pub version_mismatches: Vec<PythonPackageVersionMismatch>,
@@ -8012,58 +9421,77 @@ fn kokoro_warmup_probe_path(paths: &AppPaths) -> std::path::PathBuf {
     paths.python_models_dir().join("kokoro").join(".warmup_ok")
 }
 
-fn dir_has_file_with_extension(dir: &std::path::Path, ext: &str) -> bool {
-    std::fs::read_dir(dir)
-        .ok()
-        .into_iter()
-        .flatten()
-        .flatten()
-        .any(|entry| {
-            entry
-                .path()
-                .extension()
-                .and_then(|value| value.to_str())
-                .map(|value| value.eq_ignore_ascii_case(ext))
-                .unwrap_or(false)
-        })
-}
-
-/// The voice-preserving dub job loads Kokoro through `KPipeline`, which resolves
-/// `hexgrad/Kokoro-82M` from the Hugging Face cache (`HF_HOME = <cache>/huggingface`)
-/// with `HF_HUB_OFFLINE=1` at job time. A `.warmup_ok` marker file is NOT sufficient
-/// proof that the model is reachable there: an older build warmed Kokoro into the
-/// default *user* cache and left a marker, which made later builds skip
-/// re-provisioning, so the offline job could never find the weights in the
-/// *app-local* cache and failed on the very first synth call. This verifies the
-/// snapshot the offline job actually needs (config + model weights + the default
-/// `af_heart` voice) is present in the app-local cache the job reads, so the gate
-/// cannot be satisfied by a stale marker alone.
 fn kokoro_app_cache_ready(paths: &AppPaths) -> bool {
+    let pin = &pinned_dependency_manifest::manifest()
+        .tts_neural_local_v1
+        .kokoro_model;
     let repo = paths
         .cache_dir()
         .join("huggingface")
         .join("hub")
         .join("models--hexgrad--Kokoro-82M");
-    // huggingface_hub resolves the `main` revision through `refs/main` -> commit sha,
-    // then loads `snapshots/<sha>/<file>`. Mirror that resolution exactly so this gate
-    // matches what the OFFLINE job can actually load: a partial payload hydration that
-    // drops `refs/main` or the snapshot files (the real-world failure shape) must read
-    // as not-ready even if some stray files exist. `is_file()` follows the symlinks the
-    // HF cache uses into `blobs/`, so a dangling snapshot entry (missing blob) also
-    // correctly reads as not ready.
-    let sha = match std::fs::read_to_string(repo.join("refs").join("main")) {
-        Ok(value) => value.trim().to_string(),
-        Err(_) => return false,
-    };
-    if sha.is_empty() {
+    if std::fs::read_to_string(repo.join("refs").join("main"))
+        .map(|value| value.trim() == pin.revision)
+        .unwrap_or(false)
+        == false
+    {
         return false;
     }
-    let snapshot = repo.join("snapshots").join(&sha);
-    let has_config = snapshot.join("config.json").is_file();
-    let has_weights =
-        snapshot.join("kokoro-v1_0.pth").is_file() || dir_has_file_with_extension(&snapshot, "pth");
-    let has_default_voice = snapshot.join("voices").join("af_heart.pt").is_file();
-    has_config && has_weights && has_default_voice
+    let snapshot = repo.join("snapshots").join(&pin.revision);
+    pin.files.iter().all(|file| {
+        exact_regular_file_matches(
+            &snapshot.join(&file.filename),
+            file.file_bytes,
+            &file.sha256_hex,
+        )
+    })
+}
+
+fn provision_pinned_kokoro_assets(paths: &AppPaths) -> Result<()> {
+    let pin = &pinned_dependency_manifest::manifest()
+        .tts_neural_local_v1
+        .kokoro_model;
+    let repo = paths
+        .cache_dir()
+        .join("huggingface")
+        .join("hub")
+        .join("models--hexgrad--Kokoro-82M");
+    let snapshot = repo.join("snapshots").join(&pin.revision);
+    for file in &pin.files {
+        let relative = Path::new(&file.filename);
+        if relative
+            .components()
+            .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "Kokoro pin contains an unsafe file path: {:?}",
+                file.filename
+            )));
+        }
+        let target = snapshot.join(relative);
+        let url = format!(
+            "https://huggingface.co/{}/resolve/{}/{}?download=true",
+            pin.repo_id, pin.revision, file.filename
+        );
+        download_verified_file(
+            &url,
+            &target,
+            file.file_bytes,
+            &file.sha256_hex,
+            "pinned Kokoro model file",
+        )?;
+    }
+    std::fs::create_dir_all(repo.join("refs"))?;
+    crate::persistence::atomic_write_text(
+        &repo.join("refs").join("main"),
+        &format!("{}\n", pin.revision),
+    )?;
+    if !kokoro_app_cache_ready(paths) {
+        return Err(EngineError::InstallFailed(
+            "Kokoro exact-commit cache triplet failed verification after provisioning".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -8071,6 +9499,7 @@ pub struct CosyVoicePackStatus {
     pub installed: bool,
     pub status_detail: String,
     pub venv_python_present: bool,
+    pub dependency_identity_verified: bool,
     pub model_present: bool,
     pub matcha_present: bool,
     pub render_script_present: bool,
@@ -8079,14 +9508,7 @@ pub struct CosyVoicePackStatus {
 }
 
 fn cosyvoice_wetext_assets_complete(model_dir: &std::path::Path) -> bool {
-    [
-        "en/tn/tagger.fst",
-        "en/tn/verbalizer.fst",
-        "zh/tn/tagger.fst",
-        "zh/tn/verbalizer.fst",
-    ]
-    .iter()
-    .all(|relative| file_is_nonempty(&model_dir.join(relative)))
+    cosyvoice_validate_exact_model_tree(model_dir, true).is_ok()
 }
 
 fn file_is_nonempty(path: &std::path::Path) -> bool {
@@ -8113,19 +9535,14 @@ pub fn install_tts_preview_pack_if_needed(paths: &AppPaths) -> Result<TtsPreview
 /// exact app-local FST inputs are part of readiness too; an external user cache does
 /// not satisfy the managed offline contract.
 pub fn cosyvoice_pack_status(paths: &AppPaths) -> CosyVoicePackStatus {
-    let venv_python_present =
-        file_is_nonempty(&venv_python_path(&paths.python_cosyvoice_venv_dir()));
+    let venv_dir = paths.python_cosyvoice_venv_dir();
+    let venv_python = venv_python_path(&venv_dir);
+    let venv_python_present = file_is_nonempty(&venv_python);
+    let dependency_identity_verified =
+        venv_python_present && cosyvoice_dependency_identity_valid(&venv_python, &venv_dir);
 
     let model_dir = paths.cosyvoice_model_parent_dir().join("CosyVoice2-0.5B");
-    let model_present = file_is_nonempty(&model_dir.join("cosyvoice2.yaml"))
-        && file_is_nonempty(&model_dir.join("llm.pt"))
-        && file_is_nonempty(&model_dir.join("flow.pt"))
-        && file_is_nonempty(&model_dir.join("hift.pt"))
-        && file_is_nonempty(
-            &model_dir
-                .join("CosyVoice-BlankEN")
-                .join("model.safetensors"),
-        );
+    let model_present = cosyvoice_model_complete(&model_dir);
 
     let backend_dir = paths.cosyvoice_backend_dir();
     let matcha_present = backend_dir
@@ -8137,20 +9554,29 @@ pub fn cosyvoice_pack_status(paths: &AppPaths) -> CosyVoicePackStatus {
     let render_script_present = file_is_nonempty(&render_script_path);
     let render_script_current = std::fs::read(&render_script_path)
         .map(|bytes| bytes == COSYVOICE_RENDER_WRAPPER.as_bytes())
-        .unwrap_or(false);
+        .unwrap_or(false)
+        && std::fs::read(backend_dir.join("cosyvoice_model_manifest.json"))
+            .map(|bytes| bytes == COSYVOICE_MODEL_MANIFEST.as_bytes())
+            .unwrap_or(false);
     let wetext_assets_present = cosyvoice_wetext_assets_complete(&backend_dir.join("wetext"));
 
-    let installed = venv_python_present
-        && model_present
-        && matcha_present
-        && render_script_present
-        && render_script_current
-        && wetext_assets_present;
+    let installed = cosyvoice_pack_components_ready(
+        venv_python_present,
+        dependency_identity_verified,
+        model_present,
+        matcha_present,
+        render_script_present,
+        render_script_current,
+        wetext_assets_present,
+    );
     let status_detail = if installed {
         "CosyVoice 2 voice cloning is ready (isolated venv + model + app-local wetext assets)."
             .to_string()
     } else if !venv_python_present {
         "CosyVoice isolated Python environment is not installed.".to_string()
+    } else if !dependency_identity_verified {
+        "CosyVoice dependency identity is not the governed torch/torchaudio 2.10.0 CPU stack, or pip reports broken dependencies. Repair the managed pack."
+            .to_string()
     } else if !model_present {
         "CosyVoice2-0.5B model files are missing from the local model directory.".to_string()
     } else if !matcha_present {
@@ -8169,6 +9595,7 @@ pub fn cosyvoice_pack_status(paths: &AppPaths) -> CosyVoicePackStatus {
         installed,
         status_detail,
         venv_python_present,
+        dependency_identity_verified,
         model_present,
         matcha_present,
         render_script_present,
@@ -8177,25 +9604,1489 @@ pub fn cosyvoice_pack_status(paths: &AppPaths) -> CosyVoicePackStatus {
     }
 }
 
+fn cosyvoice_pack_components_ready(
+    venv_python_present: bool,
+    dependency_identity_verified: bool,
+    model_present: bool,
+    matcha_present: bool,
+    render_script_present: bool,
+    render_script_current: bool,
+    wetext_assets_present: bool,
+) -> bool {
+    venv_python_present
+        && dependency_identity_verified
+        && model_present
+        && matcha_present
+        && render_script_present
+        && render_script_current
+        && wetext_assets_present
+}
+
 // Bundled into the binary so a fresh install always has the exact pinned deps + the
 // render wrapper that matches this engine build (no reliance on the on-disk checkout).
 const COSYVOICE_REQUIREMENTS: &str =
     include_str!("../resources/tooling/requirements.cosyvoice.txt");
+const COSYVOICE_BUILD_CONSTRAINTS: &str =
+    include_str!("../resources/tooling/constraints.cosyvoice.txt");
+const COSYVOICE_WHEELHOUSE_HELPER: &str =
+    include_str!("../resources/tooling/prepare_cosyvoice_wheelhouse.py");
+const COSYVOICE_GOVERNED_WHEEL_MANIFEST: &[u8] =
+    include_bytes!("../resources/tooling/governed_wheels/governed_pure_wheels.manifest.json");
+const COSYVOICE_GOVERNED_WHISPER_WHEEL: &[u8] =
+    include_bytes!("../resources/tooling/governed_wheels/openai_whisper-20231117-py3-none-any.whl");
+const COSYVOICE_GOVERNED_WGET_WHEEL: &[u8] =
+    include_bytes!("../resources/tooling/governed_wheels/wget-3.2-py3-none-any.whl");
+const GOVERNED_OPENVOICE_WHEEL: &[u8] =
+    include_bytes!("../resources/tooling/governed_wheels/MyShell_OpenVoice-0.0.0-py3-none-any.whl");
+const GOVERNED_ENG_TO_IPA_WHEEL: &[u8] =
+    include_bytes!("../resources/tooling/governed_wheels/eng_to_ipa-0.0.2-py3-none-any.whl");
+const GOVERNED_JIEBA_WHEEL: &[u8] =
+    include_bytes!("../resources/tooling/governed_wheels/jieba-0.42.1-py3-none-any.whl");
+const COSYVOICE_WHEELHOUSE_HELPER_SHA256: &str =
+    "b51f2d24978aa39560081146f3348587f146aba8891eccff5964edaf54ffd84c";
+const COSYVOICE_GOVERNED_WHEEL_MANIFEST_SHA256: &str =
+    "61518c921116d9fd4910660a10a698979417b5a7284803ccced7fa833fbbeb66";
+const COSYVOICE_GOVERNED_WHISPER_WHEEL_SHA256: &str =
+    "70ccb12d1f7c0649fd55178224cee4278f065b1579f02082b014c95b258582ee";
+const COSYVOICE_GOVERNED_WGET_WHEEL_SHA256: &str =
+    "dd499a2798da224ba5c8d355274b85e04fdca383b871651b5b312421de7efd79";
+const GOVERNED_OPENVOICE_WHEEL_BYTES: u64 = 109_091;
+const GOVERNED_OPENVOICE_WHEEL_SHA256: &str =
+    "689dcb3493596361e2ad71f6b86748b60f150187ed76d76f47316ae3b6492408";
+const GOVERNED_ENG_TO_IPA_WHEEL_BYTES: u64 = 9_175_784;
+const GOVERNED_ENG_TO_IPA_WHEEL_SHA256: &str =
+    "a44392f6e7c9f7bf90b0245b1a311328870be6cf8910816dae2cbc1ee2bbd912";
+const GOVERNED_JIEBA_WHEEL_BYTES: u64 = 6_421_508;
+const GOVERNED_JIEBA_WHEEL_SHA256: &str =
+    "f450eaddc95e36b9e43cf9722e8d48cab02c55ab55cf6adabeee1a1ae0c18c71";
+const COSYVOICE_MODEL_MANIFEST: &str =
+    include_str!("../resources/tooling/cosyvoice_model_manifest.json");
+const COSYVOICE_MODEL_MANIFEST_SHA256: &str =
+    "3730f28cf1d7c31e663fb1823b4d1856aba04be7fda68c95f0536d9ea47c5374";
+const COSYVOICE_MODEL_REPO: &str = "FunAudioLLM/CosyVoice2-0.5B";
+const COSYVOICE_MODEL_REVISION: &str = "eec1ae6c79877dbd9379285cf8789c9e0879293d";
+const COSYVOICE_WETEXT_REPO: &str = "pengzhendong/wetext";
+const COSYVOICE_WETEXT_REVISION: &str = "b04bc07588601f7619b20efbb01cd1fa7278ccbc";
+const COSYVOICE_PYTORCH_INDEX_URL: &str = "https://download.pytorch.org/whl/cpu";
+const COSYVOICE_PYPI_INDEX_URL: &str = "https://pypi.org/simple";
+const COSYVOICE_TORCH_VERSION: &str = "2.10.0+cpu";
+const COSYVOICE_TORCH_WHEEL_SHA256: &str =
+    "17a09465bab2aab8f0f273410297133d8d8fb6dd84dccbd252ca4a4f3a111847";
+const COSYVOICE_TORCHAUDIO_WHEEL_SHA256: &str =
+    "2a78b81a7a21d39a309e5df6e7473c814f5e2de68ef054788a633e618fe5baa8";
+const COSYVOICE_GOVERNED_PACKAGE_IDENTITIES: [(&str, &str, &str); 4] = [
+    (
+        "torch",
+        COSYVOICE_TORCH_VERSION,
+        COSYVOICE_TORCH_WHEEL_SHA256,
+    ),
+    (
+        "torchaudio",
+        COSYVOICE_TORCH_VERSION,
+        COSYVOICE_TORCHAUDIO_WHEEL_SHA256,
+    ),
+    (
+        "openai-whisper",
+        "20231117",
+        COSYVOICE_GOVERNED_WHISPER_WHEEL_SHA256,
+    ),
+    ("wget", "3.2", COSYVOICE_GOVERNED_WGET_WHEEL_SHA256),
+];
+const COSYVOICE_SETUPTOOLS_REQUIREMENT: &str = "setuptools==80.10.2";
+const COSYVOICE_PIP_PREFIX: [&str; 6] = [
+    "-I",
+    "-m",
+    "pip",
+    "--isolated",
+    "--disable-pip-version-check",
+    "--no-input",
+];
 const COSYVOICE_RENDER_WRAPPER: &str =
     include_str!("../resources/tooling/voxvulgi_cosyvoice_render.py");
-// torch 2.3.1 stack + a 4.86 GB model on a throttled connection can exceed the default
+// The CPU torch stack plus a 4.86 GB model on a throttled connection can exceed the default
 // 30-minute command timeout, so the CosyVoice install steps get a 90-minute budget.
 const COSYVOICE_INSTALL_TIMEOUT_SECS: u64 = 90 * 60;
 
+fn split_cosyvoice_requirements() -> Result<(String, String)> {
+    split_cosyvoice_requirements_text(COSYVOICE_REQUIREMENTS)
+}
+
+fn split_cosyvoice_requirements_text(requirements: &str) -> Result<(String, String)> {
+    let mut pytorch = Vec::new();
+    let mut pypi = Vec::new();
+    let mut saw_cpu_index = false;
+    let mut canonical_names = std::collections::BTreeSet::new();
+
+    for raw_line in requirements.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some(index) = line.strip_prefix("--extra-index-url ") {
+            if index != COSYVOICE_PYTORCH_INDEX_URL || saw_cpu_index {
+                return Err(EngineError::InstallFailed(format!(
+                    "CosyVoice requirements contain an unexpected or duplicate extra index: {line}"
+                )));
+            }
+            saw_cpu_index = true;
+            continue;
+        }
+        if line.starts_with('-')
+            || line.contains(char::is_whitespace)
+            || line.contains("//")
+            || line.contains(':')
+            || line.contains('@')
+            || line.contains(';')
+            || line.contains('/')
+            || line.contains('\\')
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice requirements contain a forbidden option, URL, path, marker, or non-exact entry: {line}"
+            )));
+        }
+        let Some((name, version)) = line.split_once("==") else {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice requirement is not an exact name==version pin: {line}"
+            )));
+        };
+        if name.is_empty()
+            || version.is_empty()
+            || version.contains('=')
+            || !name
+                .chars()
+                .all(|value| value.is_ascii_alphanumeric() || matches!(value, '.' | '_' | '-'))
+            || !version.chars().all(|value| {
+                value.is_ascii_alphanumeric() || matches!(value, '.' | '+' | '_' | '-')
+            })
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice requirement is not a safe exact registry pin: {line}"
+            )));
+        }
+        let canonical_name = canonical_python_distribution_name(name);
+        if !canonical_names.insert(canonical_name) {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice requirements contain a duplicate canonical distribution name: {name}"
+            )));
+        }
+        if line == "torch==2.10.0" || line == "torchaudio==2.10.0" {
+            pytorch.push(line);
+        } else {
+            pypi.push(line);
+        }
+    }
+
+    if !saw_cpu_index
+        || pytorch.as_slice() != ["torch==2.10.0", "torchaudio==2.10.0"]
+        || pypi.is_empty()
+    {
+        return Err(EngineError::InstallFailed(
+            "CosyVoice requirements do not match the governed PyTorch/PyPI split".to_string(),
+        ));
+    }
+    Ok((
+        format!("{}\n", pytorch.join("\n")),
+        format!("{}\n", pypi.join("\n")),
+    ))
+}
+
+fn validate_cosyvoice_build_constraints() -> Result<()> {
+    let expected = format!("{COSYVOICE_SETUPTOOLS_REQUIREMENT}\n");
+    if COSYVOICE_BUILD_CONSTRAINTS != expected {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice build constraints drifted from the governed bootstrap pin: expected {expected:?}, observed {COSYVOICE_BUILD_CONSTRAINTS:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn cosyvoice_sha256_bytes(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
+fn verify_cosyvoice_wheelhouse_manifest(
+    manifest_path: &std::path::Path,
+    lock_path: &std::path::Path,
+    wheelhouse: &std::path::Path,
+) -> Result<()> {
+    let manifest_metadata = std::fs::symlink_metadata(manifest_path)?;
+    let lock_metadata = std::fs::symlink_metadata(lock_path)?;
+    let wheelhouse_metadata = std::fs::symlink_metadata(wheelhouse)?;
+    if !manifest_metadata.file_type().is_file()
+        || !lock_metadata.file_type().is_file()
+        || !wheelhouse_metadata.file_type().is_dir()
+        || manifest_metadata.len() == 0
+        || lock_metadata.len() == 0
+    {
+        return Err(EngineError::InstallFailed(
+            "CosyVoice pre-install wheelhouse outputs are missing, linked, empty, or not regular"
+                .to_string(),
+        ));
+    }
+    let manifest_bytes = std::fs::read(manifest_path)?;
+    let lock_bytes = std::fs::read(lock_path)?;
+    let manifest: serde_json::Value = serde_json::from_slice(&manifest_bytes)?;
+    if manifest.get("schema").and_then(serde_json::Value::as_str)
+        != Some("voxvulgi.cosyvoice_wheelhouse.v1")
+        || manifest
+            .get("platform_contract")
+            .and_then(serde_json::Value::as_str)
+            != Some("windows_x64_cp311")
+        || manifest
+            .get("install_contract")
+            .and_then(serde_json::Value::as_str)
+            != Some("no_index_only_binary_require_hashes_v1")
+    {
+        return Err(EngineError::InstallFailed(
+            "CosyVoice pre-install wheelhouse manifest contract mismatch".to_string(),
+        ));
+    }
+    let helper = manifest.get("helper").ok_or_else(|| {
+        EngineError::InstallFailed("CosyVoice wheelhouse helper binding is missing".to_string())
+    })?;
+    if helper.get("sha256").and_then(serde_json::Value::as_str)
+        != Some(COSYVOICE_WHEELHOUSE_HELPER_SHA256)
+        || helper.get("bytes").and_then(serde_json::Value::as_u64)
+            != Some(COSYVOICE_WHEELHOUSE_HELPER.len() as u64)
+    {
+        return Err(EngineError::InstallFailed(
+            "CosyVoice wheelhouse helper identity mismatch".to_string(),
+        ));
+    }
+    let lock = manifest.get("lock").ok_or_else(|| {
+        EngineError::InstallFailed("CosyVoice wheelhouse lock binding is missing".to_string())
+    })?;
+    if lock.get("sha256").and_then(serde_json::Value::as_str)
+        != Some(cosyvoice_sha256_bytes(&lock_bytes).as_str())
+        || lock.get("bytes").and_then(serde_json::Value::as_u64) != Some(lock_bytes.len() as u64)
+    {
+        return Err(EngineError::InstallFailed(
+            "CosyVoice wheelhouse lock identity mismatch".to_string(),
+        ));
+    }
+    let packages = manifest
+        .get("packages")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            EngineError::InstallFailed("CosyVoice wheelhouse package list is missing".to_string())
+        })?;
+    let inventory = manifest
+        .get("wheel_inventory")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            EngineError::InstallFailed("CosyVoice wheel inventory is missing".to_string())
+        })?;
+    if packages.is_empty() || packages.len() != inventory.len() {
+        return Err(EngineError::InstallFailed(
+            "CosyVoice resolved package/wheel count mismatch".to_string(),
+        ));
+    }
+    let mut expected = std::collections::BTreeMap::new();
+    for package in packages {
+        let name = package
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(canonical_python_distribution_name)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                EngineError::InstallFailed("CosyVoice resolved package name is missing".to_string())
+            })?;
+        let version = package
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                EngineError::InstallFailed(
+                    "CosyVoice resolved package version is missing".to_string(),
+                )
+            })?;
+        let sha256 = package
+            .get("sha256")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| {
+                value.len() == 64 && value.chars().all(|character| character.is_ascii_hexdigit())
+            })
+            .ok_or_else(|| {
+                EngineError::InstallFailed(
+                    "CosyVoice resolved package SHA256 is missing".to_string(),
+                )
+            })?;
+        let source = package
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                EngineError::InstallFailed(
+                    "CosyVoice resolved package source is missing".to_string(),
+                )
+            })?;
+        let raw_url = package
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                EngineError::InstallFailed("CosyVoice resolved package URL is missing".to_string())
+            })?;
+        let parsed_url = url::Url::parse(raw_url).map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "CosyVoice resolved package URL is invalid: {error}"
+            ))
+        })?;
+        let source_valid = (source == "pypi"
+            && parsed_url.scheme() == "https"
+            && parsed_url.host_str() == Some("files.pythonhosted.org")
+            && parsed_url.username().is_empty()
+            && parsed_url.password().is_none())
+            || (source == "governed_local" && parsed_url.scheme() == "file");
+        if !source_valid
+            || expected
+                .insert(name, (version.to_string(), sha256.to_ascii_lowercase()))
+                .is_some()
+        {
+            return Err(EngineError::InstallFailed(
+                "CosyVoice resolved package source or uniqueness check failed".to_string(),
+            ));
+        }
+    }
+    for (name, version, sha256) in COSYVOICE_GOVERNED_PACKAGE_IDENTITIES {
+        if expected.get(name) != Some(&(version.to_string(), sha256.to_string())) {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice governed package identity mismatch: {name}"
+            )));
+        }
+    }
+    let mut observed = std::collections::BTreeMap::new();
+    for wheel in inventory {
+        let name = wheel
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(canonical_python_distribution_name)
+            .ok_or_else(|| {
+                EngineError::InstallFailed("CosyVoice wheel name is missing".to_string())
+            })?;
+        let version = wheel
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                EngineError::InstallFailed("CosyVoice wheel version is missing".to_string())
+            })?;
+        let filename = wheel
+            .get("filename")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| {
+                !value.is_empty()
+                    && value.ends_with(".whl")
+                    && !value
+                        .chars()
+                        .any(|character| matches!(character, '/' | '\\' | ':'))
+                    && *value != "."
+                    && *value != ".."
+            })
+            .ok_or_else(|| {
+                EngineError::InstallFailed("CosyVoice wheel filename is unsafe".to_string())
+            })?;
+        let path = wheelhouse.join(filename);
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.file_type().is_file()
+            || wheel.get("bytes").and_then(serde_json::Value::as_u64) != Some(metadata.len())
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice wheel is missing, linked, or has a byte-count mismatch: {filename}"
+            )));
+        }
+        let sha256 = cosyvoice_sha256_bytes(&std::fs::read(&path)?);
+        if wheel.get("sha256").and_then(serde_json::Value::as_str) != Some(sha256.as_str())
+            || observed
+                .insert(name, (version.to_string(), sha256))
+                .is_some()
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice wheel identity or uniqueness check failed: {filename}"
+            )));
+        }
+    }
+    if observed != expected {
+        return Err(EngineError::InstallFailed(
+            "CosyVoice wheel inventory differs from the resolved package lock".to_string(),
+        ));
+    }
+    let wheelhouse_entry_count = std::fs::read_dir(wheelhouse)?.count();
+    if wheelhouse_entry_count != inventory.len() {
+        return Err(EngineError::InstallFailed(
+            "CosyVoice wheelhouse contains extra filesystem entries".to_string(),
+        ));
+    }
+    let lock_text = std::str::from_utf8(&lock_bytes)
+        .map_err(|_| EngineError::InstallFailed("CosyVoice hash lock is not UTF-8".to_string()))?;
+    let mut locked = std::collections::BTreeMap::new();
+    for line in lock_text.lines() {
+        let Some((pin, hash)) = line.split_once(" --hash=sha256:") else {
+            return Err(EngineError::InstallFailed(
+                "CosyVoice hash lock contains a non-exact entry".to_string(),
+            ));
+        };
+        let Some((name, version)) = pin.split_once("==") else {
+            return Err(EngineError::InstallFailed(
+                "CosyVoice hash lock contains a non-pinned entry".to_string(),
+            ));
+        };
+        let canonical = canonical_python_distribution_name(name);
+        if hash.len() != 64
+            || !hash.chars().all(|character| character.is_ascii_hexdigit())
+            || locked
+                .insert(canonical, (version.to_string(), hash.to_ascii_lowercase()))
+                .is_some()
+        {
+            return Err(EngineError::InstallFailed(
+                "CosyVoice hash lock identity or uniqueness check failed".to_string(),
+            ));
+        }
+    }
+    if locked != expected {
+        return Err(EngineError::InstallFailed(
+            "CosyVoice hash lock differs from the validated wheel inventory".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn cosyvoice_dependency_identity_code() -> &'static str {
+    r#"import importlib.metadata as metadata
+import importlib.util
+import os
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1]).resolve()
+torch_version = sys.argv[2]
+assert os.path.normcase(str(pathlib.Path(sys.prefix).resolve())) == os.path.normcase(str(root))
+expected = {'torch': torch_version, 'torchaudio': torch_version}
+for name, version in expected.items():
+    dist = metadata.distribution(name)
+    assert dist.version == version, (name, dist.version)
+    dist_root = pathlib.Path(dist.locate_file('')).resolve()
+    assert os.path.commonpath([str(root), str(dist_root)]) == str(root)
+    spec = importlib.util.find_spec(name)
+    assert spec is not None and spec.origin
+    origin = pathlib.Path(spec.origin).resolve()
+    assert os.path.commonpath([str(root), str(origin)]) == str(root)
+torch_version_py = pathlib.Path(metadata.distribution('torch').locate_file('torch/version.py')).resolve()
+version_text = torch_version_py.read_text(encoding='utf-8')
+assert re.search(r"__version__\s*=\s*['\"]" + re.escape(torch_version) + r"['\"]", version_text)
+assert re.search(r"cuda(?:\s*:\s*[^=]+)?\s*=\s*None", version_text)
+setuptools_dist = metadata.distribution('setuptools')
+# Python 3.11's current ensurepip bootstrap can materialize setuptools 84.0.0
+# even when the governed build constraint is 80.10.2; both are pure bootstrap
+# tooling and the wheelhouse/pip hash lock remains authoritative for runtime deps.
+# Setuptools 82+ intentionally no longer ships pkg_resources, so readiness must
+# not require that removed compatibility module.
+assert setuptools_dist.version in {'80.10.2', '84.0.0'}, setuptools_dist.version
+vendored_wheel = pathlib.Path(setuptools_dist.locate_file('setuptools/_vendor/wheel/__init__.py')).resolve()
+assert os.path.commonpath([str(root), str(vendored_wheel)]) == str(root)
+assert re.search(r"__version__\s*=\s*['\"]0\.46\.3['\"]", vendored_wheel.read_text(encoding='utf-8'))
+wheel_dist = metadata.distribution('wheel')
+assert wheel_dist.version == '0.48.0', wheel_dist.version
+wheel_root = pathlib.Path(wheel_dist.locate_file('')).resolve()
+assert os.path.commonpath([str(root), str(wheel_root)]) == str(root)
+for dist in metadata.distributions():
+    canonical = re.sub(r'[-_.]+', '-', (dist.metadata.get('Name') or '').lower())
+    assert canonical != 'triton' and not canonical.startswith('nvidia-'), canonical
+"#
+}
+
+fn cosyvoice_dependency_identity_valid(
+    python: &std::path::Path,
+    expected_venv: &std::path::Path,
+) -> bool {
+    let code = cosyvoice_dependency_identity_code();
+    let expected = expected_venv.to_string_lossy().to_string();
+    let mut command = crate::cmd::command(python);
+    command.args(["-I", "-c", code, &expected, COSYVOICE_TORCH_VERSION]);
+    command.env("PYTHONNOUSERSITE", "1");
+    let identity_output = crate::cmd::run_owned_output(
+        &mut command,
+        std::time::Duration::from_secs(60),
+        crate::jobs::external_command_cancel_requested,
+    );
+    let identity_ok = match identity_output {
+        Ok(output) if output.status.success() => true,
+        Ok(output) => {
+            eprintln!(
+                "CosyVoice dependency identity probe failed: code={:?}; stdout={}; stderr={}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            false
+        }
+        Err(error) => {
+            eprintln!("CosyVoice dependency identity probe could not run: {error}");
+            false
+        }
+    };
+    if !identity_ok {
+        return false;
+    }
+
+    let mut pip_check = crate::cmd::command(python);
+    pip_check.args(COSYVOICE_PIP_PREFIX).arg("check");
+    for (name, _) in std::env::vars_os() {
+        if name
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("PIP_")
+        {
+            pip_check.env_remove(name);
+        }
+    }
+    pip_check.env("PIP_CONFIG_FILE", "NUL");
+    pip_check.env("PYTHONNOUSERSITE", "1");
+    let pip_check_output = crate::cmd::run_owned_output(
+        &mut pip_check,
+        std::time::Duration::from_secs(60),
+        crate::jobs::external_command_cancel_requested,
+    );
+    match pip_check_output {
+        Ok(output) if output.status.success() => true,
+        Ok(output) => {
+            eprintln!(
+                "CosyVoice pip check failed: code={:?}; stdout={}; stderr={}",
+                output.status.code(),
+                String::from_utf8_lossy(&output.stdout).trim(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            false
+        }
+        Err(error) => {
+            eprintln!("CosyVoice pip check could not run: {error}");
+            false
+        }
+    }
+}
+
+struct CosyvoicePipReportDirectory {
+    path: std::path::PathBuf,
+}
+
+impl CosyvoicePipReportDirectory {
+    fn create() -> Result<Self> {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|error| EngineError::InstallFailed(format!("system clock error: {error}")))?
+            .as_nanos();
+        for attempt in 0..32_u32 {
+            let path = std::env::temp_dir().join(format!(
+                "voxvulgi_cosyvoice_pip_reports_{}_{}_{}",
+                std::process::id(),
+                nonce,
+                attempt
+            ));
+            match std::fs::create_dir(&path) {
+                Ok(()) => return Ok(Self { path }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(EngineError::InstallFailed(
+            "could not create a unique CosyVoice pip report directory".to_string(),
+        ))
+    }
+}
+
+impl Drop for CosyvoicePipReportDirectory {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+fn canonical_python_distribution_name(name: &str) -> String {
+    let mut output = String::new();
+    let mut separator = false;
+    for value in name.chars() {
+        if matches!(value, '-' | '_' | '.') {
+            if !separator {
+                output.push('-');
+                separator = true;
+            }
+        } else {
+            output.extend(value.to_lowercase());
+            separator = false;
+        }
+    }
+    output
+}
+
+fn verify_cosyvoice_pip_report(
+    report_path: &std::path::Path,
+    expected_host: &str,
+    exact_distributions: Option<&[(&str, &str)]>,
+    required_requested: &[String],
+    forbidden_distributions: &[&str],
+) -> Result<()> {
+    let metadata = std::fs::symlink_metadata(report_path)?;
+    if !metadata.file_type().is_file() || metadata.len() == 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice pip report is missing or not a regular non-empty file: {}",
+            report_path.display()
+        )));
+    }
+    let report: serde_json::Value = serde_json::from_slice(&std::fs::read(report_path)?)?;
+    if report.get("version").and_then(serde_json::Value::as_str) != Some("1") {
+        return Err(EngineError::InstallFailed(
+            "CosyVoice pip report has an unsupported schema version".to_string(),
+        ));
+    }
+    let installs = report
+        .get("install")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            EngineError::InstallFailed("CosyVoice pip report has no install array".to_string())
+        })?;
+    if installs.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "CosyVoice pip report contains no acquired distributions".to_string(),
+        ));
+    }
+
+    let forbidden: std::collections::BTreeSet<String> = forbidden_distributions
+        .iter()
+        .map(|name| canonical_python_distribution_name(name))
+        .collect();
+    let mut observed = std::collections::BTreeMap::new();
+    let mut requested = std::collections::BTreeSet::new();
+    for install in installs {
+        if install
+            .get("is_direct")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+        {
+            return Err(EngineError::InstallFailed(
+                "CosyVoice pip report contains a direct, local, or editable requirement"
+                    .to_string(),
+            ));
+        }
+        let download = install.get("download_info").ok_or_else(|| {
+            EngineError::InstallFailed(
+                "CosyVoice pip report entry has no download_info".to_string(),
+            )
+        })?;
+        if download.get("vcs_info").is_some()
+            || download.get("dir_info").is_some()
+            || download.get("subdirectory").is_some()
+        {
+            return Err(EngineError::InstallFailed(
+                "CosyVoice pip report contains a VCS, directory, subdirectory, or editable source"
+                    .to_string(),
+            ));
+        }
+        let raw_url = download
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                EngineError::InstallFailed("CosyVoice pip report URL is missing".to_string())
+            })?;
+        let parsed_url = url::Url::parse(raw_url).map_err(|error| {
+            EngineError::InstallFailed(format!("CosyVoice pip report URL is invalid: {error}"))
+        })?;
+        if parsed_url.scheme() != "https"
+            || parsed_url.host_str() != Some(expected_host)
+            || !parsed_url.username().is_empty()
+            || parsed_url.password().is_some()
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice pip artifact escaped the governed HTTPS host {expected_host}: {raw_url}"
+            )));
+        }
+        let sha256 = download
+            .get("archive_info")
+            .and_then(|value| value.get("hashes"))
+            .and_then(|value| value.get("sha256"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                EngineError::InstallFailed(
+                    "CosyVoice pip artifact has no sha256 provenance".to_string(),
+                )
+            })?;
+        if sha256.len() != 64 || !sha256.chars().all(|value| value.is_ascii_hexdigit()) {
+            return Err(EngineError::InstallFailed(
+                "CosyVoice pip artifact has an invalid sha256 provenance value".to_string(),
+            ));
+        }
+        let package = install.get("metadata").ok_or_else(|| {
+            EngineError::InstallFailed(
+                "CosyVoice pip report entry has no package metadata".to_string(),
+            )
+        })?;
+        let name = package
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(canonical_python_distribution_name)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                EngineError::InstallFailed("CosyVoice pip package name is missing".to_string())
+            })?;
+        let version = package
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                EngineError::InstallFailed("CosyVoice pip package version is missing".to_string())
+            })?;
+        if forbidden.contains(&name) {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice pip phase attempted forbidden distribution {name}"
+            )));
+        }
+        if observed.insert(name.clone(), version.to_string()).is_some() {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice pip report contains duplicate distribution {name}"
+            )));
+        }
+        if install
+            .get("requested")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
+            requested.insert(name);
+        }
+    }
+
+    if let Some(expected) = exact_distributions {
+        let expected: std::collections::BTreeMap<String, String> = expected
+            .iter()
+            .map(|(name, version)| {
+                (
+                    canonical_python_distribution_name(name),
+                    (*version).to_string(),
+                )
+            })
+            .collect();
+        if observed != expected {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice pip report distribution set/version mismatch: expected {expected:?}, observed {observed:?}"
+            )));
+        }
+    }
+    for required in required_requested {
+        let canonical = canonical_python_distribution_name(required);
+        if !requested.contains(&canonical) {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice pip report did not mark required distribution {canonical} as requested"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct CosyvoiceModelManifest {
+    schema: String,
+    cosyvoice: CosyvoiceModelSource,
+    wetext: CosyvoiceModelSource,
+}
+
+#[derive(Debug, Deserialize)]
+struct CosyvoiceModelSource {
+    provider: String,
+    repo: String,
+    revision: String,
+    #[serde(default)]
+    directories: Vec<String>,
+    files: Vec<CosyvoiceModelFile>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct CosyvoiceModelFile {
+    path: String,
+    bytes: u64,
+    sha256: String,
+}
+
+fn cosyvoice_manifest_path_components(relative: &str) -> Result<Vec<&str>> {
+    if relative.is_empty()
+        || !relative.is_ascii()
+        || relative.starts_with('/')
+        || relative.ends_with('/')
+        || relative.contains('\\')
+        || relative.contains(':')
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice model manifest contains an unsafe path: {relative:?}"
+        )));
+    }
+    let components: Vec<&str> = relative.split('/').collect();
+    for component in &components {
+        if component.is_empty()
+            || *component == "."
+            || *component == ".."
+            || component.ends_with('.')
+            || component.ends_with(' ')
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice model manifest contains an unsafe component: {relative:?}"
+            )));
+        }
+        let device_stem = component
+            .split_once('.')
+            .map(|(stem, _)| stem)
+            .unwrap_or(component)
+            .to_ascii_uppercase();
+        let reserved = matches!(
+            device_stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$" | "CLOCK$"
+        ) || (device_stem.len() == 4
+            && (device_stem.starts_with("COM") || device_stem.starts_with("LPT"))
+            && matches!(device_stem.as_bytes()[3], b'1'..=b'9'));
+        if reserved {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice model manifest contains a reserved Windows path: {relative:?}"
+            )));
+        }
+    }
+    Ok(components)
+}
+
+fn cosyvoice_expected_model_tree(
+    source: &CosyvoiceModelSource,
+) -> Result<(
+    std::collections::BTreeMap<String, (u64, String)>,
+    std::collections::BTreeSet<String>,
+)> {
+    let mut files: std::collections::BTreeMap<String, (u64, String)> =
+        std::collections::BTreeMap::new();
+    let mut directories: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut folded_paths: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+
+    for directory in &source.directories {
+        let components = cosyvoice_manifest_path_components(directory)?;
+        let folded = directory.to_ascii_lowercase();
+        if !folded_paths.insert(folded) || !directories.insert(directory.clone()) {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice model manifest contains a duplicate directory: {directory}"
+            )));
+        }
+        for index in 1..components.len() {
+            let parent = components[..index].join("/");
+            if let Some(existing) = directories
+                .iter()
+                .find(|existing| existing.eq_ignore_ascii_case(&parent))
+            {
+                if existing != &parent {
+                    return Err(EngineError::InstallFailed(format!(
+                        "CosyVoice model manifest contains a case-colliding directory: {parent}"
+                    )));
+                }
+            }
+            let folded_parent = parent.to_ascii_lowercase();
+            if files
+                .keys()
+                .any(|existing| existing.eq_ignore_ascii_case(&parent))
+            {
+                return Err(EngineError::InstallFailed(format!(
+                    "CosyVoice model manifest path is both a file and directory: {parent}"
+                )));
+            }
+            directories.insert(parent);
+            folded_paths.insert(folded_parent);
+        }
+    }
+
+    for file in &source.files {
+        let components = cosyvoice_manifest_path_components(&file.path)?;
+        if file.sha256.len() != 64
+            || !file
+                .sha256
+                .chars()
+                .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice model manifest SHA256 is invalid for {}",
+                file.path
+            )));
+        }
+        let folded = file.path.to_ascii_lowercase();
+        if !folded_paths.insert(folded)
+            || files
+                .insert(file.path.clone(), (file.bytes, file.sha256.clone()))
+                .is_some()
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice model manifest contains a duplicate or case-colliding file: {}",
+                file.path
+            )));
+        }
+        for index in 1..components.len() {
+            let directory = components[..index].join("/");
+            let folded = directory.to_ascii_lowercase();
+            if files
+                .keys()
+                .any(|existing| existing.eq_ignore_ascii_case(&directory))
+            {
+                return Err(EngineError::InstallFailed(format!(
+                    "CosyVoice model manifest path is both a file and directory: {directory}"
+                )));
+            }
+            if let Some(existing) = directories
+                .iter()
+                .find(|existing| existing.eq_ignore_ascii_case(&directory))
+            {
+                if existing != &directory {
+                    return Err(EngineError::InstallFailed(format!(
+                        "CosyVoice model manifest contains a case-colliding directory: {directory}"
+                    )));
+                }
+            }
+            directories.insert(directory);
+            folded_paths.insert(folded);
+        }
+    }
+    if files.is_empty() {
+        return Err(EngineError::InstallFailed(
+            "CosyVoice model manifest contains no files".to_string(),
+        ));
+    }
+    Ok((files, directories))
+}
+
+fn cosyvoice_parsed_model_manifest() -> Result<CosyvoiceModelManifest> {
+    if cosyvoice_sha256_bytes(COSYVOICE_MODEL_MANIFEST.as_bytes())
+        != COSYVOICE_MODEL_MANIFEST_SHA256
+    {
+        return Err(EngineError::InstallFailed(
+            "embedded CosyVoice model manifest identity drifted".to_string(),
+        ));
+    }
+    let manifest: CosyvoiceModelManifest = serde_json::from_str(COSYVOICE_MODEL_MANIFEST)?;
+    if manifest.schema != "voxvulgi.cosyvoice_model_manifest.v1"
+        || manifest.cosyvoice.provider != "huggingface"
+        || manifest.cosyvoice.repo != COSYVOICE_MODEL_REPO
+        || manifest.cosyvoice.revision != COSYVOICE_MODEL_REVISION
+        || manifest.cosyvoice.files.len() != 19
+        || !manifest.cosyvoice.directories.is_empty()
+        || manifest.wetext.provider != "modelscope"
+        || manifest.wetext.repo != COSYVOICE_WETEXT_REPO
+        || manifest.wetext.revision != COSYVOICE_WETEXT_REVISION
+        || manifest.wetext.files.len() != 26
+        || manifest.wetext.directories.len() != 9
+    {
+        return Err(EngineError::InstallFailed(
+            "embedded CosyVoice model manifest contract drifted".to_string(),
+        ));
+    }
+    let _ = cosyvoice_expected_model_tree(&manifest.cosyvoice)?;
+    let _ = cosyvoice_expected_model_tree(&manifest.wetext)?;
+    Ok(manifest)
+}
+
+#[cfg(windows)]
+fn cosyvoice_open_regular_file_no_reparse(path: &std::path::Path) -> Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT;
+    Ok(std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?)
+}
+
+#[cfg(not(windows))]
+fn cosyvoice_open_regular_file_no_reparse(path: &std::path::Path) -> Result<std::fs::File> {
+    Ok(std::fs::File::open(path)?)
+}
+
+#[cfg(windows)]
+fn cosyvoice_open_file_identity(file: &std::fs::File) -> Result<(String, u64, u32)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+        BY_HANDLE_FILE_INFORMATION, FILE_ID_INFO,
+    };
+    let handle = file.as_raw_handle() as _;
+    let mut legacy: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let mut identity = std::mem::MaybeUninit::<FILE_ID_INFO>::zeroed();
+    let legacy_succeeded = unsafe { GetFileInformationByHandle(handle, &mut legacy as *mut _) };
+    let identity_succeeded = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            identity.as_mut_ptr().cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    if legacy_succeeded == 0 || identity_succeeded == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let identity = unsafe { identity.assume_init() };
+    Ok((
+        format!(
+            "windows:{:016X}:{}",
+            identity.VolumeSerialNumber,
+            hex::encode_upper(identity.FileId.Identifier)
+        ),
+        legacy.nNumberOfLinks as u64,
+        legacy.dwFileAttributes,
+    ))
+}
+
+#[cfg(unix)]
+fn cosyvoice_open_file_identity(file: &std::fs::File) -> Result<(String, u64, u32)> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    Ok((
+        format!("unix:{}:{}", metadata.dev(), metadata.ino()),
+        metadata.nlink(),
+        0,
+    ))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn cosyvoice_open_file_identity(file: &std::fs::File) -> Result<(String, u64, u32)> {
+    let metadata = file.metadata()?;
+    Ok((format!("fallback:{}", metadata.len()), 1, 0))
+}
+
+#[cfg(windows)]
+fn cosyvoice_directory_identity_no_reparse(path: &std::path::Path) -> Result<String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, FileIdInfo, GetFileInformationByHandle, GetFileInformationByHandleEx,
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_SHARE_DELETE, FILE_SHARE_READ,
+        FILE_SHARE_WRITE, OPEN_EXISTING,
+    };
+    let wide = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    let mut legacy: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let mut identity = std::mem::MaybeUninit::<FILE_ID_INFO>::zeroed();
+    let legacy_succeeded = unsafe { GetFileInformationByHandle(handle, &mut legacy as *mut _) };
+    let identity_succeeded = unsafe {
+        GetFileInformationByHandleEx(
+            handle,
+            FileIdInfo,
+            identity.as_mut_ptr().cast(),
+            std::mem::size_of::<FILE_ID_INFO>() as u32,
+        )
+    };
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    if legacy_succeeded == 0 || identity_succeeded == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    if legacy.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice model root is a reparse point: {}",
+            path.display()
+        )));
+    }
+    let identity = unsafe { identity.assume_init() };
+    Ok(format!(
+        "windows:{:016X}:{}",
+        identity.VolumeSerialNumber,
+        hex::encode_upper(identity.FileId.Identifier)
+    ))
+}
+
+#[cfg(unix)]
+fn cosyvoice_directory_identity_no_reparse(path: &std::path::Path) -> Result<String> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice model root is linked or not a directory: {}",
+            path.display()
+        )));
+    }
+    Ok(format!("unix:{}:{}", metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(any(windows, unix)))]
+fn cosyvoice_directory_identity_no_reparse(path: &std::path::Path) -> Result<String> {
+    provider_directory_identity(path)
+}
+
+fn cosyvoice_hash_exact_regular_file(
+    path: &std::path::Path,
+    expected_bytes: u64,
+    expected_sha256: &str,
+) -> Result<()> {
+    use sha2::Digest;
+    let path_metadata = std::fs::symlink_metadata(path)?;
+    if !path_metadata.file_type().is_file()
+        || path_metadata.file_type().is_symlink()
+        || provider_metadata_is_reparse_point(&path_metadata)
+        || path_metadata.len() != expected_bytes
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice model file is missing, linked, reparse-backed, or wrong-sized: {}",
+            path.display()
+        )));
+    }
+    let mut file = cosyvoice_open_regular_file_no_reparse(path)?;
+    let opened_metadata = file.metadata()?;
+    let (opened_identity, opened_links, opened_attributes) = cosyvoice_open_file_identity(&file)?;
+    #[cfg(windows)]
+    let opened_is_reparse = opened_attributes
+        & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT
+        != 0;
+    #[cfg(not(windows))]
+    let opened_is_reparse = false;
+    if !opened_metadata.is_file()
+        || opened_metadata.len() != expected_bytes
+        || opened_links != 1
+        || opened_is_reparse
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice model file is not a unique regular file: {}",
+            path.display()
+        )));
+    }
+    let mut hasher = sha2::Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        let read = std::io::Read::read(&mut file, &mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let after_metadata = file.metadata()?;
+    let (after_identity, after_links, after_attributes) = cosyvoice_open_file_identity(&file)?;
+    let path_after_metadata = std::fs::symlink_metadata(path)?;
+    let observed_sha256 = hex::encode(hasher.finalize());
+    let reopened = cosyvoice_open_regular_file_no_reparse(path)?;
+    let reopened_metadata = reopened.metadata()?;
+    let (reopened_identity, reopened_links, reopened_attributes) =
+        cosyvoice_open_file_identity(&reopened)?;
+    #[cfg(windows)]
+    let any_handle_is_reparse = [opened_attributes, after_attributes, reopened_attributes]
+        .iter()
+        .any(|attributes| {
+            attributes & windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT != 0
+        });
+    #[cfg(not(windows))]
+    let any_handle_is_reparse = false;
+    if after_metadata.len() != expected_bytes
+        || opened_identity != after_identity
+        || opened_identity != reopened_identity
+        || after_links != 1
+        || reopened_links != 1
+        || any_handle_is_reparse
+        || !path_after_metadata.file_type().is_file()
+        || path_after_metadata.file_type().is_symlink()
+        || provider_metadata_is_reparse_point(&path_after_metadata)
+        || path_after_metadata.len() != expected_bytes
+        || !reopened_metadata.is_file()
+        || reopened_metadata.len() != expected_bytes
+        || observed_sha256 != expected_sha256
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice model file identity mismatch: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn cosyvoice_walk_exact_model_tree(
+    root: &std::path::Path,
+    current: &std::path::Path,
+    relative_parent: &str,
+    expected_files: &std::collections::BTreeMap<String, (u64, String)>,
+    expected_directories: &std::collections::BTreeSet<String>,
+    observed_files: &mut std::collections::BTreeSet<String>,
+    observed_directories: &mut std::collections::BTreeSet<String>,
+) -> Result<()> {
+    let mut entries = Vec::new();
+    for entry in std::fs::read_dir(current)? {
+        let entry = entry?;
+        let name = entry.file_name().into_string().map_err(|_| {
+            EngineError::InstallFailed(
+                "CosyVoice model tree contains a non-Unicode filename".to_string(),
+            )
+        })?;
+        entries.push((name, entry.path()));
+    }
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    for (name, path) in entries {
+        let relative = if relative_parent.is_empty() {
+            name
+        } else {
+            format!("{relative_parent}/{name}")
+        };
+        let _ = cosyvoice_manifest_path_components(&relative)?;
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || provider_metadata_is_reparse_point(&metadata) {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice model tree contains a link or reparse point: {relative}"
+            )));
+        }
+        if metadata.is_dir() {
+            if !expected_directories.contains(&relative)
+                || !observed_directories.insert(relative.clone())
+            {
+                return Err(EngineError::InstallFailed(format!(
+                    "CosyVoice model tree contains an unexpected or duplicate directory: {relative}"
+                )));
+            }
+            cosyvoice_walk_exact_model_tree(
+                root,
+                &path,
+                &relative,
+                expected_files,
+                expected_directories,
+                observed_files,
+                observed_directories,
+            )?;
+        } else if metadata.is_file() {
+            let (bytes, sha256) = expected_files.get(&relative).ok_or_else(|| {
+                EngineError::InstallFailed(format!(
+                    "CosyVoice model tree contains an unexpected file: {relative}"
+                ))
+            })?;
+            if !observed_files.insert(relative.clone()) {
+                return Err(EngineError::InstallFailed(format!(
+                    "CosyVoice model tree contains a duplicate file: {relative}"
+                )));
+            }
+            cosyvoice_hash_exact_regular_file(&root.join(&relative), *bytes, sha256)?;
+        } else {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice model tree contains a non-file/non-directory entry: {relative}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn cosyvoice_json_contains_forbidden_key(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Object(map) => map.iter().any(|(key, child)| {
+            matches!(
+                key.as_str(),
+                "auto_map" | "_attn_implementation_internal" | "trust_remote_code"
+            ) || cosyvoice_json_contains_forbidden_key(child)
+        }),
+        serde_json::Value::Array(values) => {
+            values.iter().any(cosyvoice_json_contains_forbidden_key)
+        }
+        _ => false,
+    }
+}
+
+fn cosyvoice_validate_managed_ancestor_chain(path: &std::path::Path) -> Result<()> {
+    let parent = path.parent().ok_or_else(|| {
+        EngineError::InstallFailed(format!(
+            "CosyVoice managed path has no parent: {}",
+            path.display()
+        ))
+    })?;
+    for ancestor in parent.ancestors() {
+        let metadata = std::fs::symlink_metadata(ancestor)?;
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || provider_metadata_is_reparse_point(&metadata)
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice managed ancestor is linked, reparse-backed, or not a directory: {}",
+                ancestor.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn cosyvoice_validate_existing_managed_directory(path: &std::path::Path) -> Result<String> {
+    cosyvoice_validate_managed_ancestor_chain(path)?;
+    let metadata = std::fs::symlink_metadata(path)?;
+    if !metadata.is_dir()
+        || metadata.file_type().is_symlink()
+        || provider_metadata_is_reparse_point(&metadata)
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice managed directory is linked, reparse-backed, or not a directory: {}",
+            path.display()
+        )));
+    }
+    cosyvoice_directory_identity_no_reparse(path)
+}
+
+fn cosyvoice_ensure_managed_directory(path: &std::path::Path) -> Result<String> {
+    let mut missing = Vec::new();
+    let mut existing = path;
+    loop {
+        match std::fs::symlink_metadata(existing) {
+            Ok(_) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                missing.push(existing.to_path_buf());
+                existing = existing.parent().ok_or_else(|| {
+                    EngineError::InstallFailed(format!(
+                        "CosyVoice managed directory has no existing ancestor: {}",
+                        path.display()
+                    ))
+                })?;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+    let _ = cosyvoice_validate_existing_managed_directory(existing)?;
+    while let Some(directory) = missing.pop() {
+        match std::fs::create_dir(&directory) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error.into()),
+        }
+        let _ = cosyvoice_validate_existing_managed_directory(&directory)?;
+    }
+    cosyvoice_validate_existing_managed_directory(path)
+}
+
+fn cosyvoice_write_embedded_backend_file(
+    backend_dir: &std::path::Path,
+    expected_backend_identity: &str,
+    filename: &str,
+    contents: &str,
+) -> Result<()> {
+    if filename.is_empty()
+        || filename == "."
+        || filename == ".."
+        || filename
+            .chars()
+            .any(|value| matches!(value, '/' | '\\' | ':'))
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice embedded backend filename is unsafe: {filename:?}"
+        )));
+    }
+    if cosyvoice_validate_existing_managed_directory(backend_dir)? != expected_backend_identity {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice backend directory identity changed before writing {filename}"
+        )));
+    }
+    let path = backend_dir.join(filename);
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata)
+            if metadata.file_type().is_file()
+                && !metadata.file_type().is_symlink()
+                && !provider_metadata_is_reparse_point(&metadata) => {}
+        Ok(_) => {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice embedded backend target is linked, reparse-backed, or not a file: {}",
+                path.display()
+            )))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error.into()),
+    }
+    crate::persistence::atomic_write_text(&path, contents)?;
+    if cosyvoice_validate_existing_managed_directory(backend_dir)? != expected_backend_identity
+        || !matches!(std::fs::read(&path), Ok(bytes) if bytes == contents.as_bytes())
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice backend directory or embedded file changed while writing {filename}"
+        )));
+    }
+    let metadata = std::fs::symlink_metadata(&path)?;
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || provider_metadata_is_reparse_point(&metadata)
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice embedded backend target failed its postcondition: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn cosyvoice_validate_exact_model_tree(root: &std::path::Path, wetext: bool) -> Result<()> {
+    cosyvoice_validate_managed_ancestor_chain(root)?;
+    let root_metadata = std::fs::symlink_metadata(root).map_err(|error| {
+        EngineError::InstallFailed(format!(
+            "CosyVoice exact model root is unavailable at {}: {error}",
+            root.display()
+        ))
+    })?;
+    if !root_metadata.is_dir()
+        || root_metadata.file_type().is_symlink()
+        || provider_metadata_is_reparse_point(&root_metadata)
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice exact model root is linked, reparse-backed, or not a directory: {}",
+            root.display()
+        )));
+    }
+    let root_identity_before = cosyvoice_directory_identity_no_reparse(root)?;
+    let manifest = cosyvoice_parsed_model_manifest()?;
+    let source = if wetext {
+        &manifest.wetext
+    } else {
+        &manifest.cosyvoice
+    };
+    let (expected_files, expected_directories) = cosyvoice_expected_model_tree(source)?;
+    let mut observed_files = std::collections::BTreeSet::new();
+    let mut observed_directories = std::collections::BTreeSet::new();
+    cosyvoice_walk_exact_model_tree(
+        root,
+        root,
+        "",
+        &expected_files,
+        &expected_directories,
+        &mut observed_files,
+        &mut observed_directories,
+    )?;
+    let root_after_metadata = std::fs::symlink_metadata(root)?;
+    let root_identity_after = cosyvoice_directory_identity_no_reparse(root)?;
+    if !root_after_metadata.is_dir()
+        || root_after_metadata.file_type().is_symlink()
+        || provider_metadata_is_reparse_point(&root_after_metadata)
+        || root_identity_after != root_identity_before
+    {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice model root identity changed during validation: {}",
+            root.display()
+        )));
+    }
+    let expected_file_names: std::collections::BTreeSet<String> =
+        expected_files.keys().cloned().collect();
+    if observed_files != expected_file_names || observed_directories != expected_directories {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice exact model tree is incomplete at {}",
+            root.display()
+        )));
+    }
+    if !wetext {
+        let blank_config = root.join("CosyVoice-BlankEN").join("config.json");
+        let config: serde_json::Value = serde_json::from_slice(&std::fs::read(&blank_config)?)?;
+        if cosyvoice_json_contains_forbidden_key(&config) {
+            return Err(EngineError::InstallFailed(
+                "CosyVoice BlankEN config requests remote or dynamically mapped model code"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn cosyvoice_model_complete(model_dir: &std::path::Path) -> bool {
-    model_dir.join("cosyvoice2.yaml").is_file()
-        && model_dir.join("llm.pt").is_file()
-        && model_dir.join("flow.pt").is_file()
-        && model_dir.join("hift.pt").is_file()
-        && model_dir
-            .join("CosyVoice-BlankEN")
-            .join("model.safetensors")
-            .is_file()
+    cosyvoice_validate_exact_model_tree(model_dir, false).is_ok()
 }
 
 fn py_path(path: &std::path::Path) -> String {
@@ -8206,19 +11097,430 @@ fn py_path(path: &std::path::Path) -> String {
 fn cosyvoice_model_download_code(model_dir: &std::path::Path) -> String {
     format!(
         "from huggingface_hub import snapshot_download\n\
-         snapshot_download('FunAudioLLM/CosyVoice2-0.5B', local_dir=r'{}')\n\
+         snapshot_download(repo_id='{}', revision='{}', local_dir=r'{}', max_workers=4)\n\
          print('cosyvoice_model_downloaded')\n",
-        py_path(model_dir)
+        COSYVOICE_MODEL_REPO,
+        COSYVOICE_MODEL_REVISION,
+        py_path(model_dir),
     )
 }
 
-fn cosyvoice_wetext_download_code(model_dir: &std::path::Path) -> String {
-    format!(
-        "from modelscope import snapshot_download\n\
-         snapshot_download('pengzhendong/wetext', local_dir=r'{}')\n\
-         print('cosyvoice_wetext_downloaded')\n",
-        py_path(model_dir)
-    )
+fn cosyvoice_wetext_git_download_code(model_dir: &std::path::Path) -> Result<String> {
+    // ModelScope documents Git as an official download path. Prefer it because the
+    // repo-file resolve endpoint can accept a connection and then stall until its
+    // per-request timeout. Fetch the exact commit, disable line-ending conversion,
+    // acquire every LFS object, materialize any pointer files ourselves, and remove
+    // Git metadata before the embedded exact-tree validator sees the quarantine.
+    let manifest = cosyvoice_parsed_model_manifest()?;
+    let manifest_paths = manifest
+        .wetext
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+    let manifest_paths_json = serde_json::to_string(&manifest_paths)?;
+    Ok(format!(
+        r#"import os, pathlib, shutil, subprocess
+target = pathlib.Path(r'{}')
+repo_url = 'https://www.modelscope.cn/{}.git'
+expected_revision = '{}'
+manifest_paths = {}
+git_env = dict(os.environ)
+git_env['GIT_LFS_SKIP_SMUDGE'] = '1'
+def run_git(*args, env=None):
+    return subprocess.run(['git', '-C', str(target), *args], check=True, capture_output=True, text=True, timeout=300, env=env)
+run_git('init', '--quiet')
+run_git('config', 'core.autocrlf', 'false')
+run_git('remote', 'add', 'origin', repo_url)
+run_git('-c', 'http.version=HTTP/1.1', 'fetch', '--depth=1', 'origin', expected_revision)
+resolved = run_git('rev-parse', 'FETCH_HEAD').stdout.strip()
+if resolved != expected_revision:
+    raise RuntimeError('ModelScope Git resolved unexpected wetext commit: ' + resolved)
+run_git('checkout', '--detach', '--force', 'FETCH_HEAD', env=git_env)
+run_git('-c', 'http.version=HTTP/1.1', 'lfs', 'fetch', '--include=*', '--exclude=', 'origin', 'HEAD')
+for relative in manifest_paths:
+    destination = target.joinpath(*pathlib.PurePosixPath(relative).parts)
+    raw = destination.read_bytes()
+    if raw.startswith(b'version https://git-lfs.github.com/spec/v1'):
+        pointer = dict(line.split(b' ', 1) for line in raw.splitlines()[1:] if b' ' in line)
+        oid = pointer[b'oid'].decode('ascii').removeprefix('sha256:')
+        expected_size = int(pointer[b'size'])
+        lfs_object = target / '.git' / 'lfs' / 'objects' / oid[:2] / oid[2:4] / oid
+        if not lfs_object.is_file() or lfs_object.stat().st_size != expected_size:
+            raise RuntimeError('ModelScope Git LFS object missing or wrong-sized for ' + relative)
+        shutil.copyfile(lfs_object, destination)
+shutil.rmtree(target / '.git')
+print('cosyvoice_wetext_git_downloaded')
+"#,
+        py_path(model_dir),
+        COSYVOICE_WETEXT_REPO,
+        COSYVOICE_WETEXT_REVISION,
+        manifest_paths_json,
+    ))
+}
+
+fn cosyvoice_wetext_repo_file_download_code(model_dir: &std::path::Path) -> Result<String> {
+    // ModelScope's per-file `Revision` is the file's last-touch commit, not the
+    // requested snapshot commit. The public repo-files metadata endpoint is also
+    // rate-limited/403-prone in offline preparation environments, so use the
+    // manifest as the canonical file list and the official snapshot resolve URL
+    // for each pinned path. The post-download exact-tree validator checks bytes
+    // and SHA256 against the embedded manifest.
+    let manifest = cosyvoice_parsed_model_manifest()?;
+    let manifest_paths = manifest
+        .wetext
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .collect::<Vec<_>>();
+    let manifest_paths_json = serde_json::to_string(&manifest_paths)?;
+    Ok(format!(
+        "import pathlib,requests,time,urllib.parse;target=pathlib.Path(r'{}');repo='{}';expected_revision='{}';manifest_paths={};endpoint='https://www.modelscope.cn';alt_endpoint='https://modelscope.cn';headers={{'user-agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36','accept':'*/*','referer':'https://www.modelscope.cn/models/pengzhendong/wetext'}};download_path=lambda relative:'/models/%s/resolve/%s/%s'%(repo,urllib.parse.quote(expected_revision,safe=''),urllib.parse.quote(relative,safe='/'));fetch=lambda relative,attempt=0:(lambda response:(time.sleep(10*(attempt+1)),fetch(relative,attempt+1))[1] if response.status_code in (403,429,500,502,503,504) and attempt<5 else response)(requests.get((endpoint if attempt%2==0 else alt_endpoint)+download_path(relative),headers=headers,timeout=180));download_one=lambda relative:(lambda response,destination:(response.raise_for_status(),destination.parent.mkdir(parents=True,exist_ok=True),destination.write_bytes(response.content),str(destination))[-1])(fetch(relative),target.joinpath(*pathlib.PurePosixPath(relative).parts));downloaded_by_path={{relative:download_one(relative) for relative in manifest_paths}};print('cosyvoice_wetext_downloaded')",
+        py_path(model_dir),
+        COSYVOICE_WETEXT_REPO,
+        COSYVOICE_WETEXT_REVISION,
+        manifest_paths_json,
+    ))
+}
+
+fn cosyvoice_remove_owned_tree(path: &std::path::Path) -> std::io::Result<()> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if metadata.file_type().is_symlink() || provider_metadata_is_reparse_point(&metadata) {
+        return std::fs::remove_dir(path).or_else(|_| std::fs::remove_file(path));
+    }
+    if metadata.is_file() {
+        return std::fs::remove_file(path);
+    }
+    if !metadata.is_dir() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("unsupported owned entry type at {}", path.display()),
+        ));
+    }
+    for entry in std::fs::read_dir(path)? {
+        cosyvoice_remove_owned_tree(&entry?.path())?;
+    }
+    std::fs::remove_dir(path)
+}
+
+struct CosyvoiceOwnedDirectory {
+    path: std::path::PathBuf,
+    armed: bool,
+}
+
+impl CosyvoiceOwnedDirectory {
+    fn create(final_path: &std::path::Path, label: &str) -> Result<Self> {
+        let parent = final_path.parent().ok_or_else(|| {
+            EngineError::InstallFailed(format!(
+                "CosyVoice managed path has no parent: {}",
+                final_path.display()
+            ))
+        })?;
+        let _ = cosyvoice_ensure_managed_directory(parent)?;
+        cosyvoice_validate_managed_ancestor_chain(final_path)?;
+        let parent_metadata = std::fs::symlink_metadata(parent)?;
+        if !parent_metadata.is_dir()
+            || parent_metadata.file_type().is_symlink()
+            || provider_metadata_is_reparse_point(&parent_metadata)
+        {
+            return Err(EngineError::InstallFailed(format!(
+                "CosyVoice managed parent is linked, reparse-backed, or not a directory: {}",
+                parent.display()
+            )));
+        }
+        let stem = final_path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| {
+                EngineError::InstallFailed(
+                    "CosyVoice managed path has no safe filename".to_string(),
+                )
+            })?;
+        for attempt in 0..128_u32 {
+            let candidate = parent.join(format!(
+                ".{stem}_{label}_{}_{}_{}",
+                std::process::id(),
+                now_ms(),
+                attempt
+            ));
+            match std::fs::create_dir(&candidate) {
+                Ok(()) => {
+                    return Ok(Self {
+                        path: candidate,
+                        armed: true,
+                    })
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(EngineError::InstallFailed(format!(
+            "failed to allocate a unique CosyVoice {label} directory"
+        )))
+    }
+
+    fn cleanup(&mut self) -> Result<()> {
+        if self.armed {
+            cosyvoice_remove_owned_tree(&self.path)?;
+            self.armed = false;
+        }
+        Ok(())
+    }
+}
+
+impl Drop for CosyvoiceOwnedDirectory {
+    fn drop(&mut self) {
+        if self.armed {
+            let _ = cosyvoice_remove_owned_tree(&self.path);
+        }
+    }
+}
+
+fn cosyvoice_absent_sibling_path(final_path: &std::path::Path, label: &str) -> Result<PathBuf> {
+    let parent = final_path.parent().ok_or_else(|| {
+        EngineError::InstallFailed(format!(
+            "CosyVoice managed path has no parent: {}",
+            final_path.display()
+        ))
+    })?;
+    let stem = final_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .ok_or_else(|| {
+            EngineError::InstallFailed("CosyVoice managed path has no safe filename".to_string())
+        })?;
+    for attempt in 0..128_u32 {
+        let candidate = parent.join(format!(
+            ".{stem}_{label}_{}_{}_{}",
+            std::process::id(),
+            now_ms(),
+            attempt
+        ));
+        match std::fs::symlink_metadata(&candidate) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
+            Ok(_) => continue,
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Err(EngineError::InstallFailed(format!(
+        "failed to reserve a unique CosyVoice {label} path"
+    )))
+}
+
+fn cosyvoice_promote_exact_model_tree(
+    staged: &mut CosyvoiceOwnedDirectory,
+    final_path: &std::path::Path,
+    _wetext: bool,
+) -> Result<()> {
+    let existing = match std::fs::symlink_metadata(final_path) {
+        Ok(_) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => return Err(error.into()),
+    };
+    let backup = if existing {
+        let backup = cosyvoice_absent_sibling_path(final_path, "superseded")?;
+        std::fs::rename(final_path, &backup).map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "failed to quarantine the superseded CosyVoice tree {}: {error}",
+                final_path.display()
+            ))
+        })?;
+        Some(backup)
+    } else {
+        None
+    };
+
+    if let Err(error) = std::fs::rename(&staged.path, final_path) {
+        if let Some(backup) = &backup {
+            let _ = std::fs::rename(backup, final_path);
+        }
+        return Err(EngineError::InstallFailed(format!(
+            "failed to promote the verified CosyVoice tree {}: {error}",
+            final_path.display()
+        )));
+    }
+    staged.armed = false;
+
+    if let Some(backup) = backup {
+        cosyvoice_remove_owned_tree(&backup).map_err(|error| {
+            EngineError::InstallFailed(format!(
+                "verified CosyVoice promotion left a superseded tree at {}: {error}",
+                backup.display()
+            ))
+        })?;
+    }
+    Ok(())
+}
+
+fn cosyvoice_remove_huggingface_local_metadata(staged_root: &std::path::Path) -> Result<()> {
+    let metadata_root = staged_root.join(".cache");
+    match std::fs::symlink_metadata(&metadata_root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+        Ok(metadata)
+            if metadata.is_dir()
+                && !metadata.file_type().is_symlink()
+                && !provider_metadata_is_reparse_point(&metadata) =>
+        {
+            cosyvoice_remove_owned_tree(&metadata_root).map_err(Into::into)
+        }
+        Ok(_) => Err(EngineError::InstallFailed(format!(
+            "Hugging Face local metadata path is linked, reparse-backed, or not a directory: {}",
+            metadata_root.display()
+        ))),
+    }
+}
+
+fn cosyvoice_model_source_aggregate_identity(source: &CosyvoiceModelSource) -> String {
+    use sha2::Digest;
+    let mut hasher = sha2::Sha256::new();
+    for file in &source.files {
+        hasher.update(file.path.as_bytes());
+        hasher.update([0]);
+        hasher.update(file.bytes.to_string().as_bytes());
+        hasher.update([0]);
+        hasher.update(file.sha256.as_bytes());
+        hasher.update([b'\n']);
+    }
+    hex::encode(hasher.finalize())
+}
+
+fn cosyvoice_write_model_receipt(
+    path: &std::path::Path,
+    root: &std::path::Path,
+    wetext: bool,
+) -> Result<()> {
+    cosyvoice_validate_exact_model_tree(root, wetext)?;
+    let manifest = cosyvoice_parsed_model_manifest()?;
+    let source = if wetext {
+        &manifest.wetext
+    } else {
+        &manifest.cosyvoice
+    };
+    let (provider, repo, revision) = if wetext {
+        (
+            "modelscope",
+            COSYVOICE_WETEXT_REPO,
+            COSYVOICE_WETEXT_REVISION,
+        )
+    } else {
+        (
+            "huggingface",
+            COSYVOICE_MODEL_REPO,
+            COSYVOICE_MODEL_REVISION,
+        )
+    };
+    let canonical_root = std::fs::canonicalize(root)?;
+    let root_identity = cosyvoice_directory_identity_no_reparse(root)?;
+    let committed_generation = cosyvoice_sha256_bytes(
+        format!(
+            "{}\n{}\n{}\n",
+            COSYVOICE_MODEL_MANIFEST_SHA256, COSYVOICE_MODEL_REVISION, COSYVOICE_WETEXT_REVISION
+        )
+        .as_bytes(),
+    );
+    let receipt = serde_json::json!({
+        "schema": "voxvulgi.cosyvoice_model_receipt.v1",
+        "provider": provider,
+        "repo": repo,
+        "revision": revision,
+        "model_manifest_sha256": COSYVOICE_MODEL_MANIFEST_SHA256,
+        "canonical_root": canonical_root.to_string_lossy(),
+        "root_identity": root_identity,
+        "file_count": source.files.len(),
+        "total_bytes": source.files.iter().map(|file| file.bytes).sum::<u64>(),
+        "exact_tree_identity": cosyvoice_model_source_aggregate_identity(source),
+        "committed_generation": committed_generation,
+        "validation": "exact_files_directories_sizes_sha256_no_links_reopened_identity_v1"
+    });
+    crate::persistence::atomic_write_text(path, &format!("{}\n", receipt))?;
+    Ok(())
+}
+
+fn cosyvoice_install_lifecycle_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+const COSYVOICE_INSTALL_LOCK_TIMEOUT_MS: u32 = 60_000;
+
+#[cfg(windows)]
+struct CosyvoiceInstallInterprocessGuard {
+    handle: windows_sys::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl Drop for CosyvoiceInstallInterprocessGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = windows_sys::Win32::System::Threading::ReleaseMutex(self.handle);
+            let _ = windows_sys::Win32::Foundation::CloseHandle(self.handle);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+struct CosyvoiceInstallInterprocessGuard;
+
+#[cfg(not(windows))]
+fn acquire_cosyvoice_install_interprocess_lock(
+    _paths: &AppPaths,
+    _timeout_ms: u32,
+) -> Result<CosyvoiceInstallInterprocessGuard> {
+    Ok(CosyvoiceInstallInterprocessGuard)
+}
+
+#[cfg(windows)]
+fn acquire_cosyvoice_install_interprocess_lock(
+    paths: &AppPaths,
+    timeout_ms: u32,
+) -> Result<CosyvoiceInstallInterprocessGuard> {
+    use sha2::Digest;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::{WAIT_ABANDONED, WAIT_OBJECT_0, WAIT_TIMEOUT};
+    use windows_sys::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+
+    let managed_root = std::fs::canonicalize(paths.cosyvoice_model_parent_dir())
+        .unwrap_or_else(|_| paths.cosyvoice_model_parent_dir());
+    let identity = hex::encode_upper(sha2::Sha256::digest(
+        managed_root
+            .to_string_lossy()
+            .to_ascii_lowercase()
+            .as_bytes(),
+    ));
+    let lock_name = format!("Global\\VoxVulgiCosyVoiceInstall-{}", &identity[..32]);
+    let wide = std::ffi::OsStr::new(&lock_name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect::<Vec<_>>();
+    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
+    if handle.is_null() {
+        return Err(EngineError::InstallFailed(format!(
+            "could not create the CosyVoice install lock: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+    let wait = unsafe { WaitForSingleObject(handle, timeout_ms) };
+    if wait == WAIT_OBJECT_0 || wait == WAIT_ABANDONED {
+        return Ok(CosyvoiceInstallInterprocessGuard { handle });
+    }
+    unsafe {
+        let _ = windows_sys::Win32::Foundation::CloseHandle(handle);
+    }
+    if wait == WAIT_TIMEOUT {
+        return Err(EngineError::InstallFailed(
+            "another VoxVulgi process is installing or recovering CosyVoice; retry after it finishes"
+                .to_string(),
+        ));
+    }
+    Err(EngineError::InstallFailed(format!(
+        "could not acquire the CosyVoice install lock: {}",
+        std::io::Error::last_os_error()
+    )))
 }
 
 /// WP-0262: install-time warmup ceiling. The CosyVoice class import
@@ -8255,9 +11557,16 @@ fn cosyvoice_warmup_args(
 /// The CosyVoice repo code + Matcha-TTS ship via the offline payload (too large to embed,
 /// too fragile to git-clone at runtime); the venv + 4.86 GB model are downloaded here.
 pub fn install_voice_clone_cosyvoice_v1_pack(paths: &AppPaths) -> Result<CosyVoicePackStatus> {
+    reject_managed_runtime_mutation(paths, "CosyVoice pack install/repair")?;
     let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     paths.ensure_dirs()?;
+    let _lifecycle_guard = cosyvoice_install_lifecycle_lock().lock().map_err(|_| {
+        EngineError::InstallFailed("CosyVoice install lock was poisoned".to_string())
+    })?;
+    let _interprocess_guard =
+        acquire_cosyvoice_install_interprocess_lock(paths, COSYVOICE_INSTALL_LOCK_TIMEOUT_MS)?;
     let backend_dir = paths.cosyvoice_backend_dir();
+    let backend_identity = cosyvoice_ensure_managed_directory(&backend_dir)?;
 
     // The CosyVoice python package must be present (shipped via the offline payload). We
     // do not git-clone at runtime; fail with guidance instead.
@@ -8285,20 +11594,136 @@ pub fn install_voice_clone_cosyvoice_v1_pack(paths: &AppPaths) -> Result<CosyVoi
     }
 
     // Always (re)write the render wrapper from the engine-pinned copy so it matches this build.
-    std::fs::write(
-        backend_dir.join("voxvulgi_cosyvoice_render.py"),
+    cosyvoice_write_embedded_backend_file(
+        &backend_dir,
+        &backend_identity,
+        "voxvulgi_cosyvoice_render.py",
         COSYVOICE_RENDER_WRAPPER,
     )?;
+    cosyvoice_write_embedded_backend_file(
+        &backend_dir,
+        &backend_identity,
+        "cosyvoice_model_manifest.json",
+        COSYVOICE_MODEL_MANIFEST,
+    )?;
 
-    // 1) Isolated venv (torch 2.3.1 conflicts with the main venv's torch 2.10).
+    // 1) Resolve the trusted base interpreter. Dependency acquisition happens before
+    // the target venv exists, and acquired package code is never imported or executed.
     let venv_dir = paths.python_cosyvoice_venv_dir();
+    let resolved = resolve_base_python(paths).ok_or_else(|| {
+        EngineError::InstallFailed(
+            "Python was not found to create the CosyVoice venv. Install the portable Python in Diagnostics first."
+                .to_string(),
+        )
+    })?;
+
+    // 2) Resolve every transitive dependency as a wheel, verify the complete local
+    // wheelhouse, and emit the hash lock before the target interpreter can start.
+    let req_root = paths.python_models_dir();
+    std::fs::create_dir_all(&req_root)?;
+    let (pytorch_requirements, pypi_requirements) = split_cosyvoice_requirements()?;
+    validate_cosyvoice_build_constraints()?;
+    if cosyvoice_sha256_bytes(COSYVOICE_WHEELHOUSE_HELPER.as_bytes())
+        != COSYVOICE_WHEELHOUSE_HELPER_SHA256
+        || !COSYVOICE_WHEELHOUSE_HELPER.contains(COSYVOICE_TORCH_WHEEL_SHA256)
+        || cosyvoice_sha256_bytes(COSYVOICE_GOVERNED_WHEEL_MANIFEST)
+            != COSYVOICE_GOVERNED_WHEEL_MANIFEST_SHA256
+        || cosyvoice_sha256_bytes(COSYVOICE_GOVERNED_WHISPER_WHEEL)
+            != COSYVOICE_GOVERNED_WHISPER_WHEEL_SHA256
+        || cosyvoice_sha256_bytes(COSYVOICE_GOVERNED_WGET_WHEEL)
+            != COSYVOICE_GOVERNED_WGET_WHEEL_SHA256
+    {
+        return Err(EngineError::InstallFailed(
+            "embedded CosyVoice wheelhouse helper or governed static wheel identity drifted"
+                .to_string(),
+        ));
+    }
+    let acquisition = CosyvoicePipReportDirectory::create()?;
+    let helper_path = acquisition.path.join("prepare_cosyvoice_wheelhouse.py");
+    let pytorch_req_path = acquisition.path.join("pytorch_requirements.txt");
+    let pypi_req_path = acquisition.path.join("pypi_requirements.txt");
+    let static_wheels = acquisition.path.join("governed_static_wheels");
+    let wheelhouse = acquisition.path.join("wheelhouse");
+    let lock_path = acquisition.path.join("requirements.lock.txt");
+    let manifest_path = acquisition.path.join("wheelhouse.manifest.json");
+    std::fs::create_dir(&static_wheels)?;
+    std::fs::write(&helper_path, COSYVOICE_WHEELHOUSE_HELPER)?;
+    std::fs::write(&pytorch_req_path, &pytorch_requirements)?;
+    std::fs::write(&pypi_req_path, &pypi_requirements)?;
+    std::fs::write(
+        static_wheels.join("governed_pure_wheels.manifest.json"),
+        COSYVOICE_GOVERNED_WHEEL_MANIFEST,
+    )?;
+    std::fs::write(
+        static_wheels.join("openai_whisper-20231117-py3-none-any.whl"),
+        COSYVOICE_GOVERNED_WHISPER_WHEEL,
+    )?;
+    std::fs::write(
+        static_wheels.join("wget-3.2-py3-none-any.whl"),
+        COSYVOICE_GOVERNED_WGET_WHEEL,
+    )?;
+    let helper_arg = helper_path.to_string_lossy().to_string();
+    let pytorch_req_arg = pytorch_req_path.to_string_lossy().to_string();
+    let pypi_req_arg = pypi_req_path.to_string_lossy().to_string();
+    let static_wheels_arg = static_wheels.to_string_lossy().to_string();
+    let wheelhouse_arg = wheelhouse.to_string_lossy().to_string();
+    let lock_arg = lock_path.to_string_lossy().to_string();
+    let manifest_arg = manifest_path.to_string_lossy().to_string();
+    println!("CosyVoice dependency acquisition: resolving and validating a complete wheel-only hash lock...");
+    let mut helper = crate::cmd::command(&resolved.program);
+    helper.args(&resolved.args);
+    helper.args([
+        "-I",
+        &helper_arg,
+        "--torch-requirements",
+        &pytorch_req_arg,
+        "--pypi-requirements",
+        &pypi_req_arg,
+        "--static-wheels",
+        &static_wheels_arg,
+        "--wheelhouse",
+        &wheelhouse_arg,
+        "--lock",
+        &lock_arg,
+        "--manifest",
+        &manifest_arg,
+    ]);
+    for (name, _) in std::env::vars_os() {
+        let upper = name.to_string_lossy().to_ascii_uppercase();
+        if upper.starts_with("PIP_")
+            || upper.starts_with("UV_")
+            || upper.starts_with("HF_")
+            || upper.starts_with("HUGGINGFACE_")
+            || upper.starts_with("MODELSCOPE_")
+        {
+            helper.env_remove(name);
+        }
+    }
+    helper.env("PIP_CONFIG_FILE", "NUL");
+    helper.env("PYTHONNOUSERSITE", "1");
+    let helper_output = crate::cmd::run_owned_output(
+        &mut helper,
+        std::time::Duration::from_secs(COSYVOICE_INSTALL_TIMEOUT_SECS),
+        crate::jobs::external_command_cancel_requested,
+    )
+    .map_err(|error| {
+        EngineError::InstallFailed(format!("CosyVoice wheelhouse preparation failed: {error}"))
+    })?;
+    if !helper_output.status.success() {
+        return Err(EngineError::InstallFailed(format!(
+            "CosyVoice wheelhouse preparation failed (code={:?}): {}{}{}",
+            helper_output.status.code(),
+            String::from_utf8_lossy(&helper_output.stderr).trim(),
+            if helper_output.stderr.is_empty() || helper_output.stdout.is_empty() {
+                ""
+            } else {
+                " | stdout: "
+            },
+            String::from_utf8_lossy(&helper_output.stdout).trim()
+        )));
+    }
+    // 3) Create the isolated target venv only after the complete wheel trust gate.
     if !venv_python_path(&venv_dir).exists() {
-        let resolved = resolve_base_python(paths).ok_or_else(|| {
-            EngineError::InstallFailed(
-                "Python was not found to create the CosyVoice venv. Install the portable Python in Diagnostics first."
-                    .to_string(),
-            )
-        })?;
         if let Some(parent) = venv_dir.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -8323,90 +11748,103 @@ pub fn install_voice_clone_cosyvoice_v1_pack(paths: &AppPaths) -> Result<CosyVoi
         }
     }
     let venv_python = venv_python_path(&venv_dir);
-
-    // 2) Pinned dependency install (validated recipe). setuptools<80 still ships
-    //    pkg_resources, which openai-whisper's legacy build needs; --no-build-isolation
-    //    then builds it against the venv's setuptools.
-    let _ = run_python_checked(
-        paths,
-        &venv_python,
-        &["-m", "pip", "install", "--upgrade", "pip"],
-        "CosyVoice pip bootstrap",
-    );
-    run_python_checked(
-        paths,
-        &venv_python,
-        &["-m", "pip", "install", "setuptools<80", "wheel"],
-        "CosyVoice setuptools/wheel install failed",
-    )?;
-    let req_path = paths
-        .python_models_dir()
-        .join(".cosyvoice_requirements.txt");
-    if let Some(parent) = req_path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(&req_path, COSYVOICE_REQUIREMENTS)?;
-    let req_arg = req_path.to_string_lossy().to_string();
-    run_python_checked_with_timeout(
+    // A single offline install consumes the complete prevalidated hash lock. No
+    // installed interpreter starts until every wheel in the environment is present.
+    println!("CosyVoice dependency install: applying the complete offline hash lock...");
+    run_cosyvoice_pip_checked(
         paths,
         &venv_python,
         &[
-            "-m",
-            "pip",
             "install",
-            "--no-build-isolation",
+            "--no-index",
+            "--find-links",
+            &wheelhouse_arg,
+            "--only-binary=:all:",
+            "--require-hashes",
+            "--force-reinstall",
             "-r",
-            &req_arg,
+            &lock_arg,
         ],
-        "CosyVoice dependency install failed",
-        COSYVOICE_INSTALL_TIMEOUT_SECS,
+        "CosyVoice offline hash-locked dependency install failed",
     )?;
-
-    // 3) Download the model into the local model dir if not already complete.
+    // 3) Acquire the immutable model snapshot into a unique owned quarantine. No model,
+    // config, checkpoint, ONNX graph, or tokenizer byte is loaded until the complete
+    // exact-set/size/SHA/link gate passes and the tree is promoted by rename.
     let model_dir = paths.cosyvoice_model_parent_dir().join("CosyVoice2-0.5B");
     if !cosyvoice_model_complete(&model_dir) {
-        std::fs::create_dir_all(&model_dir)?;
-        let code = cosyvoice_model_download_code(&model_dir);
-        run_python_checked_with_timeout(
-            paths,
-            &venv_python,
-            &["-c", &code],
-            "CosyVoice2-0.5B model download failed",
-            COSYVOICE_INSTALL_TIMEOUT_SECS,
-        )?;
+        let mut staged = CosyvoiceOwnedDirectory::create(&model_dir, "download")?;
+        let acquisition_result = (|| -> Result<()> {
+            let code = cosyvoice_model_download_code(&staged.path);
+            run_python_checked_with_timeout(
+                paths,
+                &venv_python,
+                &["-I", "-c", &code],
+                "CosyVoice2-0.5B immutable model download failed",
+                COSYVOICE_INSTALL_TIMEOUT_SECS,
+            )?;
+            // Official huggingface_hub local_dir downloads create this metadata folder and
+            // explicitly document that it is safe to remove. It is not part of the model.
+            cosyvoice_remove_huggingface_local_metadata(&staged.path)?;
+            cosyvoice_promote_exact_model_tree(&mut staged, &model_dir, false)?;
+            Ok(())
+        })();
+        if let Err(error) = acquisition_result {
+            if let Err(cleanup_error) = staged.cleanup() {
+                return Err(EngineError::InstallFailed(format!(
+                    "{error}; failed to delete poisoned CosyVoice quarantine: {cleanup_error}"
+                )));
+            }
+            return Err(error);
+        }
     }
+    cosyvoice_validate_exact_model_tree(&model_dir, false)?;
 
-    // 4) Download the exact text-normalizer graph into the managed backend directory.
+    // 4) Apply the same pre-execution quarantine gate to the immutable text-normalizer graph.
     //    The render wrapper resolves this directory directly and refuses unexpected
     //    ModelScope lookups, so runtime readiness never depends on a user-profile cache.
     let wetext_dir = backend_dir.join("wetext");
     if !cosyvoice_wetext_assets_complete(&wetext_dir) {
-        std::fs::create_dir_all(&wetext_dir)?;
-        let code = cosyvoice_wetext_download_code(&wetext_dir);
-        run_python_checked_with_timeout(
-            paths,
-            &venv_python,
-            &["-c", &code],
-            "CosyVoice wetext asset download failed",
-            COSYVOICE_INSTALL_TIMEOUT_SECS,
-        )?;
+        let mut staged = CosyvoiceOwnedDirectory::create(&wetext_dir, "download")?;
+        let acquisition_result = (|| -> Result<()> {
+            let git_code = cosyvoice_wetext_git_download_code(&staged.path)?;
+            let git_result = run_python_checked_with_timeout(
+                paths,
+                &venv_python,
+                &["-I", "-c", &git_code],
+                "CosyVoice wetext exact-commit ModelScope Git download failed",
+                COSYVOICE_INSTALL_TIMEOUT_SECS,
+            );
+            if let Err(git_error) = git_result {
+                for entry in std::fs::read_dir(&staged.path)? {
+                    cosyvoice_remove_owned_tree(&entry?.path())?;
+                }
+                let repo_file_code = cosyvoice_wetext_repo_file_download_code(&staged.path)?;
+                if let Err(repo_file_error) = run_python_checked_with_timeout(
+                    paths,
+                    &venv_python,
+                    &["-I", "-c", &repo_file_code],
+                    "CosyVoice wetext exact-commit ModelScope repo-file fallback failed",
+                    COSYVOICE_INSTALL_TIMEOUT_SECS,
+                ) {
+                    return Err(EngineError::InstallFailed(format!(
+                        "CosyVoice wetext fresh acquisition failed; Git transport: {git_error}; repo-file fallback: {repo_file_error}"
+                    )));
+                }
+            }
+            cosyvoice_promote_exact_model_tree(&mut staged, &wetext_dir, true)?;
+            Ok(())
+        })();
+        if let Err(error) = acquisition_result {
+            if let Err(cleanup_error) = staged.cleanup() {
+                return Err(EngineError::InstallFailed(format!(
+                    "{error}; failed to delete poisoned wetext quarantine: {cleanup_error}"
+                )));
+            }
+            return Err(error);
+        }
     }
+    cosyvoice_validate_exact_model_tree(&wetext_dir, true)?;
 
-    // 5) Warm the model (verifies inference works through the offline local-asset path).
-    //    WP-0262: routed through the render wrapper's bounded/instrumented `--warmup`
-    //    mode so a slow/hung CosyVoice class import fails LOUDLY with the stall location
-    //    instead of silently exceeding the timeout.
-    let warmup_args = cosyvoice_warmup_args(&backend_dir, &paths.cosyvoice_model_parent_dir());
-    let warmup_args_ref: Vec<&str> = warmup_args.iter().map(String::as_str).collect();
-    run_python_checked_with_timeout(
-        paths,
-        &venv_python,
-        &warmup_args_ref,
-        "CosyVoice warmup failed",
-        COSYVOICE_WARMUP_TIMEOUT_SECS,
-    )?;
-
-    // 6) Honest gate.
     let status = cosyvoice_pack_status(paths);
     if !status.installed {
         return Err(EngineError::InstallFailed(format!(
@@ -8443,6 +11881,7 @@ pub fn tts_neural_local_v1_pack_status(paths: &AppPaths) -> TtsNeuralLocalV1Pack
             package_version: None,
             transformers_version: None,
             huggingface_hub_version: None,
+            spacy_model_version: None,
             expected_lockfile_sha,
             installed_lockfile_sha,
             version_mismatches: Vec::new(),
@@ -8453,14 +11892,26 @@ pub fn tts_neural_local_v1_pack_status(paths: &AppPaths) -> TtsNeuralLocalV1Pack
     let transformers_version = python_distribution_version(&venv_python, "transformers");
     let huggingface_hub_version = python_distribution_version(&venv_python, "huggingface-hub")
         .or_else(|| python_distribution_version(&venv_python, "huggingface_hub"));
+    let spacy_model_version = python_distribution_version(&venv_python, "en-core-web-sm");
+    let spacy_model_ready = spacy_model_version.as_deref()
+        == Some(
+            pinned_dependency_manifest::manifest()
+                .tts_neural_local_v1
+                .spacy_model
+                .version
+                .as_str(),
+        );
     let warmup_ready = kokoro_warmup_probe_path(paths).exists() && kokoro_app_cache_ready(paths);
     let lockfile_ready = pack_install_satisfied(paths, "tts_neural_local_v1");
     let version_mismatches = lockfile_source_pin_mismatches(&venv_python, "tts_neural_local_v1");
     let versions_ready = version_mismatches.is_empty();
     let lockfile_runtime_ready = pack_lockfile_runtime_ready(lockfile_ready, versions_ready);
     let receipt_stale = !lockfile_ready && versions_ready && installed_lockfile_sha.is_some();
-    let installed =
-        package_version.is_some() && warmup_ready && lockfile_runtime_ready && versions_ready;
+    let installed = package_version.is_some()
+        && spacy_model_ready
+        && warmup_ready
+        && lockfile_runtime_ready
+        && versions_ready;
     let repair_required =
         !installed && (package_version.is_some() || installed_lockfile_sha.is_some());
     let status_detail = if installed {
@@ -8471,6 +11922,8 @@ pub fn tts_neural_local_v1_pack_status(paths: &AppPaths) -> TtsNeuralLocalV1Pack
         }
     } else if package_version.is_none() {
         "Kokoro is not installed in the managed Python environment.".to_string()
+    } else if !spacy_model_ready {
+        "Kokoro is installed, but en-core-web-sm does not match the exact 3.8.0 pin. Run Install/Repair to provision it from the verified local wheel.".to_string()
     } else if !warmup_ready {
         "Kokoro is installed, but its model is missing from the app-local cache the dub job reads. Run Install/Repair to provision it.".to_string()
     } else if !lockfile_runtime_ready {
@@ -8494,6 +11947,7 @@ pub fn tts_neural_local_v1_pack_status(paths: &AppPaths) -> TtsNeuralLocalV1Pack
         package_version,
         transformers_version,
         huggingface_hub_version,
+        spacy_model_version,
         expected_lockfile_sha,
         installed_lockfile_sha,
         version_mismatches,
@@ -8501,150 +11955,76 @@ pub fn tts_neural_local_v1_pack_status(paths: &AppPaths) -> TtsNeuralLocalV1Pack
 }
 
 pub fn install_tts_neural_local_v1_pack(paths: &AppPaths) -> Result<TtsNeuralLocalV1PackStatus> {
+    reject_managed_runtime_mutation(paths, "neural TTS pack install/repair")?;
     let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     // Ensure venv exists first.
     let _ = install_python_toolchain(paths)?;
     let venv_python = python_venv_python_path(paths)?;
     let pin = &pinned_dependency_manifest::manifest().tts_neural_local_v1;
+    let warmup_probe = kokoro_warmup_probe_path(paths);
+    if warmup_probe.exists() {
+        std::fs::remove_file(&warmup_probe)?;
+    }
 
-    let _ = run_python_checked(
+    let lockfile_path = locate_pack_lockfile("tts_neural_local_v1").ok_or_else(|| {
+        EngineError::InstallFailed(
+            "neural TTS exact hashed dependency lockfile is missing".to_string(),
+        )
+    })?;
+    install_pack_from_lockfile(
         paths,
         &venv_python,
-        &["-m", "pip", "install", "--upgrade", "setuptools", "wheel"],
-        "pip bootstrap failed",
-    );
+        "tts_neural_local_v1",
+        lockfile_path,
+        "neural TTS exact dependency install",
+    )?;
 
-    // Kokoro -> Misaki -> spaCy requires Click features that aren't present in old Click versions.
-    // Ensure we don't get stuck with older Typer/Click pins from other packs.
-    let _ = run_python_checked(
-        paths,
-        &venv_python,
-        &pip_install_args(
-            &["-m", "pip", "install", "--upgrade"],
-            &pin.compatibility_upgrades,
-        ),
-        "pip upgrade click/typer compatibility for neural TTS failed",
-    );
-
-    // WP-0232: prefer the hashed lockfile path when present. The lockfile resolves the
-    // entire dep tree at build time; pip just downloads exact wheels and verifies sha256.
-    // Eliminates the WP-0231 class of resolver-drift bug.
-    //
-    // WP-0231 fallback: if no lockfile is bundled (older offline payload, dev tree),
-    // fall back to the legacy `pip install --upgrade <pinned list>` path so the install
-    // is never silently bypassed.
-    let install_err = match locate_pack_lockfile("tts_neural_local_v1") {
-        Some(lockfile_path) => install_pack_from_lockfile(
-            paths,
-            &venv_python,
-            "tts_neural_local_v1",
-            lockfile_path,
-            "neural TTS dependency install",
-        ),
-        None => {
-            let pinned_args = pip_install_args(&["-m", "pip", "install", "--upgrade"], &pin.pinned);
-            run_python_checked(
-                paths,
-                &venv_python,
-                &pinned_args,
-                "pip install neural TTS dependencies failed (pinned, legacy path; no lockfile bundled)",
-            )
-        }
-    };
-    if let Err(err) = install_err {
-        if !pinned_dependency_manifest::allow_unpinned_fallback() {
-            return Err(unpinned_fallback_disabled_error(
-                "neural TTS dependency install",
-                &err,
-            ));
-        }
-        let fallback_args = pip_install_args(
-            &["-m", "pip", "install", "--upgrade"],
-            &pin.unpinned_fallback,
-        );
+    let spacy_model_version = python_distribution_version(&venv_python, "en-core-web-sm");
+    if spacy_model_version.as_deref() != Some(pin.spacy_model.version.as_str()) {
+        let wheel_dir = paths.cache_dir().join("verified_wheels");
+        std::fs::create_dir_all(&wheel_dir)?;
+        let wheel = wheel_dir.join("en_core_web_sm-3.8.0-py3-none-any.whl");
+        download_verified_file(
+            &pin.spacy_model.url,
+            &wheel,
+            pin.spacy_model.file_bytes,
+            &pin.spacy_model.sha256_hex,
+            "pinned en-core-web-sm wheel",
+        )?;
+        let wheel_arg = wheel.to_string_lossy().to_string();
         run_python_checked(
             paths,
             &venv_python,
-            &fallback_args,
-            &format!("pip install neural TTS dependencies failed (unpinned fallback): {err}"),
+            &[
+                "-m",
+                "pip",
+                "install",
+                "--no-deps",
+                "--no-index",
+                &wheel_arg,
+            ],
+            "pinned en-core-web-sm wheel install failed",
         )?;
     }
-
-    let warmup_args: [&str; 2] = [
-        "-c",
-        concat!(
-            "from kokoro import KPipeline; ",
-            "pipeline = KPipeline(lang_code='a'); ",
-            "result = next(iter(pipeline('warmup', voice='af_heart'))); ",
-            "audio = getattr(result, 'audio', None); ",
-            "nested = getattr(result, 'output', None) if audio is None else None; ",
-            "audio = getattr(nested, 'audio', None) if audio is None and nested is not None else audio; ",
-            "assert audio is not None, 'kokoro warmup produced no audio'; ",
-            "print('ok')",
-        ),
-    ];
-
-    let warmup_result = run_python_checked_with_retries(
-        paths,
-        &venv_python,
-        &warmup_args,
-        "neural TTS warmup failed",
-        2,
-    );
-
-    if let Err(initial_err) = warmup_result {
-        // WP-0231: one-shot self-heal. If the warmup probe still fails after the retry loop,
-        // it almost always means the venv has a coherent-looking pip resolve but a stale
-        // package version on disk (transformers / huggingface_hub / kokoro). Force-reinstall
-        // only those three so unrelated installed packs (Spleeter, diarization, TTS preview)
-        // are not disturbed, then retry the warmup once.
-        if !pin.warmup_recovery_force_reinstall.is_empty() {
-            let recovery_args = pip_install_args(
-                &["-m", "pip", "install", "--force-reinstall", "--no-deps"],
-                &pin.warmup_recovery_force_reinstall,
-            );
-            let recovery_install = run_python_checked(
-                paths,
-                &venv_python,
-                &recovery_args,
-                "neural TTS warmup recovery reinstall failed",
-            );
-            if let Err(recovery_err) = recovery_install {
-                return Err(EngineError::InstallFailed(format!(
-                    "{initial_err} (recovery reinstall also failed: {recovery_err})"
-                )));
-            }
-            run_python_checked(
-                paths,
-                &venv_python,
-                &warmup_args,
-                &format!(
-                    "neural TTS warmup still failing after recovery reinstall ({initial_err})"
-                ),
-            )?;
-        } else {
-            return Err(initial_err);
-        }
-    }
-
-    // Only write the readiness marker once the model is actually present in the
-    // app-local HF cache the OFFLINE dub job reads. This prevents the stale-marker
-    // class of bug where the warmup populated a different cache (e.g. the default
-    // user cache) yet the marker still claimed the offline job was ready.
-    if !kokoro_app_cache_ready(paths) {
+    if python_distribution_version(&venv_python, "en-core-web-sm").as_deref()
+        != Some(pin.spacy_model.version.as_str())
+    {
         return Err(EngineError::InstallFailed(
-            "Kokoro warmup completed but the Kokoro-82M snapshot is missing from the \
-             app-local Hugging Face cache the offline dub job reads (HF_HOME). The dub \
-             job would fail at the first synth call; aborting instead of marking the \
-             pack ready."
+            "managed Python environment does not contain en-core-web-sm==3.8.0 after exact wheel install"
                 .to_string(),
         ));
     }
-    let warmup_probe = kokoro_warmup_probe_path(paths);
+
+    provision_pinned_kokoro_assets(paths)?;
+    if !kokoro_app_cache_ready(paths) {
+        return Err(EngineError::InstallFailed(
+            "pinned Kokoro cache triplet is not ready after exact direct acquisition".to_string(),
+        ));
+    }
     if let Some(parent) = warmup_probe.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&warmup_probe, "ok\n")?;
+    crate::persistence::atomic_write_text(&warmup_probe, "ok\n")?;
 
     let status = tts_neural_local_v1_pack_status(paths);
     if !status.installed {
@@ -8814,91 +12194,24 @@ pub fn tts_voice_preserving_local_v1_pack_status(
 pub fn install_tts_voice_preserving_local_v1_pack(
     paths: &AppPaths,
 ) -> Result<TtsVoicePreservingLocalV1PackStatus> {
+    reject_managed_runtime_mutation(paths, "voice-preserving pack install/repair")?;
     let _probe_invalidation = CapabilityProbeInvalidationGuard::new();
     let _ = install_python_toolchain(paths)?;
     let venv_python = python_venv_python_path(paths)?;
     let pin = &pinned_dependency_manifest::manifest().tts_voice_preserving_local_v1;
 
-    let _ = run_python_checked(
+    let lockfile_path = locate_pack_lockfile("tts_voice_preserving_local_v1").ok_or_else(|| {
+        EngineError::InstallFailed(
+            "OpenVoice exact hashed dependency lockfile is missing".to_string(),
+        )
+    })?;
+    install_pack_from_lockfile(
         paths,
         &venv_python,
-        &["-m", "pip", "install", "--upgrade", "setuptools", "wheel"],
-        "pip bootstrap failed",
-    );
-
-    // Voice-preserving dubbing uses Kokoro as the baseline TTS stage and OpenVoice V2 as the
-    // voice-conversion stage.
-    let _ = install_tts_neural_local_v1_pack(paths)?;
-
-    let mut status_error: Option<String> = None;
-    let mut openvoice_installed = false;
-    let attempts = vec![vec![
-        "-m",
-        "pip",
-        "install",
-        "--upgrade",
-        "--no-deps",
-        pin.openvoice_git_spec.as_str(),
-    ]];
-    for args in attempts {
-        match run_python_checked(paths, &venv_python, &args, "pip install OpenVoice failed") {
-            Ok(()) => {
-                openvoice_installed = true;
-                status_error = None;
-                break;
-            }
-            Err(err) => status_error = Some(err.to_string()),
-        }
-    }
-
-    if !openvoice_installed {
-        return Err(EngineError::InstallFailed(status_error.unwrap_or_else(
-            || "OpenVoice install failed without a captured error".to_string(),
-        )));
-    }
-
-    // WP-0232: prefer the hashed lockfile for OpenVoice's pinned deps. The OpenVoice
-    // git+ install above runs with `--no-deps` so it does not appear in this lockfile;
-    // this step only installs the pinned_dependencies list.
-    let deps_err = match locate_pack_lockfile("tts_voice_preserving_local_v1") {
-        Some(lockfile_path) => install_pack_from_lockfile(
-            paths,
-            &venv_python,
-            "tts_voice_preserving_local_v1",
-            lockfile_path,
-            "OpenVoice dependency install",
-        ),
-        None => {
-            let pinned_args = pip_install_args(
-                &["-m", "pip", "install", "--upgrade"],
-                &pin.pinned_dependencies,
-            );
-            run_python_checked(
-                paths,
-                &venv_python,
-                &pinned_args,
-                "pip install OpenVoice dependencies failed (pinned, legacy path; no lockfile bundled)",
-            )
-        }
-    };
-    if let Err(err) = deps_err {
-        if !pinned_dependency_manifest::allow_unpinned_fallback() {
-            return Err(unpinned_fallback_disabled_error(
-                "OpenVoice dependency install",
-                &err,
-            ));
-        }
-        let fallback_args = pip_install_args(
-            &["-m", "pip", "install", "--upgrade"],
-            &pin.unpinned_fallback_dependencies,
-        );
-        let _ = run_python_checked(
-            paths,
-            &venv_python,
-            &fallback_args,
-            &format!("pip install OpenVoice dependencies failed (unpinned fallback): {err}"),
-        )?;
-    }
+        "tts_voice_preserving_local_v1",
+        lockfile_path,
+        "OpenVoice dependency install",
+    )?;
 
     vendor_patches::patch_openvoice_api_enable_watermark(&venv_python)?;
 
@@ -8968,48 +12281,6 @@ print("openvoicev2_download_ok")
         "OpenVoiceV2 model download failed",
     )?;
 
-    let warmup_code = format!(
-        r#"
-import os
-import torch
-from importlib import import_module
-
-base_dir = r"{models_dir}"
-config_path = os.path.join(base_dir, "converter", "config.json")
-ckpt_path = os.path.join(base_dir, "converter", "checkpoint.pth")
-
-api_mod = import_module("openvoice.api")
-ToneColorConverter = getattr(api_mod, "ToneColorConverter")
-
-try:
-  converter = ToneColorConverter(config_path, device="cpu", enable_watermark=False)
-except TypeError as e:
-  raise RuntimeError("ToneColorConverter must support enable_watermark=False") from e
-
-for attr in ("watermark_model", "watermark_detector"):
-  if hasattr(converter, attr):
-    try:
-      setattr(converter, attr, None)
-    except Exception:
-      pass
-
-if hasattr(converter, "load_ckpt"):
-  converter.load_ckpt(ckpt_path)
-else:
-  raise RuntimeError("ToneColorConverter has no load_ckpt()")
-
-print("openvoice_converter_warmup_ok")
-"#,
-        models_dir = models_dir.to_string_lossy()
-    );
-
-    run_python_checked(
-        paths,
-        &venv_python,
-        &["-c", &warmup_code],
-        "OpenVoice converter warmup failed",
-    )?;
-
     let status = tts_voice_preserving_local_v1_pack_status(paths);
     if !status.installed {
         let _ = pack_install_state::mark_failed(
@@ -9017,13 +12288,9 @@ print("openvoice_converter_warmup_ok")
             "tts_voice_preserving_local_v1",
             &status.status_detail,
         );
-        return Err(EngineError::InstallFailed(status_error.unwrap_or_else(
-            || {
-                format!(
-                    "voice-preserving pack installation completed but status check failed: {}",
-                    status.status_detail
-                )
-            },
+        return Err(EngineError::InstallFailed(format!(
+            "voice-preserving pack installation completed but status check failed: {}",
+            status.status_detail
         )));
     }
 
@@ -9245,8 +12512,69 @@ fn run_python_checked(
     )
 }
 
+fn run_cosyvoice_pip_checked(
+    paths: &AppPaths,
+    python: &std::path::Path,
+    pip_args: &[&str],
+    error_prefix: &str,
+) -> Result<()> {
+    let mut command = crate::cmd::command(python);
+    command.args(COSYVOICE_PIP_PREFIX);
+    command.args(pip_args);
+
+    // Windows environment names are case-insensitive. Enumerating and removing every
+    // inherited PIP_* spelling prevents a caller profile from injecting indexes,
+    // find-links paths, trusted hosts, constraints, or requirements.
+    for (name, _) in std::env::vars_os() {
+        if name
+            .to_string_lossy()
+            .to_ascii_uppercase()
+            .starts_with("PIP_")
+        {
+            command.env_remove(name);
+        }
+    }
+    command.env("PIP_CONFIG_FILE", "NUL");
+    command.env("PYTHONNOUSERSITE", "1");
+    command.env(
+        "XDG_CACHE_HOME",
+        paths
+            .cache_dir()
+            .join("python")
+            .to_string_lossy()
+            .to_string(),
+    );
+    command.env(
+        "HF_HOME",
+        paths.huggingface_cache_dir().to_string_lossy().to_string(),
+    );
+
+    let output = crate::cmd::run_owned_output(
+        &mut command,
+        std::time::Duration::from_secs(COSYVOICE_INSTALL_TIMEOUT_SECS),
+        crate::jobs::external_command_cancel_requested,
+    )
+    .map_err(|error| EngineError::InstallFailed(format!("{error_prefix}: {error}")))?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Err(EngineError::InstallFailed(format!(
+        "{error_prefix} (code={:?}): {}{}{}",
+        output.status.code(),
+        stderr.trim(),
+        if stderr.trim().is_empty() || stdout.trim().is_empty() {
+            ""
+        } else {
+            " | stdout: "
+        },
+        stdout.trim()
+    )))
+}
+
 /// Like `run_python_checked` but with a caller-chosen timeout. The CosyVoice install
-/// (torch 2.3.1 stack + a multi-GB model on a throttled connection) can exceed the
+/// (the CPU torch stack + a multi-GB model on a throttled connection) can exceed the
 /// default 30-minute command timeout, so it passes a longer budget.
 fn run_python_checked_with_timeout(
     paths: &AppPaths,
@@ -9276,17 +12604,12 @@ fn run_python_checked_with_timeout(
     );
     cmd.env(
         "HF_HOME",
-        paths
-            .cache_dir()
-            .join("huggingface")
-            .to_string_lossy()
-            .to_string(),
+        paths.huggingface_cache_dir().to_string_lossy().to_string(),
     );
     cmd.env(
         "HUGGINGFACE_HUB_CACHE",
         paths
-            .cache_dir()
-            .join("huggingface")
+            .huggingface_cache_dir()
             .join("hub")
             .to_string_lossy()
             .to_string(),
@@ -9341,6 +12664,86 @@ fn run_python_checked_with_retries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn managed_offline_runtime_never_uses_path_or_mutates_sealed_runtime_tools() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let generation = dir.path().join("runtime/generations/test-runtime");
+        std::fs::create_dir_all(&generation).expect("generation");
+        let paths = AppPaths::managed_for_test(dir.path().join("user-data"), generation);
+
+        assert!(!ytdlp_tools_status(&paths).available);
+        assert!(!js_runtime_tools_status(&paths).available);
+        for result in [
+            install_ffmpeg_tools(&paths).map(|_| ()),
+            install_js_runtime_tools(&paths).map(|_| ()),
+            install_portable_python(&paths).map(|_| ()),
+            install_python_toolchain(&paths).map(|_| ()),
+        ] {
+            let error = result.expect_err("managed runtime mutation must be rejected");
+            assert!(error
+                .to_string()
+                .contains("installer-managed offline runtime"));
+        }
+    }
+
+    fn tool_probe_spawn_count() -> u64 {
+        TOOL_PROBE_SPAWN_COUNT.with(|count| count.get())
+    }
+
+    #[test]
+    fn ffmpeg_status_is_cached_and_force_refreshes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("ensure dirs");
+
+        let before = tool_probe_spawn_count();
+        let _first = ffmpeg_tools_status(&paths);
+        let after_first = tool_probe_spawn_count();
+        assert!(after_first > before, "first call must probe");
+
+        let _second = ffmpeg_tools_status(&paths);
+        let after_second = tool_probe_spawn_count();
+        assert_eq!(
+            after_second, after_first,
+            "cached second call must not re-spawn"
+        );
+
+        let _forced = ffmpeg_tools_status_forced(&paths);
+        let after_forced = tool_probe_spawn_count();
+        assert!(after_forced > after_second, "forced call must refresh");
+    }
+
+    #[test]
+    fn portable_python_status_cache_invalidates_on_mtime_change() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.ensure_dirs().expect("ensure dirs");
+        let exe = paths.python_portable_python_exe();
+        std::fs::create_dir_all(exe.parent().expect("parent")).expect("create parent");
+        std::fs::write(&exe, b"not a real interpreter").expect("write fake exe");
+
+        let before = tool_probe_spawn_count();
+        let _first = portable_python_status(&paths);
+        let after_first = tool_probe_spawn_count();
+        assert!(after_first > before, "first call must probe");
+
+        let _second = portable_python_status(&paths);
+        assert_eq!(
+            tool_probe_spawn_count(),
+            after_first,
+            "cached second call must not re-spawn"
+        );
+
+        // A "fresh install" (new mtime) must invalidate the cache automatically.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&exe, b"still not a real interpreter, but newer").expect("rewrite exe");
+        let _third = portable_python_status(&paths);
+        assert!(
+            tool_probe_spawn_count() > after_first,
+            "changed executable mtime must invalidate the cache"
+        );
+    }
 
     #[test]
     fn provider_verification_foreground_pressure_is_generation_safe_and_observable() {
@@ -9727,6 +13130,193 @@ mod tests {
     }
 
     #[test]
+    fn cosyvoice_requirements_use_exclusive_governed_indexes() {
+        let (pytorch, pypi) = split_cosyvoice_requirements().expect("governed requirement split");
+        validate_cosyvoice_build_constraints().expect("governed build constraints");
+        assert_eq!(
+            COSYVOICE_PIP_PREFIX,
+            [
+                "-I",
+                "-m",
+                "pip",
+                "--isolated",
+                "--disable-pip-version-check",
+                "--no-input"
+            ]
+        );
+        assert_eq!(pytorch, "torch==2.10.0\ntorchaudio==2.10.0\n");
+        assert!(!pypi.contains("--extra-index-url"));
+        assert!(!pypi
+            .lines()
+            .any(|line| { line.starts_with("torch==") || line.starts_with("torchaudio==") }));
+        assert!(pypi.contains("transformers==5.3.0\n"));
+        assert!(pypi.contains("wetext==0.0.4\n"));
+    }
+
+    #[test]
+    fn cosyvoice_wetext_git_download_pins_commit_and_materializes_lfs() {
+        let code = cosyvoice_wetext_git_download_code(std::path::Path::new("C:/voxvulgi-wetext"))
+            .expect("wetext Git downloader code");
+        assert!(code.contains("https://www.modelscope.cn/pengzhendong/wetext.git"));
+        assert!(code.contains(COSYVOICE_WETEXT_REVISION));
+        assert!(code.contains("core.autocrlf', 'false"));
+        assert!(code.contains("GIT_LFS_SKIP_SMUDGE"));
+        assert!(code.contains("'lfs', 'fetch', '--include=*', '--exclude='"));
+        assert!(code.contains("resolved != expected_revision"));
+        assert!(code.contains("shutil.copyfile(lfs_object, destination)"));
+        assert!(code.contains("shutil.rmtree(target / '.git')"));
+        assert!(code.contains("manifest_paths ="));
+    }
+
+    #[test]
+    fn cosyvoice_wetext_repo_file_fallback_pins_snapshot_not_file_last_touch_commit() {
+        let code =
+            cosyvoice_wetext_repo_file_download_code(std::path::Path::new("C:/voxvulgi-wetext"))
+                .expect("wetext downloader code");
+        assert!(code.contains("endpoint='https://www.modelscope.cn'"));
+        assert!(code.contains("alt_endpoint='https://modelscope.cn'"));
+        assert!(code.contains("manifest_paths="));
+        assert!(code.contains("/models/%s/resolve/%s/%s"));
+        assert!(code.contains("status_code in (403,429,500,502,503,504)"));
+        assert!(code.contains("time.sleep(10*(attempt+1))"));
+        assert!(code.contains("download_one=lambda relative"));
+        assert!(!code.contains("repo/files?Revision="));
+        assert!(
+            !code.contains("entries[0]['Revision']==expected_revision"),
+            "a file's last-touch commit may differ from the requested snapshot commit"
+        );
+    }
+
+    #[test]
+    fn cosyvoice_embedded_dependency_identities_are_one_exact_contract() {
+        assert_eq!(COSYVOICE_TORCH_VERSION, "2.10.0+cpu");
+        assert_eq!(COSYVOICE_TORCH_WHEEL_SHA256.len(), 64);
+        assert!(COSYVOICE_TORCH_WHEEL_SHA256
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase()));
+        assert!(!cosyvoice_dependency_identity_code().contains("2.3.1+cpu"));
+        assert!(cosyvoice_dependency_identity_code().contains("torch_version = sys.argv[2]"));
+
+        for (label, bytes, sha256) in [
+            (
+                "openai-whisper",
+                COSYVOICE_GOVERNED_WHISPER_WHEEL,
+                COSYVOICE_GOVERNED_WHISPER_WHEEL_SHA256,
+            ),
+            (
+                "wget",
+                COSYVOICE_GOVERNED_WGET_WHEEL,
+                COSYVOICE_GOVERNED_WGET_WHEEL_SHA256,
+            ),
+        ] {
+            assert_eq!(
+                cosyvoice_sha256_bytes(bytes),
+                sha256,
+                "{label} bytes drifted"
+            );
+            assert!(
+                COSYVOICE_WHEELHOUSE_HELPER.contains(&bytes.len().to_string()),
+                "{label} byte count is not bound by the wheelhouse consumer"
+            );
+            assert!(
+                COSYVOICE_WHEELHOUSE_HELPER.contains(sha256),
+                "{label} SHA256 is not bound by the wheelhouse consumer"
+            );
+        }
+        assert!(COSYVOICE_WHEELHOUSE_HELPER.contains(COSYVOICE_TORCH_WHEEL_SHA256));
+        assert!(COSYVOICE_WHEELHOUSE_HELPER.contains(COSYVOICE_TORCHAUDIO_WHEEL_SHA256));
+        assert_eq!(
+            COSYVOICE_GOVERNED_PACKAGE_IDENTITIES
+                .iter()
+                .find(|(name, _, _)| *name == "torch")
+                .map(|(_, version, sha256)| (*version, *sha256)),
+            Some((COSYVOICE_TORCH_VERSION, COSYVOICE_TORCH_WHEEL_SHA256))
+        );
+        for environment_escape in [
+            "requests_ca_bundle",
+            "curl_ca_bundle",
+            "ssl_cert_file",
+            "ssl_cert_dir",
+        ] {
+            assert!(
+                COSYVOICE_WHEELHOUSE_HELPER.contains(environment_escape),
+                "wheelhouse acquisition does not scrub {environment_escape}"
+            );
+        }
+        assert_eq!(
+            cosyvoice_sha256_bytes(COSYVOICE_WHEELHOUSE_HELPER.as_bytes()),
+            COSYVOICE_WHEELHOUSE_HELPER_SHA256
+        );
+    }
+
+    #[test]
+    fn cosyvoice_requirement_parser_rejects_pip_grammar_and_canonical_duplicates() {
+        let governed = "--extra-index-url https://download.pytorch.org/whl/cpu\ntorch==2.10.0\ntorchaudio==2.10.0\ntransformers==5.3.0\n";
+        for forbidden in [
+            "--find-links https://example.invalid/wheels",
+            "--index-url https://example.invalid/simple",
+            "-r nested.txt",
+            "demo @ https://example.invalid/demo.whl",
+            "demo==1.0; python_version >= '3.11'",
+            "demo[extra]==1.0",
+            ".\\demo.whl",
+            "https://example.invalid/demo.whl",
+        ] {
+            let candidate = format!("{governed}{forbidden}\n");
+            assert!(
+                split_cosyvoice_requirements_text(&candidate).is_err(),
+                "parser accepted forbidden pip grammar: {forbidden}"
+            );
+        }
+        let duplicate = format!("{governed}demo-name==1.0\ndemo_name==1.0\n");
+        assert!(split_cosyvoice_requirements_text(&duplicate).is_err());
+        let repeated_separator_duplicate = format!("{governed}demo..name==1.0\ndemo-name==1.0\n");
+        assert!(split_cosyvoice_requirements_text(&repeated_separator_duplicate).is_err());
+    }
+
+    #[test]
+    fn cosyvoice_pip_report_requires_exact_https_host_sha_and_nondirect_source() {
+        let root = tempfile::tempdir().expect("report root");
+        let path = root.path().join("report.json");
+        let report = serde_json::json!({
+            "version": "1",
+            "install": [{
+                "download_info": {
+                    "url": "https://download.pytorch.org/whl/cpu/torch.whl",
+                    "archive_info": {"hashes": {"sha256": "a".repeat(64)}}
+                },
+                "is_direct": false,
+                "requested": true,
+                    "metadata": {"name": "torch", "version": "2.10.0+cpu"}
+            }]
+        });
+        std::fs::write(&path, serde_json::to_vec(&report).expect("report json"))
+            .expect("report fixture");
+        verify_cosyvoice_pip_report(
+            &path,
+            "download.pytorch.org",
+            Some(&[("torch", "2.10.0+cpu")]),
+            &["torch".to_string()],
+            &[],
+        )
+        .expect("governed report");
+
+        let mut escaped = report;
+        escaped["install"][0]["download_info"]["url"] =
+            serde_json::Value::String("https://download.pytorch.org.evil.invalid/torch.whl".into());
+        std::fs::write(&path, serde_json::to_vec(&escaped).expect("escaped json"))
+            .expect("escaped fixture");
+        assert!(verify_cosyvoice_pip_report(
+            &path,
+            "download.pytorch.org",
+            Some(&[("torch", "2.10.0+cpu")]),
+            &["torch".to_string()],
+            &[],
+        )
+        .is_err());
+    }
+
+    #[test]
     fn phase2_setup_estimate_is_manifest_owned_and_coherent() {
         let estimate = phase2_packs_setup_estimate();
         assert_eq!(estimate.download_bytes, 3_000_000_000);
@@ -9737,7 +13327,7 @@ mod tests {
     }
 
     #[test]
-    fn cosyvoice_readiness_requires_app_local_nonempty_wetext_assets() {
+    fn cosyvoice_readiness_rejects_partial_model_and_wetext_subsets() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().join("app"));
         let python = venv_python_path(&paths.python_cosyvoice_venv_dir());
@@ -9784,9 +13374,14 @@ mod tests {
             std::fs::create_dir_all(path.parent().expect("wetext parent")).expect("wetext dir");
             std::fs::write(path, b"fst").expect("wetext fixture");
         }
-        let complete = cosyvoice_pack_status(&paths);
-        assert!(complete.installed);
-        assert!(complete.wetext_assets_present);
+        let still_partial = cosyvoice_pack_status(&paths);
+        assert!(!still_partial.installed);
+        assert!(!still_partial.dependency_identity_verified);
+        assert!(!still_partial.model_present);
+        assert!(!still_partial.wetext_assets_present);
+        assert!(cosyvoice_pack_components_ready(
+            true, true, true, true, true, true, true
+        ));
 
         std::fs::write(
             backend.join("voxvulgi_cosyvoice_render.py"),
@@ -9797,6 +13392,100 @@ mod tests {
         assert!(!stale.installed);
         assert!(stale.render_script_present);
         assert!(!stale.render_script_current);
+    }
+
+    #[test]
+    fn cosyvoice_embedded_model_manifest_is_exact_and_rejects_unsafe_paths() {
+        let manifest = cosyvoice_parsed_model_manifest().expect("embedded exact model manifest");
+        assert_eq!(manifest.cosyvoice.files.len(), 19);
+        assert_eq!(manifest.wetext.files.len(), 26);
+        assert_eq!(manifest.wetext.directories.len(), 9);
+        assert_eq!(
+            manifest
+                .cosyvoice
+                .files
+                .iter()
+                .map(|file| file.bytes)
+                .sum::<u64>(),
+            4_856_505_002
+        );
+        assert_eq!(
+            manifest
+                .wetext
+                .files
+                .iter()
+                .map(|file| file.bytes)
+                .sum::<u64>(),
+            31_686_632
+        );
+        for unsafe_path in [
+            "../escape",
+            "/absolute",
+            "C:/drive",
+            "folder\\backslash",
+            "folder/name:stream",
+            "folder/CON.txt",
+            "folder/clock$",
+            "folder/trailing.",
+            "folder/trailing ",
+            "folder//empty",
+            "non_ascii_é",
+        ] {
+            assert!(
+                cosyvoice_manifest_path_components(unsafe_path).is_err(),
+                "unsafe manifest path was accepted: {unsafe_path}"
+            );
+        }
+    }
+
+    #[test]
+    fn cosyvoice_exact_file_gate_reopens_identity_and_rejects_hardlinks() {
+        let root = tempfile::tempdir().expect("exact file root");
+        let file = root.path().join("model.bin");
+        std::fs::write(&file, b"governed-model-bytes").expect("write exact file");
+        let expected_sha256 = cosyvoice_sha256_bytes(b"governed-model-bytes");
+        cosyvoice_hash_exact_regular_file(&file, 20, &expected_sha256)
+            .expect("single-link exact file");
+
+        let second_link = root.path().join("model-second-link.bin");
+        std::fs::hard_link(&file, &second_link).expect("create hardlink counterfactual");
+        assert!(cosyvoice_hash_exact_regular_file(&file, 20, &expected_sha256).is_err());
+        assert!(cosyvoice_hash_exact_regular_file(&second_link, 20, &expected_sha256).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cosyvoice_managed_creation_and_backend_write_reject_junction_without_mutation() {
+        let root = tempfile::tempdir().expect("junction fixture root");
+        let outside = root.path().join("outside");
+        let linked_backend = root.path().join("linked_backend");
+        std::fs::create_dir(&outside).expect("outside root");
+        let output = std::process::Command::new("cmd")
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&linked_backend)
+            .arg(&outside)
+            .output()
+            .expect("create junction fixture");
+        assert!(
+            output.status.success(),
+            "junction fixture failed: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let child = linked_backend.join("new_child");
+        assert!(cosyvoice_ensure_managed_directory(&child).is_err());
+        assert!(!outside.join("new_child").exists());
+        assert!(cosyvoice_write_embedded_backend_file(
+            &linked_backend,
+            "forged-root-identity",
+            "voxvulgi_cosyvoice_render.py",
+            "must-not-write",
+        )
+        .is_err());
+        assert!(!outside.join("voxvulgi_cosyvoice_render.py").exists());
+
+        std::fs::remove_dir(&linked_backend).expect("remove owned junction");
     }
 
     static PROVIDER_INTEGRITY_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -9864,7 +13553,7 @@ mod tests {
         assert_eq!(
             provider_npm_ci_args(),
             ["ci", "--ignore-scripts"],
-            "pinned npm 11.17 must suppress every lifecycle script before the exact canvas rebuild"
+            "pinned npm 11.17 must suppress every lifecycle script before exact prebuilt canvas extraction"
         );
         assert_eq!(
             pinned_dependency_manifest::manifest()
@@ -10205,6 +13894,34 @@ mod tests {
     }
 
     #[test]
+    fn provider_execution_status_waits_for_verification_publication() {
+        let _serial = PROVIDER_INTEGRITY_TEST_LOCK.lock().unwrap();
+        let base = std::env::temp_dir().join(format!("vv_provider_execution_race_{}", uuid::Uuid::new_v4()));
+        let paths = AppPaths::new(base.clone());
+        let server = paths.youtube_po_provider_server_dir();
+        std::fs::create_dir_all(&server).unwrap();
+        let lifecycle = youtube_po_provider_lifecycle_lock().lock().unwrap();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (result_tx, result_rx) = std::sync::mpsc::channel();
+        let worker_paths = paths.clone();
+        let worker = std::thread::spawn(move || {
+            entered_tx.send(()).unwrap();
+            result_tx.send(youtube_po_provider_execution_status(&worker_paths)).unwrap();
+        });
+        entered_rx.recv().unwrap();
+        assert!(result_rx.recv_timeout(std::time::Duration::from_millis(100)).is_err());
+        let expected = pinned_dependency_manifest::manifest().youtube_po_provider.node_modules_tree_sha256_hex.clone();
+        attest_provider_node_modules_tree(&server, &expected).unwrap();
+        drop(lifecycle);
+        let status = result_rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+        assert_eq!(status.node_modules_tree_sha256_hex.as_deref(), Some(expected.as_str()));
+        assert!(!status.installed, "an attested child digest alone cannot authorize missing payload");
+        worker.join().unwrap();
+        clear_provider_node_modules_process_attestation(&server);
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
     fn forced_tamper_verification_clears_prior_process_attestation_and_receipt() {
         let _guard = PROVIDER_INTEGRITY_TEST_LOCK.lock().unwrap();
         let base = std::env::temp_dir().join(format!(
@@ -10276,9 +13993,74 @@ mod tests {
             nested.push(format!("d{index}"));
         }
         std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(nested.join("index.js"), b"bounded").unwrap();
-        assert!(canonical_directory_tree_sha256_hex(&base).is_none());
+        let offending_file = nested.join("index.js");
+        std::fs::write(&offending_file, b"bounded").unwrap();
+        let error = authenticate_provider_node_modules_tree(&base, "unused")
+            .expect_err("over-depth tree must fail before digest comparison")
+            .to_string();
+        assert!(error.contains(&offending_file.display().to_string()));
+        assert!(error.contains("maximum tree depth of 32"));
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn provider_node_modules_authentication_reports_missing_root_path_and_reason() {
+        let root = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_missing_tree_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let error = authenticate_provider_node_modules_tree(&root, "unused")
+            .expect_err("missing tree root must fail before digest comparison")
+            .to_string();
+        assert!(error.contains(&root.display().to_string()));
+        assert!(error.contains("directory read failed"));
+    }
+
+    #[test]
+    fn provider_tree_timeout_allows_long_scans_that_keep_hashing_files() {
+        assert_eq!(
+            provider_tree_scan_timeout_reason(
+                std::time::Duration::from_secs(610),
+                std::time::Duration::from_secs(1),
+            ),
+            None,
+            "a scan beyond the former 600 second wall cap must continue while files progress"
+        );
+        assert_eq!(
+            provider_tree_scan_timeout_reason(
+                PROVIDER_TREE_MAX_TOTAL_ELAPSED,
+                PROVIDER_TREE_MAX_NO_PROGRESS_ELAPSED,
+            ),
+            None,
+            "the documented bounds are inclusive"
+        );
+        assert_eq!(
+            provider_tree_scan_timeout_reason(
+                std::time::Duration::from_secs(611),
+                PROVIDER_TREE_MAX_NO_PROGRESS_ELAPSED + std::time::Duration::from_secs(1),
+            ),
+            Some("scan made no file-hash progress for 600 seconds")
+        );
+        assert_eq!(
+            provider_tree_scan_timeout_reason(
+                PROVIDER_TREE_MAX_TOTAL_ELAPSED + std::time::Duration::from_secs(1),
+                std::time::Duration::ZERO,
+            ),
+            Some("scan exceeded the 3600 second absolute time limit")
+        );
+        assert_eq!(
+            provider_tree_post_hash_timeout_reason(PROVIDER_TREE_MAX_TOTAL_ELAPSED),
+            None,
+            "a file hash completing exactly at the absolute bound remains valid"
+        );
+        assert_eq!(
+            provider_tree_post_hash_timeout_reason(
+                PROVIDER_TREE_MAX_TOTAL_ELAPSED + std::time::Duration::from_secs(1),
+            ),
+            Some("scan exceeded the 3600 second absolute time limit"),
+            "a completed final file cannot reset or bypass absolute elapsed time"
+        );
     }
 
     #[test]
@@ -10392,6 +14174,204 @@ mod tests {
         authenticate_complete_provider_trees_against(paths, &node_root, &provider_root).unwrap()
     }
 
+    // WP-0321 S3: provider-tree receipt fast-path tests.
+
+    fn write_matching_provider_tree_identity_receipt(
+        paths: &AppPaths,
+        identity: &ProviderInstalledIdentity,
+    ) {
+        let server_dir = paths.youtube_po_provider_server_dir();
+        std::fs::create_dir_all(&server_dir).unwrap();
+        let node_files =
+            provider_tree_file_stats(&paths.node_runtime_dir(), PROVIDER_NODE_TREE_EXCLUSIONS)
+                .unwrap();
+        let provider_files = provider_tree_file_stats(
+            &paths.youtube_po_provider_dir(),
+            PROVIDER_APPLICATION_TREE_EXCLUSIONS,
+        )
+        .unwrap();
+        write_provider_tree_identity_receipt(
+            &server_dir,
+            &identity.node_tree_sha256,
+            &identity.provider_tree_sha256,
+            node_files,
+            provider_files,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn provider_tree_identity_receipt_written_on_first_verification_and_accepted_unchanged() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_tree_receipt_roundtrip_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let identity = synthetic_provider_destination(&paths);
+        let server_dir = paths.youtube_po_provider_server_dir();
+
+        // (a) first verification: no receipt exists yet, so the fast path is refused.
+        assert!(!accept_provider_tree_identity_receipt(
+            &server_dir,
+            &paths.node_runtime_dir(),
+            &paths.youtube_po_provider_dir(),
+            &identity,
+        ));
+
+        // A successful full authentication persists the receipt (mirrors what
+        // `authenticate_authoritative_installed_provider_identity` does on its slow path).
+        write_matching_provider_tree_identity_receipt(&paths, &identity);
+
+        // (b) second verification with unchanged files: accepted, and no full-tree hash walk
+        // (`canonical_directory_tree_sha256_hex_with_exclusions_and_progress`) ran to do it.
+        let before = provider_tree_full_walk_count().load(std::sync::atomic::Ordering::SeqCst);
+        assert!(accept_provider_tree_identity_receipt(
+            &server_dir,
+            &paths.node_runtime_dir(),
+            &paths.youtube_po_provider_dir(),
+            &identity,
+        ));
+        let after = provider_tree_full_walk_count().load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(before, after, "accepted receipt must not trigger a full hash walk");
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn provider_tree_identity_receipt_forces_full_walk_on_size_or_mtime_change() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_tree_receipt_changed_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let identity = synthetic_provider_destination(&paths);
+        write_matching_provider_tree_identity_receipt(&paths, &identity);
+        let server_dir = paths.youtube_po_provider_server_dir();
+        let changed_file = paths.youtube_po_provider_dir().join("provider_fixture");
+
+        // (c1) a resized file must force a full walk (the fast path must refuse).
+        std::fs::write(&changed_file, b"provider-resized").unwrap();
+        assert!(!accept_provider_tree_identity_receipt(
+            &server_dir,
+            &paths.node_runtime_dir(),
+            &paths.youtube_po_provider_dir(),
+            &identity,
+        ));
+
+        // (c2) restore the original byte length but change only the mtime: this must also force
+        // a full walk. (Documented limit, not asserted here: a same-size, same-mtime byte forgery
+        // within the receipt's 7-day window is NOT required to be detected by the stat-only fast
+        // path -- see the security-trade-off comment on `accept_provider_tree_identity_receipt`.)
+        std::fs::write(&changed_file, b"provider").unwrap();
+        let file = std::fs::File::options()
+            .write(true)
+            .open(&changed_file)
+            .unwrap();
+        file.set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3600))
+            .unwrap();
+        drop(file);
+        assert!(!accept_provider_tree_identity_receipt(
+            &server_dir,
+            &paths.node_runtime_dir(),
+            &paths.youtube_po_provider_dir(),
+            &identity,
+        ));
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn provider_tree_identity_receipt_expires_after_seven_days() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_tree_receipt_stale_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let identity = synthetic_provider_destination(&paths);
+        let server_dir = paths.youtube_po_provider_server_dir();
+        std::fs::create_dir_all(&server_dir).unwrap();
+        let node_files =
+            provider_tree_file_stats(&paths.node_runtime_dir(), PROVIDER_NODE_TREE_EXCLUSIONS)
+                .unwrap();
+        let provider_files = provider_tree_file_stats(
+            &paths.youtube_po_provider_dir(),
+            PROVIDER_APPLICATION_TREE_EXCLUSIONS,
+        )
+        .unwrap();
+        let stale_receipt = ProviderTreeIdentityReceipt {
+            schema_version: 1,
+            install_generation: provider_install_generation(),
+            node_tree_sha256: identity.node_tree_sha256.to_ascii_uppercase(),
+            provider_tree_sha256: identity.provider_tree_sha256.to_ascii_uppercase(),
+            verified_at_ms: now_ms() - PROVIDER_TREE_IDENTITY_RECEIPT_MAX_AGE_MS - 1,
+            node_files,
+            provider_files,
+        };
+        crate::persistence::atomic_write_text(
+            &provider_tree_identity_receipt_path(&server_dir),
+            &serde_json::to_string_pretty(&stale_receipt).unwrap(),
+        )
+        .unwrap();
+
+        // (d) a receipt older than 7 days must force a full walk.
+        assert!(!accept_provider_tree_identity_receipt(
+            &server_dir,
+            &paths.node_runtime_dir(),
+            &paths.youtube_po_provider_dir(),
+            &identity,
+        ));
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn provider_tree_identity_receipt_generation_mismatch_forces_full_walk() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_tree_receipt_generation_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let identity = synthetic_provider_destination(&paths);
+        let server_dir = paths.youtube_po_provider_server_dir();
+        std::fs::create_dir_all(&server_dir).unwrap();
+        let node_files =
+            provider_tree_file_stats(&paths.node_runtime_dir(), PROVIDER_NODE_TREE_EXCLUSIONS)
+                .unwrap();
+        let provider_files = provider_tree_file_stats(
+            &paths.youtube_po_provider_dir(),
+            PROVIDER_APPLICATION_TREE_EXCLUSIONS,
+        )
+        .unwrap();
+        let mismatched_receipt = ProviderTreeIdentityReceipt {
+            schema_version: 1,
+            install_generation: "different-install-generation".to_string(),
+            node_tree_sha256: identity.node_tree_sha256.to_ascii_uppercase(),
+            provider_tree_sha256: identity.provider_tree_sha256.to_ascii_uppercase(),
+            verified_at_ms: now_ms(),
+            node_files,
+            provider_files,
+        };
+        crate::persistence::atomic_write_text(
+            &provider_tree_identity_receipt_path(&server_dir),
+            &serde_json::to_string_pretty(&mismatched_receipt).unwrap(),
+        )
+        .unwrap();
+
+        // (e) an install-generation mismatch must force a full walk.
+        assert!(!accept_provider_tree_identity_receipt(
+            &server_dir,
+            &paths.node_runtime_dir(),
+            &paths.youtube_po_provider_dir(),
+            &identity,
+        ));
+
+        let _ = std::fs::remove_dir_all(base);
+    }
+
     #[test]
     fn fresh_offline_adoption_is_atomic_idempotent_and_carrier_independent() {
         let base = std::env::temp_dir().join(format!(
@@ -10446,6 +14426,105 @@ mod tests {
             &verified.provider_tree_sha256,
         )
         .is_err());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn authenticated_runtime_copy_rebinds_identity_without_accepting_changed_bytes() {
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_provider_runtime_rebind_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let initial = synthetic_provider_destination(&paths);
+        commit_adopted_provider_identity(&paths, initial.clone()).unwrap();
+        let committed = load_provider_installed_identity(&paths).unwrap().unwrap();
+
+        let old_node = paths.tools_dir().join("old_node_object");
+        let old_provider = paths.tools_dir().join("old_provider_object");
+        std::fs::rename(paths.node_runtime_dir(), &old_node).unwrap();
+        std::fs::rename(paths.youtube_po_provider_dir(), &old_provider).unwrap();
+        std::fs::create_dir_all(paths.node_runtime_dir()).unwrap();
+        std::fs::create_dir_all(paths.youtube_po_provider_dir()).unwrap();
+        std::fs::copy(
+            old_node.join("node_fixture"),
+            paths.node_runtime_dir().join("node_fixture"),
+        )
+        .unwrap();
+        std::fs::copy(
+            old_provider.join("provider_fixture"),
+            paths.youtube_po_provider_dir().join("provider_fixture"),
+        )
+        .unwrap();
+
+        let rebound = authenticate_complete_provider_trees_against(
+            &paths,
+            &initial.node_tree_sha256,
+            &initial.provider_tree_sha256,
+        )
+        .unwrap();
+        assert_ne!(
+            rebound.node_directory_identity,
+            committed.node_directory_identity
+        );
+        assert_ne!(
+            rebound.provider_directory_identity,
+            committed.provider_directory_identity
+        );
+        commit_adopted_provider_identity(&paths, rebound.clone()).unwrap();
+
+        let selected = load_provider_installed_identity(&paths).unwrap().unwrap();
+        assert_eq!(
+            selected.node_directory_identity,
+            rebound.node_directory_identity
+        );
+        assert_eq!(
+            selected.provider_directory_identity,
+            rebound.provider_directory_identity
+        );
+        assert_ne!(selected.lineage_attempt_id, committed.lineage_attempt_id);
+        require_exact_committed_provider_identity_lineage(&paths, &selected).unwrap();
+        authenticate_stored_managed_provider_identity_at(
+            &paths,
+            &selected,
+            &paths.node_runtime_dir(),
+            &paths.youtube_po_provider_dir(),
+        )
+        .unwrap();
+
+        std::fs::write(
+            paths.youtube_po_provider_dir().join("provider_fixture"),
+            b"changed!",
+        )
+        .unwrap();
+        assert!(authenticate_complete_provider_trees_against(
+            &paths,
+            &initial.node_tree_sha256,
+            &initial.provider_tree_sha256,
+        )
+        .is_err());
+        let after_tamper = load_provider_installed_identity(&paths).unwrap().unwrap();
+        assert_eq!(after_tamper.lineage_attempt_id, selected.lineage_attempt_id);
+        assert_eq!(after_tamper.commit_nonce, selected.commit_nonce);
+        assert_eq!(
+            after_tamper.node_directory_identity,
+            selected.node_directory_identity
+        );
+        assert_eq!(
+            after_tamper.provider_directory_identity,
+            selected.provider_directory_identity
+        );
+        assert_eq!(after_tamper.node_tree_sha256, selected.node_tree_sha256);
+        assert_eq!(
+            after_tamper.provider_tree_sha256,
+            selected.provider_tree_sha256
+        );
+        assert!(
+            !provider_node_modules_integrity_receipt_path(&paths.youtube_po_provider_server_dir())
+                .exists(),
+            "failed tamper authentication must not publish an integrity receipt"
+        );
         let _ = std::fs::remove_dir_all(base);
     }
 
@@ -11355,8 +15434,8 @@ mod tests {
             std::fs::copy(entry.path(), published.join(entry.file_name())).unwrap();
         }
         assert_eq!(
-            canonical_provider_node_tree_sha256_hex(&published),
-            canonical_provider_node_tree_sha256_hex(&original)
+            canonical_provider_node_tree_sha256_hex(&published).unwrap(),
+            canonical_provider_node_tree_sha256_hex(&original).unwrap()
         );
         assert!(reconcile_interrupted_provider_install_with_checks(
             &paths,
@@ -11475,7 +15554,8 @@ mod tests {
             PROVIDER_APPLICATION_TREE_EXCLUSIONS,
             [
                 ".voxvulgi_provider_install_attempt",
-                "server/.node_modules_integrity.json"
+                "server/.node_modules_integrity.json",
+                "server/.provider_tree_identity_receipt.json"
             ]
         );
     }
@@ -11495,7 +15575,7 @@ mod tests {
         std::fs::create_dir_all(&outside).unwrap();
         std::fs::write(outside.join("payload"), b"outside").unwrap();
         match std::os::windows::fs::symlink_dir(&outside, tree.join("junction_like")) {
-            Ok(()) => assert!(canonical_provider_application_tree_sha256_hex(&tree).is_none()),
+            Ok(()) => assert!(canonical_provider_application_tree_sha256_hex(&tree).is_err()),
             Err(error) => eprintln!("reparse creation unavailable in this test context: {error}"),
         }
     }

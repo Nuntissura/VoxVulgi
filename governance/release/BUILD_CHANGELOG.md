@@ -1,12 +1,13 @@
 # VoxVulgi Build Changelog
 
-This changelog tracks desktop installer builds produced by `governance/scripts/build_desktop_target.ps1`.
+This changelog tracks proven, operator-designated desktop releases. Build and installer attempts belong in build logs or the active work packet, not here.
 
 ## Policy
 
-- Every desktop target build must increment the desktop app semantic version.
-- Every desktop target build must append a build entry in this file.
-- Every build entry must include the Work Packet IDs included in that build.
+- Build, repair, retry, test, and packaging commands must not change the product version or this changelog.
+- Version assignment is a separate explicit operator-directed product-release action.
+- Add an entry only after the exact operator-designated release artifact passes its required proof gates.
+- Every release entry must include the Work Packet IDs included in that release.
 - Build entries are append-only and listed newest last.
 
 ## Entry Template
@@ -1487,3 +1488,123 @@ This changelog tracks desktop installer builds produced by `governance/scripts/b
 - Artifacts:
   - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.183_x64-setup.exe`
 - Notes: Fix Inno 7.1 runtime timestamp Type Mismatch and add regression coverage
+
+## 0.1.188 - 2026-08-29T06:43:41Z
+- Work Packets: `WP-0308`
+- Commit: `f6420b5`
+- Offline Bundle ID: `unknown`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.188_x64-setup.exe`
+- Notes: WP-0308 corrected core offline-generation marker and exact release acceptance.
+
+## 0.1.189 - 2026-08-29T10:37:05Z
+- Work Packets: `WP-0308`
+- Commit: `f6420b5`
+- Offline Bundle ID: `unknown`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.189_x64-setup.exe`
+- Notes: WP-0308 corrected core offline-generation marker and exact release acceptance.
+
+## 0.1.190 - 2026-08-29T15:02:52Z
+- Work Packets: `WP-0308`
+- Commit: `f6420b5`
+- Offline Bundle ID: `unknown`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.190_x64-setup.exe`
+- Notes: WP-0308 corrected core offline-generation marker and exact release acceptance.
+
+## 0.1.191 - 2026-08-29T16:37:57Z
+- Work Packets: `WP-0308`
+- Commit: `f6420b5`
+- Offline Bundle ID: `unknown`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.191_x64-setup.exe`
+- Notes: WP-0308 corrected core offline-generation marker and exact release acceptance.
+
+## 0.1.192 - 2026-08-29T18:54:43Z
+- Work Packets: `WP-0308`
+- Commit: `f6420b5`
+- Offline Bundle ID: `unknown`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.192_x64-setup.exe`
+- Notes: WP-0308 corrected core offline-generation marker and exact release acceptance.
+
+## 0.1.193 - 2026-08-29T20:15:26Z
+- Work Packets: `WP-0308`
+- Commit: `f6420b5`
+- Offline Bundle ID: `unknown`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.193_x64-setup.exe`
+- Notes: WP-0308 corrected core offline-generation marker and exact release acceptance.
+
+## 0.1.194 - 2026-08-29T21:52:06Z
+- Work Packets: `WP-0308`
+- Commit: `f6420b5`
+- Offline Bundle ID: `unknown`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.194_x64-setup.exe`
+- Notes: WP-0308 corrected core offline-generation marker and exact release acceptance.
+
+## 0.1.195 - 2026-08-30T00:37:03Z
+- Work Packets: `WP-0308`
+- Commit: `f6420b5`
+- Offline Bundle ID: `unknown`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.195_x64-setup.exe`
+- Notes: WP-0308 corrected core offline-generation marker and exact release acceptance.
+
+## 0.1.196 - 2026-08-30T02:48:39Z
+- Work Packets: `WP-0308`
+- Commit: `f6420b5`
+- Offline Bundle ID: `unknown`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.196_x64-setup.exe`
+- Notes: WP-0308 corrected core offline-generation marker and exact release acceptance.
+
+## 0.1.197 - 2026-08-30T05:00:52Z
+- Work Packets: `WP-0308`
+- Commit: `f6420b5`
+- Offline Bundle ID: `unknown`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.197_x64-setup.exe`
+- Notes: WP-0308 corrected core offline-generation marker and exact release acceptance.
+
+## 0.1.198 - 2026-08-30T07:34:28Z
+- Work Packets: `WP-0308`
+- Commit: `f6420b5`
+- Offline Bundle ID: `unknown`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.198_x64-setup.exe`
+- Notes: WP-0308 corrected core offline-generation marker and exact release acceptance.
+
+## 0.1.201 - 2026-08-30T14:42:01Z
+- Work Packets: `WP-0316`
+- Commit: `f6420b5`
+- Offline Bundle ID: `unknown`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.201_x64-setup.exe`
+- Notes: Core-only desktop app build; dependencies are supplied by the separately managed runtime; stable compiler cache reused; pack warmup and offline payload gates are not applicable.
+
+## 0.1.202 - 2026-08-30T16:35:18Z
+- Work Packets: `WP-0316`
+- Commit: `f6420b5`
+- Offline Bundle ID: `unknown`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.202_x64-setup.exe`
+- Notes: Fix installer maintenance transaction: in-process reinstall, durable phase log, deterministic maintenance test selector, and fast zlib packaging; no runtime or dependency payload work.
+
+## 0.1.203 - 2026-08-30T16:40:30Z
+- Work Packets: `WP-0316`
+- Commit: `f6420b5`
+- Offline Bundle ID: `unknown`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.203_x64-setup.exe`
+- Notes: Finalize installer maintenance transaction with error-state-preserving durable phase logging; no runtime or dependency payload work.
+
+## 0.1.204 - 2026-08-30T16:45:02Z
+- Work Packets: `WP-0316`
+- Commit: `f6420b5`
+- Offline Bundle ID: `unknown`
+- Artifacts:
+  - `product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.204_x64-setup.exe`
+- Notes: Finalize installer maintenance phase log with documented NSIS append seek semantics; no runtime or dependency payload work.

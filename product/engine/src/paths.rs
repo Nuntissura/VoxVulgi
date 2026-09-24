@@ -1,4 +1,7 @@
 use crate::persistence;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -99,14 +102,220 @@ pub fn probe_path_bounded(path: &Path, timeout: Duration) -> BoundedPathKind {
     )
 }
 
+pub const MANAGED_RUNTIME_SCHEMA_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeMode {
+    Isolated,
+    LegacyAppData,
+    ManagedOffline,
+    ManagedOfflineInvalid,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeActivationPointer {
+    pub schema_version: u32,
+    pub runtime_id: String,
+    pub manifest_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeComponentManifest {
+    pub root: String,
+    pub archive_sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuntimeRequiredFile {
+    pub path: String,
+    #[serde(default)]
+    pub sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManagedRuntimeManifest {
+    pub schema_version: u32,
+    pub runtime_id: String,
+    pub compatible_app_versions: Vec<String>,
+    pub qualification_id: String,
+    pub components: BTreeMap<String, RuntimeComponentManifest>,
+    pub required_files: Vec<RuntimeRequiredFile>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeProvenance {
+    pub mode: RuntimeMode,
+    pub user_data_root: String,
+    pub runtime_root: String,
+    pub generation_root: String,
+    pub runtime_id: Option<String>,
+    pub manifest_sha256: Option<String>,
+    pub manifest_status: String,
+    pub fallback_policy: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppPaths {
     pub base_dir: PathBuf,
+    runtime_root: PathBuf,
+    runtime_payload_dir: PathBuf,
+    runtime_mode: RuntimeMode,
+    runtime_id: Option<String>,
+    runtime_manifest_sha256: Option<String>,
+    runtime_manifest_status: String,
 }
 
 impl AppPaths {
     pub fn new(base_dir: PathBuf) -> Self {
-        Self { base_dir }
+        Self {
+            runtime_root: base_dir.clone(),
+            runtime_payload_dir: base_dir.clone(),
+            base_dir,
+            runtime_mode: RuntimeMode::Isolated,
+            runtime_id: None,
+            runtime_manifest_sha256: None,
+            runtime_manifest_status: "isolated".to_string(),
+        }
+    }
+
+    pub fn installed(
+        base_dir: PathBuf,
+        runtime_root: PathBuf,
+        app_version: &str,
+    ) -> Result<Self, String> {
+        let pointer_path = runtime_root.join("current.json");
+        if !pointer_path.exists() {
+            return Ok(Self {
+                runtime_payload_dir: base_dir.clone(),
+                base_dir,
+                runtime_root,
+                runtime_mode: RuntimeMode::LegacyAppData,
+                runtime_id: None,
+                runtime_manifest_sha256: None,
+                runtime_manifest_status: "legacy_no_pointer".to_string(),
+            });
+        }
+
+        let pointer: RuntimeActivationPointer = serde_json::from_slice(
+            &std::fs::read(&pointer_path)
+                .map_err(|error| format!("failed to read managed runtime pointer: {error}"))?,
+        )
+        .map_err(|error| format!("managed runtime pointer is invalid JSON: {error}"))?;
+        if pointer.schema_version != MANAGED_RUNTIME_SCHEMA_VERSION {
+            return Err(format!(
+                "managed runtime pointer schema {} is unsupported",
+                pointer.schema_version
+            ));
+        }
+        validate_runtime_token(&pointer.runtime_id, "runtime_id")?;
+        validate_sha256(&pointer.manifest_sha256, "manifest_sha256")?;
+
+        let generation_root = runtime_root.join("generations").join(&pointer.runtime_id);
+        let manifest_path = generation_root.join("runtime_manifest.json");
+        let manifest_bytes = std::fs::read(&manifest_path).map_err(|error| {
+            format!(
+                "selected managed runtime manifest cannot be read at {}: {error}",
+                manifest_path.display()
+            )
+        })?;
+        let observed_manifest_sha256 = hex::encode(Sha256::digest(&manifest_bytes));
+        if !observed_manifest_sha256.eq_ignore_ascii_case(&pointer.manifest_sha256) {
+            return Err(format!(
+                "selected managed runtime manifest hash mismatch (expected={}, observed={})",
+                pointer.manifest_sha256, observed_manifest_sha256
+            ));
+        }
+        let manifest: ManagedRuntimeManifest = serde_json::from_slice(&manifest_bytes)
+            .map_err(|error| format!("managed runtime manifest is invalid JSON: {error}"))?;
+        validate_managed_runtime_manifest(
+            &manifest,
+            &pointer.runtime_id,
+            app_version,
+            &generation_root,
+        )?;
+
+        Ok(Self {
+            base_dir,
+            runtime_root,
+            runtime_payload_dir: generation_root,
+            runtime_mode: RuntimeMode::ManagedOffline,
+            runtime_id: Some(pointer.runtime_id),
+            runtime_manifest_sha256: Some(observed_manifest_sha256),
+            runtime_manifest_status: "verified".to_string(),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn managed_for_test(base_dir: PathBuf, generation_root: PathBuf) -> Self {
+        let runtime_root = generation_root
+            .parent()
+            .and_then(Path::parent)
+            .unwrap_or(&generation_root)
+            .to_path_buf();
+        Self {
+            base_dir,
+            runtime_root,
+            runtime_payload_dir: generation_root,
+            runtime_mode: RuntimeMode::ManagedOffline,
+            runtime_id: Some("test-runtime".to_string()),
+            runtime_manifest_sha256: Some("a".repeat(64)),
+            runtime_manifest_status: "verified_test_fixture".to_string(),
+        }
+    }
+
+    pub fn runtime_root(&self) -> &Path {
+        &self.runtime_root
+    }
+
+    pub fn runtime_generation_root(&self) -> &Path {
+        &self.runtime_payload_dir
+    }
+
+    /// Writable, app-managed download-engine generations. This intentionally lives with the
+    /// installed runtime rather than retained user data (database/preferences).
+    pub fn download_engines_dir(&self) -> PathBuf {
+        self.runtime_root.join("download_engines")
+    }
+
+    pub fn runtime_mode(&self) -> RuntimeMode {
+        self.runtime_mode
+    }
+
+    pub fn managed_offline(&self) -> bool {
+        matches!(
+            self.runtime_mode,
+            RuntimeMode::ManagedOffline | RuntimeMode::ManagedOfflineInvalid
+        )
+    }
+
+    pub fn invalid_managed(base_dir: PathBuf, runtime_root: PathBuf, error: String) -> Self {
+        Self {
+            base_dir,
+            runtime_payload_dir: runtime_root.join("generations").join("_invalid"),
+            runtime_root,
+            runtime_mode: RuntimeMode::ManagedOfflineInvalid,
+            runtime_id: None,
+            runtime_manifest_sha256: None,
+            runtime_manifest_status: format!("invalid: {error}"),
+        }
+    }
+
+    pub fn runtime_provenance(&self) -> RuntimeProvenance {
+        RuntimeProvenance {
+            mode: self.runtime_mode,
+            user_data_root: self.base_dir.to_string_lossy().to_string(),
+            runtime_root: self.runtime_root.to_string_lossy().to_string(),
+            generation_root: self.runtime_payload_dir.to_string_lossy().to_string(),
+            runtime_id: self.runtime_id.clone(),
+            manifest_sha256: self.runtime_manifest_sha256.clone(),
+            manifest_status: self.runtime_manifest_status.clone(),
+            fallback_policy: if self.managed_offline() {
+                "managed_generation_only".to_string()
+            } else {
+                "legacy_developer_fallbacks_allowed".to_string()
+            },
+        }
     }
 
     pub fn config_dir(&self) -> PathBuf {
@@ -275,6 +484,57 @@ impl AppPaths {
 
     pub fn download_dir_override_path(&self) -> PathBuf {
         self.config_dir().join("download_dir.txt")
+    }
+
+    /// WP-0322 A: default subscription export folder, disk-agnostic (relative to `base_dir`,
+    /// same as every other app-data-relative path here).
+    pub fn default_subscriptions_export_dir(&self) -> PathBuf {
+        self.base_dir.join("exports").join("subscriptions")
+    }
+
+    pub fn subscriptions_export_dir_override_path(&self) -> PathBuf {
+        self.config_dir().join("subscriptions_export_dir.txt")
+    }
+
+    /// WP-0322 A: last export time/path/count/error, so Options can show them without
+    /// re-scanning the export folder.
+    pub fn subscriptions_export_state_path(&self) -> PathBuf {
+        self.config_dir().join("subscriptions_export_state.json")
+    }
+
+    pub fn subscriptions_export_dir_override(&self) -> std::io::Result<Option<PathBuf>> {
+        let path = self.subscriptions_export_dir_override_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        let raw = std::fs::read_to_string(path)?;
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Ok(None);
+        }
+        Ok(Some(PathBuf::from(trimmed)))
+    }
+
+    pub fn effective_subscriptions_export_dir(&self) -> std::io::Result<PathBuf> {
+        if let Some(override_dir) = self.subscriptions_export_dir_override()? {
+            return Ok(override_dir);
+        }
+        Ok(self.default_subscriptions_export_dir())
+    }
+
+    pub fn set_subscriptions_export_dir_override(&self, dir: &Path) -> std::io::Result<()> {
+        let path = self.subscriptions_export_dir_override_path();
+        let text = format!("{}\n", dir.to_string_lossy());
+        persistence::atomic_write_text(&path, &text)?;
+        Ok(())
+    }
+
+    pub fn clear_subscriptions_export_dir_override(&self) -> std::io::Result<()> {
+        let path = self.subscriptions_export_dir_override_path();
+        if path.exists() {
+            std::fs::remove_file(path)?;
+        }
+        Ok(())
     }
 
     pub fn python_exe_override_path(&self) -> PathBuf {
@@ -522,11 +782,19 @@ impl AppPaths {
     }
 
     pub fn models_dir(&self) -> PathBuf {
-        self.base_dir.join("models")
+        self.runtime_payload_dir.join("models")
     }
 
     pub fn tools_dir(&self) -> PathBuf {
-        self.base_dir.join("tools")
+        self.runtime_payload_dir.join("tools")
+    }
+
+    pub fn huggingface_cache_dir(&self) -> PathBuf {
+        if self.managed_offline() {
+            self.runtime_payload_dir.join("cache").join("huggingface")
+        } else {
+            self.cache_dir().join("huggingface")
+        }
     }
 
     pub fn instagram_profile_provider_dir(&self) -> PathBuf {
@@ -605,7 +873,11 @@ impl AppPaths {
     }
 
     pub fn python_portable_dir(&self) -> PathBuf {
-        self.python_toolchain_dir().join("portable")
+        self.python_toolchain_dir().join(if self.managed_offline() {
+            "runtime_main"
+        } else {
+            "portable"
+        })
     }
 
     pub fn python_portable_python_exe(&self) -> PathBuf {
@@ -617,7 +889,11 @@ impl AppPaths {
     }
 
     pub fn python_venv_dir(&self) -> PathBuf {
-        self.python_toolchain_dir().join("venv")
+        self.python_toolchain_dir().join(if self.managed_offline() {
+            "runtime_main"
+        } else {
+            "venv"
+        })
     }
 
     pub fn python_models_dir(&self) -> PathBuf {
@@ -627,11 +903,15 @@ impl AppPaths {
     /// Isolated Python venv dedicated to CosyVoice (its torch==2.3.1 / numpy<2 stack
     /// conflicts with the main venv's torch 2.10, so it must live separately).
     pub fn python_cosyvoice_venv_dir(&self) -> PathBuf {
-        self.python_toolchain_dir().join("venv_cosyvoice")
+        self.python_toolchain_dir().join(if self.managed_offline() {
+            "runtime_cosyvoice"
+        } else {
+            "venv_cosyvoice"
+        })
     }
 
     pub fn voice_backends_dir(&self) -> PathBuf {
-        self.base_dir.join("voice_backends")
+        self.runtime_payload_dir.join("voice_backends")
     }
 
     /// The vendored CosyVoice repo (provides `cosyvoice.*` on sys.path + the render wrapper).
@@ -717,6 +997,15 @@ impl AppPaths {
         if cfg!(windows) {
             path.set_extension("exe");
         }
+        if self.managed_offline() && !path.exists() {
+            let mut nested = self.ffmpeg_dir().join("bin").join("ffmpeg");
+            if cfg!(windows) {
+                nested.set_extension("exe");
+            }
+            if nested.exists() {
+                return nested;
+            }
+        }
         path
     }
 
@@ -725,12 +1014,21 @@ impl AppPaths {
         if cfg!(windows) {
             path.set_extension("exe");
         }
+        if self.managed_offline() && !path.exists() {
+            let mut nested = self.ffmpeg_dir().join("bin").join("ffprobe");
+            if cfg!(windows) {
+                nested.set_extension("exe");
+            }
+            if nested.exists() {
+                return nested;
+            }
+        }
         path
     }
 
     pub fn ffmpeg_cmd(&self) -> PathBuf {
         let path = self.ffmpeg_bin_path();
-        if path.exists() {
+        if path.exists() || self.managed_offline() {
             path
         } else {
             PathBuf::from("ffmpeg")
@@ -739,7 +1037,7 @@ impl AppPaths {
 
     pub fn ffprobe_cmd(&self) -> PathBuf {
         let path = self.ffprobe_bin_path();
-        if path.exists() {
+        if path.exists() || self.managed_offline() {
             path
         } else {
             PathBuf::from("ffprobe")
@@ -765,8 +1063,10 @@ impl AppPaths {
         std::fs::create_dir_all(self.cache_dir())?;
         std::fs::create_dir_all(self.thumbnail_cache_dir())?;
         std::fs::create_dir_all(self.job_secrets_dir())?;
-        std::fs::create_dir_all(self.models_dir())?;
-        std::fs::create_dir_all(self.ffmpeg_dir())?;
+        if !self.managed_offline() {
+            std::fs::create_dir_all(self.models_dir())?;
+            std::fs::create_dir_all(self.ffmpeg_dir())?;
+        }
         Ok(())
     }
 
@@ -774,6 +1074,178 @@ impl AppPaths {
         // Keep it simple for now; callers should provide an app-specific directory.
         base_dir.to_path_buf()
     }
+}
+
+fn validate_runtime_token(value: &str, field: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+    {
+        return Err(format!("managed runtime {field} is not a safe token"));
+    }
+    Ok(())
+}
+
+fn validate_sha256(value: &str, field: &str) -> Result<(), String> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!(
+            "managed runtime {field} is not a SHA-256 hex digest"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_relative_runtime_path(value: &str, field: &str) -> Result<PathBuf, String> {
+    let path = PathBuf::from(value);
+    if value.trim().is_empty()
+        || path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return Err(format!("managed runtime {field} escapes its generation"));
+    }
+    Ok(path)
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    use std::io::Read as _;
+    let mut file = std::fs::File::open(path)
+        .map_err(|error| format!("failed to open {} for hashing: {error}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 128 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .map_err(|error| format!("failed to read {} for hashing: {error}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn validate_managed_runtime_manifest(
+    manifest: &ManagedRuntimeManifest,
+    selected_runtime_id: &str,
+    app_version: &str,
+    generation_root: &Path,
+) -> Result<(), String> {
+    if manifest.schema_version != MANAGED_RUNTIME_SCHEMA_VERSION {
+        return Err(format!(
+            "managed runtime manifest schema {} is unsupported",
+            manifest.schema_version
+        ));
+    }
+    if manifest.runtime_id != selected_runtime_id {
+        return Err("managed runtime manifest ID does not match current.json".to_string());
+    }
+    validate_runtime_token(&manifest.runtime_id, "manifest runtime_id")?;
+    validate_runtime_token(&manifest.qualification_id, "qualification_id")?;
+    if !manifest
+        .compatible_app_versions
+        .iter()
+        .any(|version| version == "*" || version == app_version)
+    {
+        return Err(format!(
+            "managed runtime {} is not compatible with app version {}",
+            manifest.runtime_id, app_version
+        ));
+    }
+
+    let required_components = [
+        ("tools", "tools"),
+        ("models", "models"),
+        ("huggingface", "cache/huggingface"),
+        ("voice_backends", "voice_backends"),
+    ];
+    for (component_id, expected_root) in required_components {
+        let component = manifest.components.get(component_id).ok_or_else(|| {
+            format!("managed runtime manifest is missing component {component_id}")
+        })?;
+        if component.root.replace('\\', "/") != expected_root {
+            return Err(format!(
+                "managed runtime component {component_id} must use root {expected_root}"
+            ));
+        }
+        validate_sha256(
+            &component.archive_sha256,
+            &format!("component {component_id} archive_sha256"),
+        )?;
+    }
+
+    let canonical_generation = std::fs::canonicalize(generation_root).map_err(|error| {
+        format!(
+            "selected managed runtime generation cannot be opened at {}: {error}",
+            generation_root.display()
+        )
+    })?;
+    for required in &manifest.required_files {
+        let relative = validate_relative_runtime_path(&required.path, "required file path")?;
+        let candidate = generation_root.join(relative);
+        if !candidate.is_file() {
+            return Err(format!(
+                "managed runtime required file is missing: {}",
+                required.path
+            ));
+        }
+        let canonical_candidate = std::fs::canonicalize(&candidate).map_err(|error| {
+            format!(
+                "managed runtime required file cannot be opened at {}: {error}",
+                candidate.display()
+            )
+        })?;
+        if !canonical_candidate.starts_with(&canonical_generation) {
+            return Err(format!(
+                "managed runtime required file escapes its generation: {}",
+                required.path
+            ));
+        }
+        if let Some(expected) = &required.sha256 {
+            validate_sha256(expected, "required file sha256")?;
+            let observed = sha256_file(&candidate)?;
+            if !observed.eq_ignore_ascii_case(expected) {
+                return Err(format!(
+                    "managed runtime required file hash mismatch: {}",
+                    required.path
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn activate_managed_runtime(
+    runtime_root: &Path,
+    pointer: &RuntimeActivationPointer,
+) -> Result<(), String> {
+    if pointer.schema_version != MANAGED_RUNTIME_SCHEMA_VERSION {
+        return Err("cannot activate an unsupported managed runtime pointer".to_string());
+    }
+    validate_runtime_token(&pointer.runtime_id, "runtime_id")?;
+    validate_sha256(&pointer.manifest_sha256, "manifest_sha256")?;
+    std::fs::create_dir_all(runtime_root)
+        .map_err(|error| format!("failed to create managed runtime root: {error}"))?;
+    let current = runtime_root.join("current.json");
+    if current.exists() {
+        let previous = std::fs::read(&current)
+            .map_err(|error| format!("failed to preserve prior runtime pointer: {error}"))?;
+        persistence::atomic_write_bytes(&runtime_root.join("previous.json"), &previous)
+            .map_err(|error| format!("failed to write prior runtime pointer: {error}"))?;
+    }
+    let mut bytes = serde_json::to_vec_pretty(pointer)
+        .map_err(|error| format!("failed to serialize runtime pointer: {error}"))?;
+    bytes.push(b'\n');
+    persistence::atomic_write_bytes(&current, &bytes)
+        .map_err(|error| format!("failed to activate managed runtime: {error}"))
 }
 
 /// Bounded reachability probe for a download/library root. Returns false if neither the
@@ -806,6 +1278,212 @@ pub fn download_root_reachable(dir: &Path, timeout: std::time::Duration) -> bool
 // false, queue saturation fails closed, and repeated stalls cannot create detached probe threads.
 pub fn path_is_dir_bounded(dir: &Path, timeout: std::time::Duration) -> bool {
     probe_path_bounded(dir, timeout) == BoundedPathKind::Directory
+}
+
+#[cfg(test)]
+mod managed_runtime_tests {
+    use super::*;
+
+    fn create_managed_runtime(
+        root: &Path,
+        runtime_id: &str,
+        app_version: &str,
+    ) -> RuntimeActivationPointer {
+        let generation = root.join("generations").join(runtime_id);
+        for relative in ["tools", "models", "cache/huggingface", "voice_backends"] {
+            std::fs::create_dir_all(generation.join(relative)).expect("component dir");
+        }
+        std::fs::write(generation.join("tools").join("required.bin"), b"runtime")
+            .expect("required file");
+        let components = [
+            ("tools", "tools"),
+            ("models", "models"),
+            ("huggingface", "cache/huggingface"),
+            ("voice_backends", "voice_backends"),
+        ]
+        .into_iter()
+        .map(|(id, component_root)| {
+            (
+                id.to_string(),
+                RuntimeComponentManifest {
+                    root: component_root.to_string(),
+                    archive_sha256: "a".repeat(64),
+                },
+            )
+        })
+        .collect();
+        let manifest = ManagedRuntimeManifest {
+            schema_version: MANAGED_RUNTIME_SCHEMA_VERSION,
+            runtime_id: runtime_id.to_string(),
+            compatible_app_versions: vec![app_version.to_string()],
+            qualification_id: "qualification-1".to_string(),
+            components,
+            required_files: vec![RuntimeRequiredFile {
+                path: "tools/required.bin".to_string(),
+                sha256: Some(hex::encode(Sha256::digest(b"runtime"))),
+            }],
+        };
+        let mut bytes = serde_json::to_vec_pretty(&manifest).expect("manifest json");
+        bytes.push(b'\n');
+        std::fs::write(generation.join("runtime_manifest.json"), &bytes).expect("manifest write");
+        RuntimeActivationPointer {
+            schema_version: MANAGED_RUNTIME_SCHEMA_VERSION,
+            runtime_id: runtime_id.to_string(),
+            manifest_sha256: hex::encode(Sha256::digest(&bytes)),
+        }
+    }
+
+    #[test]
+    fn installed_paths_keep_user_data_separate_and_select_verified_generation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user_data = dir.path().join("roaming");
+        let runtime_root = dir.path().join("local").join("runtime");
+        let pointer = create_managed_runtime(&runtime_root, "runtime-1", "1.2.3");
+        activate_managed_runtime(&runtime_root, &pointer).expect("activate");
+
+        let paths = AppPaths::installed(user_data.clone(), runtime_root.clone(), "1.2.3")
+            .expect("installed paths");
+        assert_eq!(paths.runtime_mode(), RuntimeMode::ManagedOffline);
+        assert_eq!(paths.db_dir(), user_data.join("db"));
+        assert_eq!(
+            paths.tools_dir(),
+            runtime_root.join("generations/runtime-1/tools")
+        );
+        assert_eq!(
+            paths.huggingface_cache_dir(),
+            runtime_root.join("generations/runtime-1/cache/huggingface")
+        );
+        assert_eq!(
+            paths.python_venv_dir(),
+            runtime_root.join("generations/runtime-1/tools/python/runtime_main")
+        );
+        assert_eq!(
+            paths.python_cosyvoice_venv_dir(),
+            runtime_root.join("generations/runtime-1/tools/python/runtime_cosyvoice")
+        );
+        assert_eq!(
+            paths.runtime_provenance().fallback_policy,
+            "managed_generation_only"
+        );
+        assert_eq!(
+            paths.ffmpeg_cmd(),
+            runtime_root.join(if cfg!(windows) {
+                "generations/runtime-1/tools/ffmpeg/ffmpeg.exe"
+            } else {
+                "generations/runtime-1/tools/ffmpeg/ffmpeg"
+            }),
+            "a missing managed FFmpeg must stay an absolute generation path instead of falling back to PATH"
+        );
+    }
+
+    #[test]
+    fn installed_paths_fail_closed_for_corrupt_selected_manifest() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runtime_root = dir.path().join("runtime");
+        let pointer = create_managed_runtime(&runtime_root, "runtime-1", "1.2.3");
+        activate_managed_runtime(&runtime_root, &pointer).expect("activate");
+        std::fs::write(
+            runtime_root.join("generations/runtime-1/runtime_manifest.json"),
+            b"{}",
+        )
+        .expect("corrupt manifest");
+        let error = AppPaths::installed(dir.path().join("user"), runtime_root, "1.2.3")
+            .expect_err("corrupt selected generation must fail");
+        assert!(error.contains("manifest hash mismatch"));
+    }
+
+    #[test]
+    fn installed_paths_without_pointer_use_explicit_legacy_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user_data = dir.path().join("roaming");
+        let runtime_root = dir.path().join("local/runtime");
+        let paths =
+            AppPaths::installed(user_data.clone(), runtime_root, "1.2.3").expect("legacy paths");
+        assert_eq!(paths.runtime_mode(), RuntimeMode::LegacyAppData);
+        assert_eq!(paths.tools_dir(), user_data.join("tools"));
+        assert_eq!(
+            paths.runtime_provenance().manifest_status,
+            "legacy_no_pointer"
+        );
+    }
+
+    #[test]
+    fn invalid_managed_paths_remain_managed_and_fail_closed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let user_data = dir.path().join("roaming");
+        let runtime_root = dir.path().join("local/runtime");
+        let paths = AppPaths::invalid_managed(
+            user_data.clone(),
+            runtime_root.clone(),
+            "manifest hash mismatch".to_string(),
+        );
+
+        assert_eq!(paths.runtime_mode(), RuntimeMode::ManagedOfflineInvalid);
+        assert!(paths.managed_offline());
+        assert_eq!(paths.db_dir(), user_data.join("db"));
+        assert_eq!(
+            paths.ffmpeg_cmd(),
+            runtime_root.join(if cfg!(windows) {
+                "generations/_invalid/tools/ffmpeg/ffmpeg.exe"
+            } else {
+                "generations/_invalid/tools/ffmpeg/ffmpeg"
+            }),
+            "an invalid managed runtime must not fall back to PATH"
+        );
+        assert_eq!(
+            paths.runtime_provenance().fallback_policy,
+            "managed_generation_only"
+        );
+        assert!(paths
+            .runtime_provenance()
+            .manifest_status
+            .contains("manifest hash mismatch"));
+    }
+
+    #[test]
+    fn managed_runtime_accepts_the_existing_nested_ffmpeg_layout_without_path_fallback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let runtime_root = dir.path().join("runtime");
+        let pointer = create_managed_runtime(&runtime_root, "runtime-1", "1.2.3");
+        let ffmpeg_bin = runtime_root.join("generations/runtime-1/tools/ffmpeg/bin");
+        std::fs::create_dir_all(&ffmpeg_bin).expect("ffmpeg bin");
+        let mut ffmpeg = ffmpeg_bin.join("ffmpeg");
+        let mut ffprobe = ffmpeg_bin.join("ffprobe");
+        if cfg!(windows) {
+            ffmpeg.set_extension("exe");
+            ffprobe.set_extension("exe");
+        }
+        std::fs::write(&ffmpeg, b"ffmpeg").expect("ffmpeg fixture");
+        std::fs::write(&ffprobe, b"ffprobe").expect("ffprobe fixture");
+        activate_managed_runtime(&runtime_root, &pointer).expect("activate");
+
+        let paths = AppPaths::installed(dir.path().join("user"), runtime_root, "1.2.3")
+            .expect("installed paths");
+        assert_eq!(paths.ffmpeg_cmd(), ffmpeg);
+        assert_eq!(paths.ffprobe_cmd(), ffprobe);
+    }
+
+    #[test]
+    fn activation_preserves_the_previous_pointer() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let first = RuntimeActivationPointer {
+            schema_version: MANAGED_RUNTIME_SCHEMA_VERSION,
+            runtime_id: "runtime-1".to_string(),
+            manifest_sha256: "a".repeat(64),
+        };
+        let second = RuntimeActivationPointer {
+            schema_version: MANAGED_RUNTIME_SCHEMA_VERSION,
+            runtime_id: "runtime-2".to_string(),
+            manifest_sha256: "b".repeat(64),
+        };
+        activate_managed_runtime(dir.path(), &first).expect("first activation");
+        activate_managed_runtime(dir.path(), &second).expect("second activation");
+        let previous: RuntimeActivationPointer = serde_json::from_slice(
+            &std::fs::read(dir.path().join("previous.json")).expect("previous"),
+        )
+        .expect("previous json");
+        assert_eq!(previous, first);
+    }
 }
 
 #[cfg(test)]

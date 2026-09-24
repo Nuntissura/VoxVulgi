@@ -256,6 +256,30 @@ test("voice pack install commands are traced (WP-0245)", () => {
   }
 });
 
+test("browser-session preflights cannot block the Tauri command dispatcher", () => {
+  const tauriSource = readRepoFile("src-tauri", "src", "lib.rs");
+
+  for (const command of [
+    "config_youtube_auth_preflight",
+    "config_instagram_auth_preflight",
+  ]) {
+    const start = tauriSource.indexOf(`async fn ${command}`);
+    const end = tauriSource.indexOf("#[tauri::command]", start + 1);
+    const block = tauriSource.slice(start, end);
+    assert.ok(start >= 0, `${command} must be asynchronous`);
+    assert.match(
+      block,
+      /tauri::async_runtime::spawn_blocking/,
+      `${command} must run browser-cookie and network work off the command dispatcher`,
+    );
+    assert.match(
+      block,
+      new RegExp(`InvokeTimer::start\\([^;]+"${command}"`),
+      `${command} must emit timing evidence for freeze diagnostics`,
+    );
+  }
+});
+
 test("Localization home status hydration avoids duplicate per-item job fan-out", () => {
   const appSource = readRepoFile("src", "App.tsx");
   const tauriSource = readRepoFile("src-tauri", "src", "lib.rs");

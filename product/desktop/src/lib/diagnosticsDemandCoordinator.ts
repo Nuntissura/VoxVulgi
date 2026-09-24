@@ -1,20 +1,7 @@
 import { diagnosticsTrace } from "./diagnosticsTrace";
 
-export type DiagnosticsCostClass =
-  | "cheap"
-  | "db_read"
-  | "filesystem"
-  | "python_heavy"
-  | "history_replay"
-  | "mutation";
-
-export type DiagnosticsDemandState =
-  | "idle"
-  | "queued"
-  | "loading"
-  | "ready"
-  | "stale"
-  | "failed";
+export type DiagnosticsCostClass = "cheap" | "db_read" | "filesystem" | "python_heavy" | "history_replay" | "mutation";
+export type DiagnosticsDemandState = "idle" | "queued" | "loading" | "ready" | "stale" | "failed";
 
 export type DiagnosticsOperationDefinition = {
   id: string;
@@ -26,225 +13,27 @@ export type DiagnosticsOperationDefinition = {
   automatic: boolean;
   freshnessMs: number;
   maxConcurrency: number;
-  priority: number;
-  cancellation: "non_cancellable_shared" | "backend_checkpoint";
-  requestIdentity: "generated_per_owner";
 };
 
 // Product-code source of truth for every Diagnostics page-entry operation and the
 // overlapping Options protection projection. Mutation entries are explicit even
 // though the coordinator never schedules them automatically.
 export const DIAGNOSTICS_OPERATION_REGISTRY = [
-  {
-    id: "diagnostics.build",
-    semanticKey: "diagnostics.build",
-    commands: ["diagnostics_info", "startup_status", "models_inventory", "config_batch_on_import_get", "config_diarization_optional_status", "jobs_log_retention_policy"],
-    ownerModules: ["diagnostics"],
-    costClass: "cheap",
-    trigger: "page_entry",
-    automatic: true,
-    freshnessMs: 5_000,
-    maxConcurrency: 4,
-    priority: 100,
-    cancellation: "non_cancellable_shared",
-    requestIdentity: "generated_per_owner",
-  },
-  {
-    id: "diagnostics.tools-core",
-    semanticKey: "diagnostics.tools-core",
-    commands: ["tools_ffmpeg_status", "tools_ytdlp_status", "tools_js_runtime_status", "tools_python_status", "tools_python_portable_status", "tools_pack_integrity_manifest_status"],
-    ownerModules: ["diagnostics"],
-    costClass: "filesystem",
-    trigger: "section_visibility",
-    automatic: false,
-    freshnessMs: 15_000,
-    maxConcurrency: 2,
-    priority: 80,
-    cancellation: "non_cancellable_shared",
-    requestIdentity: "generated_per_owner",
-  },
-  {
-    id: "capability.performance-tier",
-    semanticKey: "capability.performance-tier",
-    commands: ["tools_performance_tier_status"],
-    ownerModules: ["diagnostics", "options"],
-    costClass: "python_heavy",
-    trigger: "section_visibility",
-    automatic: false,
-    freshnessMs: 0,
-    maxConcurrency: 1,
-    priority: 55,
-    cancellation: "non_cancellable_shared",
-    requestIdentity: "generated_per_owner",
-  },
-  {
-    id: "capability.demucs",
-    semanticKey: "capability.demucs",
-    commands: ["tools_demucs_status"],
-    ownerModules: ["diagnostics", "options"],
-    costClass: "python_heavy",
-    trigger: "section_visibility",
-    automatic: false,
-    freshnessMs: 0,
-    maxConcurrency: 1,
-    priority: 50,
-    cancellation: "non_cancellable_shared",
-    requestIdentity: "generated_per_owner",
-  },
-  {
-    id: "capability.voice-backends",
-    semanticKey: "capability.voice-backends",
-    commands: ["voice_backends_snapshot", "voice_backend_adapters_list", "tools_spleeter_status", "tools_diarization_status", "tools_tts_preview_status", "tools_tts_neural_local_v1_status", "tools_tts_voice_preserving_local_v1_status"],
-    ownerModules: ["diagnostics", "options"],
-    costClass: "python_heavy",
-    trigger: "section_visibility",
-    automatic: false,
-    freshnessMs: 0,
-    maxConcurrency: 1,
-    priority: 45,
-    cancellation: "non_cancellable_shared",
-    requestIdentity: "generated_per_owner",
-  },
-  {
-    id: "diagnostics.phase2",
-    semanticKey: "diagnostics.phase2",
-    commands: ["tools_phase2_packs_install_plan", "tools_phase2_packs_install_latest_state"],
-    ownerModules: ["diagnostics"],
-    costClass: "filesystem",
-    trigger: "section_visibility",
-    automatic: false,
-    freshnessMs: 5_000,
-    maxConcurrency: 2,
-    priority: 70,
-    cancellation: "non_cancellable_shared",
-    requestIdentity: "generated_per_owner",
-  },
-  {
-    id: "diagnostics.storage",
-    semanticKey: "diagnostics.storage",
-    commands: ["diagnostics_storage_breakdown", "diagnostics_thumbnail_cache_status", "jobs_log_retention_policy", "jobs_item_artifact_retention_policy", "provider_metadata_repair_status"],
-    ownerModules: ["diagnostics"],
-    costClass: "filesystem",
-    trigger: "section_visibility",
-    automatic: false,
-    freshnessMs: 10_000,
-    maxConcurrency: 1,
-    priority: 60,
-    cancellation: "non_cancellable_shared",
-    requestIdentity: "generated_per_owner",
-  },
-  {
-    id: "diagnostics.trace",
-    semanticKey: "diagnostics.trace",
-    commands: ["diagnostics_trace_dir_status", "diagnostics_trace_recent", "diagnostics_capture_status", "database_runtime_status"],
-    ownerModules: ["diagnostics"],
-    costClass: "filesystem",
-    trigger: "section_visibility",
-    automatic: false,
-    freshnessMs: 3_000,
-    maxConcurrency: 2,
-    priority: 75,
-    cancellation: "non_cancellable_shared",
-    requestIdentity: "generated_per_owner",
-  },
-  {
-    id: "protection.snapshot",
-    semanticKey: "protection.snapshot",
-    commands: ["youtube_protection_snapshot_get"],
-    ownerModules: ["diagnostics", "options.video_archiver"],
-    costClass: "db_read",
-    trigger: "section_visibility",
-    automatic: false,
-    freshnessMs: 5_000,
-    maxConcurrency: 1,
-    priority: 65,
-    cancellation: "non_cancellable_shared",
-    requestIdentity: "generated_per_owner",
-  },
-  {
-    id: "options.video-protection-config",
-    semanticKey: "options.video-protection-config",
-    commands: ["antibot_pacing_get", "youtube_protection_tuning_get"],
-    ownerModules: ["options.video_archiver"],
-    costClass: "db_read",
-    trigger: "module_selection",
-    automatic: true,
-    freshnessMs: 5_000,
-    maxConcurrency: 1,
-    priority: 85,
-    cancellation: "non_cancellable_shared",
-    requestIdentity: "generated_per_owner",
-  },
-  {
-    id: "protection.history-replay",
-    semanticKey: "protection.history-replay",
-    commands: ["youtube_protection_history_replay"],
-    ownerModules: ["diagnostics"],
-    costClass: "history_replay",
-    trigger: "operator_action",
-    automatic: false,
-    freshnessMs: 0,
-    maxConcurrency: 1,
-    priority: 20,
-    cancellation: "non_cancellable_shared",
-    requestIdentity: "generated_per_owner",
-  },
-  {
-    id: "diagnostics.operator-read",
-    semanticKey: "diagnostics.operator-read",
-    commands: ["diagnostics_app_state_snapshot", "diagnostics_generate_licensing_report", "jobs_cleanup_preview", "jobs_list_for_item", "jobs_queue_control_get", "jobs_runtime_settings_get", "library_get", "library_list"],
-    ownerModules: ["diagnostics"],
-    costClass: "db_read",
-    trigger: "operator_action",
-    automatic: false,
-    freshnessMs: 0,
-    maxConcurrency: 1,
-    priority: 90,
-    cancellation: "non_cancellable_shared",
-    requestIdentity: "generated_per_owner",
-  },
-  {
-    id: "diagnostics.operator-mutation",
-    semanticKey: "diagnostics.operator-mutation",
-    commands: ["agent_freeze_dump_now", "config_diarization_optional_clear_token", "config_diarization_optional_set", "database_checkpoint_passive", "diagnostics_capture_arm", "diagnostics_capture_disarm", "diagnostics_clear_cache", "diagnostics_export_app_state_snapshot", "diagnostics_export_bundle", "diagnostics_freeze_self_test_arm", "diagnostics_thumbnail_cache_clear", "diagnostics_trace_clear", "diagnostics_trace_write_event", "jobs_enqueue_install_phase2_packs_v1", "jobs_flush_cache", "jobs_prune_logs", "models_install", "provider_metadata_repair_page", "provider_metadata_repair_reset", "tools_demucs_install", "tools_diarization_install", "tools_ffmpeg_install", "tools_js_runtime_install", "tools_pack_integrity_manifest_generate", "tools_python_install", "tools_python_portable_install", "tools_spleeter_install", "tools_tts_neural_local_v1_install", "tools_tts_preview_install", "tools_tts_voice_preserving_local_v1_install", "tools_ytdlp_install", "voice_backend_adapter_apply_starter_recipe", "voice_backend_adapter_delete", "voice_backend_adapter_probe", "voice_backend_adapter_upsert"],
-    ownerModules: ["diagnostics"],
-    costClass: "mutation",
-    trigger: "operator_action",
-    automatic: false,
-    freshnessMs: 0,
-    maxConcurrency: 1,
-    priority: 95,
-    cancellation: "non_cancellable_shared",
-    requestIdentity: "generated_per_owner",
-  },
-  {
-    id: "options.protection-mutation",
-    semanticKey: "options.protection-mutation",
-    commands: ["antibot_pacing_set", "youtube_protection_history_export", "youtube_protection_history_reset", "youtube_protection_return_to_baseline", "youtube_protection_tuning_reset", "youtube_protection_tuning_set"],
-    ownerModules: ["options.video_archiver"],
-    costClass: "mutation",
-    trigger: "operator_action",
-    automatic: false,
-    freshnessMs: 0,
-    maxConcurrency: 1,
-    priority: 95,
-    cancellation: "non_cancellable_shared",
-    requestIdentity: "generated_per_owner",
-  },
-  {
-    id: "diagnostics.jobs",
-    semanticKey: "diagnostics.jobs",
-    commands: ["jobs_list"],
-    ownerModules: ["diagnostics"],
-    costClass: "db_read",
-    trigger: "section_visibility",
-    automatic: false,
-    freshnessMs: 3_000,
-    maxConcurrency: 2,
-    priority: 65,
-    cancellation: "non_cancellable_shared",
-    requestIdentity: "generated_per_owner",
-  },
+  { id: "diagnostics.build", semanticKey: "diagnostics.build", commands: ["diagnostics_info", "startup_status", "models_inventory", "config_batch_on_import_get", "config_diarization_optional_status", "jobs_log_retention_policy"], ownerModules: ["diagnostics"], costClass: "cheap", trigger: "page_entry", automatic: true, freshnessMs: 5_000, maxConcurrency: 4 },
+  { id: "diagnostics.tools-core", semanticKey: "diagnostics.tools-core", commands: ["tools_ffmpeg_status", "tools_ytdlp_status", "tools_js_runtime_status", "tools_python_status", "tools_python_portable_status", "tools_pack_integrity_manifest_status"], ownerModules: ["diagnostics"], costClass: "filesystem", trigger: "section_visibility", automatic: false, freshnessMs: 15_000, maxConcurrency: 2 },
+  { id: "capability.performance-tier", semanticKey: "capability.performance-tier", commands: ["tools_performance_tier_status"], ownerModules: ["diagnostics", "options"], costClass: "python_heavy", trigger: "section_visibility", automatic: false, freshnessMs: 0, maxConcurrency: 1 },
+  { id: "capability.demucs", semanticKey: "capability.demucs", commands: ["tools_demucs_status"], ownerModules: ["diagnostics", "options"], costClass: "python_heavy", trigger: "section_visibility", automatic: false, freshnessMs: 0, maxConcurrency: 1 },
+  { id: "capability.voice-backends", semanticKey: "capability.voice-backends", commands: ["voice_backends_snapshot", "voice_backend_adapters_list", "tools_spleeter_status", "tools_diarization_status", "tools_tts_preview_status", "tools_tts_neural_local_v1_status", "tools_tts_voice_preserving_local_v1_status"], ownerModules: ["diagnostics", "options"], costClass: "python_heavy", trigger: "section_visibility", automatic: false, freshnessMs: 0, maxConcurrency: 1 },
+  { id: "diagnostics.phase2", semanticKey: "diagnostics.phase2", commands: ["tools_phase2_packs_install_plan", "tools_phase2_packs_install_latest_state"], ownerModules: ["diagnostics"], costClass: "filesystem", trigger: "section_visibility", automatic: false, freshnessMs: 5_000, maxConcurrency: 2 },
+  { id: "diagnostics.storage", semanticKey: "diagnostics.storage", commands: ["diagnostics_storage_breakdown", "diagnostics_thumbnail_cache_status", "jobs_log_retention_policy", "jobs_item_artifact_retention_policy", "provider_metadata_repair_status"], ownerModules: ["diagnostics"], costClass: "filesystem", trigger: "section_visibility", automatic: false, freshnessMs: 10_000, maxConcurrency: 1 },
+  { id: "diagnostics.trace", semanticKey: "diagnostics.trace", commands: ["diagnostics_trace_dir_status", "diagnostics_trace_recent", "diagnostics_capture_status", "database_runtime_status"], ownerModules: ["diagnostics"], costClass: "filesystem", trigger: "section_visibility", automatic: false, freshnessMs: 3_000, maxConcurrency: 2 },
+  { id: "protection.snapshot", semanticKey: "protection.snapshot", commands: ["youtube_protection_snapshot_get"], ownerModules: ["diagnostics", "options.video_archiver"], costClass: "db_read", trigger: "section_visibility", automatic: false, freshnessMs: 5_000, maxConcurrency: 1 },
+  { id: "options.video-protection-config", semanticKey: "options.video-protection-config", commands: ["antibot_pacing_get", "youtube_protection_tuning_get"], ownerModules: ["options.video_archiver"], costClass: "db_read", trigger: "module_selection", automatic: true, freshnessMs: 5_000, maxConcurrency: 1 },
+  { id: "protection.history-replay", semanticKey: "protection.history-replay", commands: ["youtube_protection_history_replay"], ownerModules: ["diagnostics"], costClass: "history_replay", trigger: "operator_action", automatic: false, freshnessMs: 0, maxConcurrency: 1 },
+  { id: "diagnostics.operator-read", semanticKey: "diagnostics.operator-read", commands: ["diagnostics_app_state_snapshot", "diagnostics_generate_licensing_report", "jobs_cleanup_preview", "jobs_list_for_item", "jobs_queue_control_get", "jobs_runtime_settings_get", "library_get", "library_list"], ownerModules: ["diagnostics"], costClass: "db_read", trigger: "operator_action", automatic: false, freshnessMs: 0, maxConcurrency: 1 },
+  { id: "diagnostics.operator-mutation", semanticKey: "diagnostics.operator-mutation", commands: ["agent_freeze_dump_now", "config_diarization_optional_clear_token", "config_diarization_optional_set", "database_checkpoint_passive", "diagnostics_capture_arm", "diagnostics_capture_disarm", "diagnostics_clear_cache", "diagnostics_export_app_state_snapshot", "diagnostics_export_bundle", "diagnostics_freeze_self_test_arm", "diagnostics_thumbnail_cache_clear", "diagnostics_trace_clear", "diagnostics_trace_write_event", "jobs_enqueue_install_phase2_packs_v1", "jobs_flush_cache", "jobs_prune_logs", "models_install", "provider_metadata_repair_page", "provider_metadata_repair_reset", "tools_demucs_install", "tools_diarization_install", "tools_ffmpeg_install", "tools_js_runtime_install", "tools_pack_integrity_manifest_generate", "tools_python_install", "tools_python_portable_install", "tools_spleeter_install", "tools_tts_neural_local_v1_install", "tools_tts_preview_install", "tools_tts_voice_preserving_local_v1_install", "tools_ytdlp_install", "voice_backend_adapter_apply_starter_recipe", "voice_backend_adapter_delete", "voice_backend_adapter_probe", "voice_backend_adapter_upsert"], ownerModules: ["diagnostics"], costClass: "mutation", trigger: "operator_action", automatic: false, freshnessMs: 0, maxConcurrency: 1 },
+  { id: "options.protection-mutation", semanticKey: "options.protection-mutation", commands: ["antibot_pacing_set", "youtube_protection_history_export", "youtube_protection_history_reset", "youtube_protection_return_to_baseline", "youtube_protection_tuning_reset", "youtube_protection_tuning_set"], ownerModules: ["options.video_archiver"], costClass: "mutation", trigger: "operator_action", automatic: false, freshnessMs: 0, maxConcurrency: 1 },
+  { id: "diagnostics.jobs", semanticKey: "diagnostics.jobs", commands: ["jobs_list"], ownerModules: ["diagnostics"], costClass: "db_read", trigger: "section_visibility", automatic: false, freshnessMs: 3_000, maxConcurrency: 2 },
 ] as const satisfies readonly DiagnosticsOperationDefinition[];
 
 export type DiagnosticsOperationId = (typeof DIAGNOSTICS_OPERATION_REGISTRY)[number]["id"];
@@ -255,11 +44,7 @@ const operationById = new Map<DiagnosticsOperationId, DiagnosticsOperationDefini
 
 let demandGenerationSequence = 0;
 
-export type DemandGeneration = {
-  readonly id: number;
-  readonly owner: string;
-  canceled: boolean;
-};
+export type DemandGeneration = { readonly id: number; readonly owner: string; canceled: boolean };
 
 export function createDemandGeneration(owner: string): DemandGeneration {
   demandGenerationSequence += 1;
@@ -271,6 +56,10 @@ export class DemandSupersededError extends Error {
     super(message);
     this.name = "DemandSupersededError";
   }
+}
+
+export function demandGenerationOwnsCommit(current: DemandGeneration | null, candidate: DemandGeneration): boolean {
+  return current === candidate && !candidate.canceled;
 }
 
 export type DiagnosticsDemandSnapshot = {
@@ -294,11 +83,7 @@ export type DiagnosticsDemandResult<T> = {
   source: "cache" | "shared" | "executed";
 };
 
-export type DiagnosticsResultTruth = {
-  state: "ready" | "stale" | "failed";
-  verifiedAtMs: number | null;
-  error: string | null;
-};
+export type DiagnosticsResultTruth = { state: "ready" | "stale" | "failed"; verifiedAtMs: number | null; error: string | null };
 
 export type DiagnosticsSectionAggregate = {
   state: DiagnosticsDemandState;
@@ -308,21 +93,18 @@ export type DiagnosticsSectionAggregate = {
   shared: boolean;
 };
 
-export function aggregateDiagnosticsSectionSnapshots(
-  snapshots: readonly DiagnosticsDemandSnapshot[],
-): DiagnosticsSectionAggregate {
-  const failed = snapshots.filter((entry) => entry.state === "failed");
+export function aggregateDiagnosticsSectionSnapshots(snapshots: readonly DiagnosticsDemandSnapshot[]): DiagnosticsSectionAggregate {
   const hasLoading = snapshots.some((entry) => entry.state === "loading");
   const hasQueued = snapshots.some((entry) => entry.state === "queued");
+  const hasFailed = snapshots.some((entry) => entry.state === "failed");
   const hasStale = snapshots.some((entry) => entry.state === "stale");
-  const verifiedSnapshots = snapshots.filter((entry) => entry.verified_at_ms !== null);
-  const verified = verifiedSnapshots.map((entry) => entry.verified_at_ms as number);
-  const freshness = verifiedSnapshots.map((entry) => entry.freshness_ms);
+  const verified = snapshots.map((entry) => entry.verified_at_ms).filter((value): value is number => value !== null);
+  const freshness = snapshots.filter((entry) => entry.verified_at_ms !== null).map((entry) => entry.freshness_ms);
   const state: DiagnosticsDemandState = hasLoading
     ? "loading"
     : hasQueued
       ? "queued"
-      : failed.length > 0
+      : hasFailed
         ? "failed"
         : hasStale
           ? "stale"
@@ -336,13 +118,6 @@ export function aggregateDiagnosticsSectionSnapshots(
     freshness_ms: freshness.length > 0 ? Math.min(...freshness) : 0,
     shared: snapshots.some((entry) => entry.shared),
   };
-}
-
-export function demandGenerationOwnsCommit(
-  current: DemandGeneration | null,
-  candidate: DemandGeneration,
-): boolean {
-  return current === candidate && !candidate.canceled;
 }
 
 type CoordinatorOptions = {
@@ -360,11 +135,7 @@ type RequestOptions = {
   resultTruth?: (value: unknown) => DiagnosticsResultTruth;
 };
 
-type CacheEntry = {
-  value: unknown;
-  verifiedAtMs: number;
-  freshnessMs: number;
-};
+type CacheEntry = { value: unknown; verifiedAtMs: number; freshnessMs: number };
 
 type Waiter = {
   generation: DemandGeneration;
@@ -379,7 +150,6 @@ type Waiter = {
 type Flight = {
   key: string;
   definition: DiagnosticsOperationDefinition;
-  identity: string;
   spanIdentity: string;
   queuedAtMs: number;
   admittedAtMs: number | null;
@@ -391,15 +161,22 @@ type Flight = {
   resultTruth?: (value: unknown) => DiagnosticsResultTruth;
 };
 
+// Receipt phases mirror the frontend/backend demand-scheduler contract; "frontend_abort_signaled"
+// and "backend_cancel_observed" are reserved for a future cancellable cost class (none of today's
+// registry entries use it) but stay in the phase type so callers and tests can rely on the full set.
+type ReceiptPhase =
+  | "queued" | "admitted" | "shared" | "cancel_requested" | "waiter_detached"
+  | "frontend_abort_signaled" | "backend_cancel_observed" | "terminal" | "superseded_completion";
+
 let coordinatorRequestSequence = 0;
 let coordinatorFlightSequence = 0;
 
-function nextCoordinatorRequestIdentity(generation: DemandGeneration, now: number): string {
+function nextRequestIdentity(generation: DemandGeneration, now: number): string {
   coordinatorRequestSequence += 1;
   return `diagnostics-demand-${generation.owner}-${generation.id}-${coordinatorRequestSequence}-${now}`;
 }
 
-function nextCoordinatorFlightIdentity(semanticKey: string, now: number): string {
+function nextFlightIdentity(semanticKey: string, now: number): string {
   coordinatorFlightSequence += 1;
   return `diagnostics-flight-${semanticKey}-${coordinatorFlightSequence}-${now}`;
 }
@@ -417,9 +194,7 @@ function childPidsFromOutcome(value: unknown): number[] {
       if (key === "child_pid" && typeof entry === "number" && Number.isSafeInteger(entry) && entry > 0) {
         found.add(entry);
       } else if (key === "child_pids" && Array.isArray(entry)) {
-        for (const pid of entry) {
-          if (typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0) found.add(pid);
-        }
+        for (const pid of entry) if (typeof pid === "number" && Number.isSafeInteger(pid) && pid > 0) found.add(pid);
       } else {
         visit(entry, depth + 1);
       }
@@ -429,6 +204,12 @@ function childPidsFromOutcome(value: unknown): number[] {
   return [...found].sort((left, right) => left - right);
 }
 
+/**
+ * Small single-flight + generation-guard demand scheduler (WP-0321 S7). One in-flight run per
+ * semantic-key+identity ("flight"); concurrent callers share it. A bounded global concurrency cap
+ * plus a python_heavy sub-limit gate admission. `force` bypasses a fresh cached result and, if a
+ * flight is already running, waits for it before sharing exactly one fresh successor.
+ */
 export class DiagnosticsDemandCoordinator {
   private readonly maxConcurrent: number;
   private readonly maxPythonHeavy: number;
@@ -461,140 +242,68 @@ export class DiagnosticsDemandCoordinator {
     const identity = options.identity ?? "current-runtime";
     const key = `${definition.semanticKey}::${identity}`;
     const now = this.now();
-    const requestIdentity = options.requestIdentity ?? nextCoordinatorRequestIdentity(generation, now);
+    const requestIdentity = options.requestIdentity ?? nextRequestIdentity(generation, now);
     const cached = this.cache.get(key);
+
     if (!options.force && definition.freshnessMs > 0 && cached && now - cached.verifiedAtMs <= definition.freshnessMs) {
-      const snapshot = this.snapshot(definition, generation, "ready", false, null, null, cached.verifiedAtMs, null);
-      options.onState?.(snapshot);
+      options.onState?.(this.snapshot(definition, generation, "ready", false, null, null, cached.verifiedAtMs, null));
       this.receipt(definition, generation, requestIdentity, "terminal", {
-        outcome: "cache_hit",
-        source: "cache",
-        queue_wait_ms: 0,
-        execution_ms: 0,
-        shared: false,
+        outcome: "cache_hit", source: "cache", queue_wait_ms: 0, execution_ms: 0, shared: false,
         child_pids: childPidsFromOutcome(cached.value),
       });
-      return Promise.resolve({
-        value: cached.value as T,
-        verifiedAtMs: cached.verifiedAtMs,
-        freshnessMs: definition.freshnessMs,
-        source: "cache",
-      });
+      return Promise.resolve({ value: cached.value as T, verifiedAtMs: cached.verifiedAtMs, freshnessMs: definition.freshnessMs, source: "cache" });
     }
-    if (cached) {
-      options.onState?.(this.snapshot(definition, generation, "stale", false, now, null, cached.verifiedAtMs, null));
-    }
+    if (cached) options.onState?.(this.snapshot(definition, generation, "stale", false, now, null, cached.verifiedAtMs, null));
 
     const existing = this.flights.get(key);
     if (existing && options.force) {
-      options.onState?.(this.snapshot(
-        definition,
-        generation,
-        existing.state === "queued" ? "queued" : "loading",
-        true,
-        existing.queuedAtMs,
-        existing.admittedAtMs,
-        cached?.verifiedAtMs ?? null,
-        null,
-      ));
+      options.onState?.(this.snapshot(definition, generation, existing.state === "queued" ? "queued" : "loading", true, existing.queuedAtMs, existing.admittedAtMs, cached?.verifiedAtMs ?? null, null));
       return new Promise<DiagnosticsDemandResult<T>>((resolve, reject) => {
+        // This waiter is a freshness barrier: never publish the older flight's outcome, just
+        // schedule one fresh successor (deduped naturally by single-flight) once it settles.
         const scheduleForcedSuccessor = () => {
-          if (generation.canceled) {
-            reject(new DemandSupersededError());
-            return;
-          }
+          if (generation.canceled) return reject(new DemandSupersededError());
           queueMicrotask(() => {
-            if (generation.canceled) {
-              reject(new DemandSupersededError());
-              return;
-            }
+            if (generation.canceled) return reject(new DemandSupersededError());
             this.cache.delete(key);
-            void this.request(operationId, generation, run, {
-              ...options,
-              force: false,
-              requestIdentity,
-            }).then(resolve, reject);
+            void this.request(operationId, generation, run, { ...options, force: false, requestIdentity }).then(resolve, reject);
           });
         };
-        const waiter: Waiter = {
-          generation,
-          requestIdentity,
-          requestedAtMs: now,
-          shared: true,
-          // This waiter is a freshness barrier. Do not publish the older flight's
-          // ready state; publish only the forced successor's terminal state.
-          onState: undefined,
-          // A forced request is a freshness barrier, not a consumer of the old
-          // flight's outcome. Whether the old flight succeeds or fails, schedule
-          // exactly one fresh successor unless this demand generation was canceled.
-          resolve: scheduleForcedSuccessor,
-          reject: scheduleForcedSuccessor,
-        };
-        existing.waiters.add(waiter);
+        existing.waiters.add({
+          generation, requestIdentity, requestedAtMs: now, shared: true, onState: undefined,
+          resolve: scheduleForcedSuccessor, reject: scheduleForcedSuccessor,
+        });
         this.receipt(definition, generation, requestIdentity, "shared", {
-          flight_span_id: existing.spanIdentity,
-          shared: true,
-          force_after_current: true,
-          flight_state: existing.state,
-          queue_wait_ms: Math.max(0, now - existing.queuedAtMs),
+          flight_span_id: existing.spanIdentity, shared: true, force_after_current: true,
+          flight_state: existing.state, queue_wait_ms: Math.max(0, now - existing.queuedAtMs),
         });
       });
     }
+
     return new Promise<DiagnosticsDemandResult<T>>((resolve, reject) => {
       const waiter: Waiter = {
-        generation,
-        requestIdentity,
-        requestedAtMs: now,
-        shared: Boolean(existing),
-        onState: options.onState,
-        resolve: resolve as (result: DiagnosticsDemandResult<unknown>) => void,
-        reject,
+        generation, requestIdentity, requestedAtMs: now, shared: Boolean(existing), onState: options.onState,
+        resolve: resolve as (result: DiagnosticsDemandResult<unknown>) => void, reject,
       };
       if (existing) {
         existing.waiters.add(waiter);
         this.receipt(definition, generation, requestIdentity, "shared", {
-          flight_span_id: existing.spanIdentity,
-          shared: true,
-          force_after_current: false,
-          flight_state: existing.state,
-          queue_wait_ms: Math.max(0, now - existing.queuedAtMs),
+          flight_span_id: existing.spanIdentity, shared: true, force_after_current: false,
+          flight_state: existing.state, queue_wait_ms: Math.max(0, now - existing.queuedAtMs),
         });
-        options.onState?.(this.snapshot(
-          definition,
-          generation,
-          existing.state === "queued" ? "queued" : "loading",
-          true,
-          existing.queuedAtMs,
-          existing.admittedAtMs,
-          cached?.verifiedAtMs ?? null,
-          null,
-        ));
+        options.onState?.(this.snapshot(definition, generation, existing.state === "queued" ? "queued" : "loading", true, existing.queuedAtMs, existing.admittedAtMs, cached?.verifiedAtMs ?? null, null));
         return;
       }
-
       const flight: Flight = {
-        key,
-        definition,
-        identity,
-        spanIdentity: nextCoordinatorFlightIdentity(definition.semanticKey, now),
-        queuedAtMs: now,
-        admittedAtMs: null,
-        state: "queued",
-        run: run as (signal: AbortSignal) => Promise<unknown>,
-        abortController: new AbortController(),
-        waiters: new Set([waiter]),
-        supersededWaiters: [],
+        key, definition, spanIdentity: nextFlightIdentity(definition.semanticKey, now), queuedAtMs: now,
+        admittedAtMs: null, state: "queued", run: run as (signal: AbortSignal) => Promise<unknown>,
+        abortController: new AbortController(), waiters: new Set([waiter]), supersededWaiters: [],
         resultTruth: options.resultTruth,
       };
       this.flights.set(key, flight);
       this.queue.push(flight);
       options.onState?.(this.snapshot(definition, generation, "queued", false, now, null, cached?.verifiedAtMs ?? null, null));
-      this.receipt(definition, generation, requestIdentity, "queued", {
-        flight_span_id: flight.spanIdentity,
-        shared: false,
-        queue_wait_ms: 0,
-        queue_depth: this.queue.length,
-      });
+      this.receipt(definition, generation, requestIdentity, "queued", { flight_span_id: flight.spanIdentity, shared: false, queue_wait_ms: 0, queue_depth: this.queue.length });
       this.pump();
     });
   }
@@ -605,53 +314,18 @@ export class DiagnosticsDemandCoordinator {
       for (const waiter of [...flight.waiters]) {
         if (waiter.generation !== generation) continue;
         const canceledAtMs = this.now();
-        this.receipt(flight.definition, generation, waiter.requestIdentity, "cancel_requested", {
-          flight_span_id: flight.spanIdentity,
-          shared: waiter.shared,
-          flight_state: flight.state,
-          queue_wait_ms: Math.max(0, (flight.admittedAtMs ?? canceledAtMs) - flight.queuedAtMs),
-          execution_ms: flight.admittedAtMs === null ? 0 : Math.max(0, canceledAtMs - flight.admittedAtMs),
-          cancellation: flight.definition.cancellation,
-        });
+        const queueWaitMs = Math.max(0, (flight.admittedAtMs ?? canceledAtMs) - flight.queuedAtMs);
+        const executionMs = flight.admittedAtMs === null ? 0 : Math.max(0, canceledAtMs - flight.admittedAtMs);
+        this.receipt(flight.definition, generation, waiter.requestIdentity, "cancel_requested", { flight_span_id: flight.spanIdentity, shared: waiter.shared, flight_state: flight.state, queue_wait_ms: queueWaitMs, execution_ms: executionMs });
         flight.waiters.delete(waiter);
         if (flight.state === "running") {
-          flight.supersededWaiters.push({
-            generation: waiter.generation,
-            requestIdentity: waiter.requestIdentity,
-            requestedAtMs: waiter.requestedAtMs,
-            shared: waiter.shared,
-          });
+          flight.supersededWaiters.push({ generation: waiter.generation, requestIdentity: waiter.requestIdentity, requestedAtMs: waiter.requestedAtMs, shared: waiter.shared });
         }
-        this.receipt(flight.definition, generation, waiter.requestIdentity, "waiter_detached", {
-          flight_span_id: flight.spanIdentity,
-          shared: waiter.shared,
-          flight_state: flight.state,
-          queue_wait_ms: Math.max(0, (flight.admittedAtMs ?? canceledAtMs) - flight.queuedAtMs),
-          execution_ms: flight.admittedAtMs === null ? 0 : Math.max(0, canceledAtMs - flight.admittedAtMs),
-          cancellation: flight.definition.cancellation,
-        });
-        this.receipt(flight.definition, generation, waiter.requestIdentity, "terminal", {
-          flight_span_id: flight.spanIdentity,
-          outcome: "superseded",
-          shared: waiter.shared,
-          flight_state: flight.state,
-          queue_wait_ms: Math.max(0, (flight.admittedAtMs ?? canceledAtMs) - flight.queuedAtMs),
-          execution_ms: flight.admittedAtMs === null ? 0 : Math.max(0, canceledAtMs - flight.admittedAtMs),
-          child_pids: [],
-        });
+        this.receipt(flight.definition, generation, waiter.requestIdentity, "waiter_detached", { flight_span_id: flight.spanIdentity, shared: waiter.shared, flight_state: flight.state, queue_wait_ms: queueWaitMs, execution_ms: executionMs });
+        this.receipt(flight.definition, generation, waiter.requestIdentity, "terminal", { flight_span_id: flight.spanIdentity, outcome: "superseded", shared: waiter.shared, flight_state: flight.state, queue_wait_ms: queueWaitMs, execution_ms: executionMs, child_pids: [] });
         waiter.reject(new DemandSupersededError(`${generation.owner} generation ${generation.id} was superseded`));
       }
-      if (flight.waiters.size === 0 && flight.state === "queued") {
-        this.removeQueuedFlight(flight);
-      } else if (flight.waiters.size === 0 && flight.definition.cancellation === "backend_checkpoint") {
-        flight.abortController.abort();
-        for (const waiter of flight.supersededWaiters) {
-          this.receipt(flight.definition, waiter.generation, waiter.requestIdentity, "frontend_abort_signaled", {
-            flight_span_id: flight.spanIdentity,
-            backend_acknowledged: false,
-          });
-        }
-      }
+      if (flight.waiters.size === 0 && flight.state === "queued") this.removeQueuedFlight(flight);
     }
     this.pump();
     this.resolveIdleIfNeeded();
@@ -664,9 +338,7 @@ export class DiagnosticsDemandCoordinator {
       this.cache.delete(`${definition.semanticKey}::${identity}`);
       return;
     }
-    for (const key of [...this.cache.keys()]) {
-      if (key.startsWith(`${definition.semanticKey}::`)) this.cache.delete(key);
-    }
+    for (const key of [...this.cache.keys()]) if (key.startsWith(`${definition.semanticKey}::`)) this.cache.delete(key);
   }
 
   whenIdle(): Promise<void> {
@@ -676,9 +348,9 @@ export class DiagnosticsDemandCoordinator {
 
   private pump(): void {
     while (this.activeTotal < this.maxConcurrent) {
-      const nextIndex = this.nextAdmissibleIndex();
-      if (nextIndex < 0) break;
-      const [flight] = this.queue.splice(nextIndex, 1);
+      const index = this.nextAdmissibleIndex();
+      if (index < 0) break;
+      const [flight] = this.queue.splice(index, 1);
       if (!flight || flight.waiters.size === 0) {
         if (flight) this.flights.delete(flight.key);
         continue;
@@ -688,23 +360,17 @@ export class DiagnosticsDemandCoordinator {
     this.resolveIdleIfNeeded();
   }
 
+  // Plain FIFO admission: earliest-queued flight whose semantic concurrency cap and (for
+  // python_heavy work) the shared python-heavy sub-limit both have headroom.
   private nextAdmissibleIndex(): number {
-    const now = this.now();
-    let selected = -1;
-    let selectedScore = Number.NEGATIVE_INFINITY;
     for (let index = 0; index < this.queue.length; index += 1) {
       const flight = this.queue[index];
       const semanticActive = this.activeBySemanticKey.get(flight.definition.semanticKey) ?? 0;
       if (semanticActive >= flight.definition.maxConcurrency) continue;
       if (flight.definition.costClass === "python_heavy" && this.activePythonHeavy >= this.maxPythonHeavy) continue;
-      const ageSeconds = Math.floor(Math.max(0, now - flight.queuedAtMs) / 1_000);
-      const score = flight.definition.priority + ageSeconds;
-      if (score > selectedScore) {
-        selected = index;
-        selectedScore = score;
-      }
+      return index;
     }
-    return selected;
+    return -1;
   }
 
   private startFlight(flight: Flight): void {
@@ -712,31 +378,16 @@ export class DiagnosticsDemandCoordinator {
     flight.admittedAtMs = this.now();
     this.activeTotal += 1;
     if (flight.definition.costClass === "python_heavy") this.activePythonHeavy += 1;
-    this.activeBySemanticKey.set(
-      flight.definition.semanticKey,
-      (this.activeBySemanticKey.get(flight.definition.semanticKey) ?? 0) + 1,
-    );
+    this.activeBySemanticKey.set(flight.definition.semanticKey, (this.activeBySemanticKey.get(flight.definition.semanticKey) ?? 0) + 1);
     for (const waiter of flight.waiters) {
       this.receipt(flight.definition, waiter.generation, waiter.requestIdentity, "admitted", {
-        flight_span_id: flight.spanIdentity,
-        shared: waiter.shared,
+        flight_span_id: flight.spanIdentity, shared: waiter.shared,
         queue_wait_ms: Math.max(0, flight.admittedAtMs - waiter.requestedAtMs),
         flight_queue_wait_ms: Math.max(0, flight.admittedAtMs - flight.queuedAtMs),
-        active_total: this.activeTotal,
-        active_python_heavy: this.activePythonHeavy,
+        active_total: this.activeTotal, active_python_heavy: this.activePythonHeavy,
       });
-      waiter.onState?.(this.snapshot(
-        flight.definition,
-        waiter.generation,
-        "loading",
-        waiter.shared,
-        flight.queuedAtMs,
-        flight.admittedAtMs,
-        this.cache.get(flight.key)?.verifiedAtMs ?? null,
-        null,
-      ));
+      waiter.onState?.(this.snapshot(flight.definition, waiter.generation, "loading", waiter.shared, flight.queuedAtMs, flight.admittedAtMs, this.cache.get(flight.key)?.verifiedAtMs ?? null, null));
     }
-
     // Normalize both synchronous throws and asynchronous rejections through the same terminal
     // cleanup path. Calling `run` directly can otherwise strand active counters forever.
     void Promise.resolve().then(() => flight.run(flight.abortController.signal)).then(
@@ -747,113 +398,49 @@ export class DiagnosticsDemandCoordinator {
 
   private finishFlight(flight: Flight, succeeded: boolean, outcome: unknown): void {
     const finishedAtMs = this.now();
-    const truth = succeeded
-      ? flight.resultTruth?.(outcome) ?? { state: "ready" as const, verifiedAtMs: finishedAtMs, error: null }
-      : null;
+    const truth = succeeded ? flight.resultTruth?.(outcome) ?? { state: "ready" as const, verifiedAtMs: finishedAtMs, error: null } : null;
     const verifiedAtMs = truth?.verifiedAtMs ?? null;
     const childPids = succeeded ? childPidsFromOutcome(outcome) : [];
     const executionMs = flight.admittedAtMs === null ? 0 : Math.max(0, finishedAtMs - flight.admittedAtMs);
-    const flightQueueWaitMs = flight.admittedAtMs === null ? 0 : Math.max(0, flight.admittedAtMs - flight.queuedAtMs);
+    const queueWaitMs = flight.admittedAtMs === null ? 0 : Math.max(0, flight.admittedAtMs - flight.queuedAtMs);
     if (succeeded && truth?.state === "ready" && verifiedAtMs !== null && flight.definition.freshnessMs > 0) {
-      this.cache.set(flight.key, {
-        value: outcome,
-        verifiedAtMs,
-        freshnessMs: flight.definition.freshnessMs,
-      });
+      this.cache.set(flight.key, { value: outcome, verifiedAtMs, freshnessMs: flight.definition.freshnessMs });
     }
+    const supersededOutcome = !succeeded || truth?.state === "failed"
+      ? "failed_after_supersession"
+      : truth?.state === "stale" ? "stale_after_supersession" : "completed_after_supersession";
+    const supersededError = succeeded ? truth?.error ?? null : String(outcome).slice(0, 500);
+    const supersededLevel = !succeeded || truth?.state === "failed" ? "error" : "warn";
+
     for (const waiter of flight.waiters) {
       if (waiter.generation.canceled) {
-        this.receipt(flight.definition, waiter.generation, waiter.requestIdentity, "superseded_completion", {
-          flight_span_id: flight.spanIdentity,
-          outcome: !succeeded || truth?.state === "failed"
-            ? "failed_after_supersession"
-            : truth?.state === "stale"
-              ? "stale_after_supersession"
-              : "completed_after_supersession",
-          shared: waiter.shared,
-          queue_wait_ms: flightQueueWaitMs,
-          execution_ms: executionMs,
-          child_pids: childPids,
-          error: succeeded ? truth?.error ?? null : String(outcome).slice(0, 500),
-        }, !succeeded || truth?.state === "failed" ? "error" : "warn");
+        this.receipt(flight.definition, waiter.generation, waiter.requestIdentity, "superseded_completion", { flight_span_id: flight.spanIdentity, outcome: supersededOutcome, shared: waiter.shared, queue_wait_ms: queueWaitMs, execution_ms: executionMs, child_pids: childPids, error: supersededError }, supersededLevel);
         waiter.reject(new DemandSupersededError());
         continue;
       }
       if (!succeeded) {
-        waiter.onState?.(this.snapshot(
-          flight.definition,
-          waiter.generation,
-          "failed",
-          waiter.shared,
-          flight.queuedAtMs,
-          flight.admittedAtMs,
-          null,
-          String(outcome),
-        ));
-        this.receipt(flight.definition, waiter.generation, waiter.requestIdentity, "terminal", {
-          flight_span_id: flight.spanIdentity,
-          outcome: "failed",
-          shared: waiter.shared,
-          queue_wait_ms: flightQueueWaitMs,
-          execution_ms: executionMs,
-          child_pids: childPids,
-          error: String(outcome).slice(0, 500),
-        }, "error");
+        waiter.onState?.(this.snapshot(flight.definition, waiter.generation, "failed", waiter.shared, flight.queuedAtMs, flight.admittedAtMs, null, String(outcome)));
+        this.receipt(flight.definition, waiter.generation, waiter.requestIdentity, "terminal", { flight_span_id: flight.spanIdentity, outcome: "failed", shared: waiter.shared, queue_wait_ms: queueWaitMs, execution_ms: executionMs, child_pids: childPids, error: String(outcome).slice(0, 500) }, "error");
         waiter.reject(outcome);
         continue;
       }
-      waiter.onState?.(this.snapshot(
-        flight.definition,
-        waiter.generation,
-        truth?.state ?? "ready",
-        waiter.shared,
-        flight.queuedAtMs,
-        flight.admittedAtMs,
-        verifiedAtMs,
-        truth?.error ?? null,
-      ));
+      waiter.onState?.(this.snapshot(flight.definition, waiter.generation, truth?.state ?? "ready", waiter.shared, flight.queuedAtMs, flight.admittedAtMs, verifiedAtMs, truth?.error ?? null));
       this.receipt(flight.definition, waiter.generation, waiter.requestIdentity, "terminal", {
-        flight_span_id: flight.spanIdentity,
-        outcome: truth?.state === "ready" ? "succeeded" : `probe_${truth?.state ?? "failed"}`,
-        shared: waiter.shared,
-        queue_wait_ms: flightQueueWaitMs,
-        execution_ms: executionMs,
-        child_pids: childPids,
-        error: truth?.error ?? null,
+        flight_span_id: flight.spanIdentity, outcome: truth?.state === "ready" ? "succeeded" : `probe_${truth?.state ?? "failed"}`,
+        shared: waiter.shared, queue_wait_ms: queueWaitMs, execution_ms: executionMs, child_pids: childPids, error: truth?.error ?? null,
       }, truth?.state === "failed" ? "error" : truth?.state === "stale" ? "warn" : "info");
-      waiter.resolve({
-        value: outcome,
-        verifiedAtMs: verifiedAtMs ?? 0,
-        freshnessMs: flight.definition.freshnessMs,
-        source: waiter.shared ? "shared" : "executed",
-      });
+      waiter.resolve({ value: outcome, verifiedAtMs: verifiedAtMs ?? 0, freshnessMs: flight.definition.freshnessMs, source: waiter.shared ? "shared" : "executed" });
     }
     for (const superseded of flight.supersededWaiters) {
-      this.receipt(flight.definition, superseded.generation, superseded.requestIdentity, "superseded_completion", {
-        flight_span_id: flight.spanIdentity,
-        outcome: !succeeded || truth?.state === "failed"
-          ? "failed_after_supersession"
-          : truth?.state === "stale"
-            ? "stale_after_supersession"
-            : "completed_after_supersession",
-        shared: superseded.shared,
-        queue_wait_ms: flightQueueWaitMs,
-        execution_ms: executionMs,
-        child_pids: childPids,
-        error: succeeded ? truth?.error ?? null : String(outcome).slice(0, 500),
-      }, !succeeded || truth?.state === "failed" ? "error" : "warn");
+      this.receipt(flight.definition, superseded.generation, superseded.requestIdentity, "superseded_completion", { flight_span_id: flight.spanIdentity, outcome: supersededOutcome, shared: superseded.shared, queue_wait_ms: queueWaitMs, execution_ms: executionMs, child_pids: childPids, error: supersededError }, supersededLevel);
     }
+
     flight.supersededWaiters.length = 0;
     flight.waiters.clear();
     this.flights.delete(flight.key);
     this.activeTotal = Math.max(0, this.activeTotal - 1);
-    if (flight.definition.costClass === "python_heavy") {
-      this.activePythonHeavy = Math.max(0, this.activePythonHeavy - 1);
-    }
-    const semanticActive = Math.max(
-      0,
-      (this.activeBySemanticKey.get(flight.definition.semanticKey) ?? 1) - 1,
-    );
+    if (flight.definition.costClass === "python_heavy") this.activePythonHeavy = Math.max(0, this.activePythonHeavy - 1);
+    const semanticActive = Math.max(0, (this.activeBySemanticKey.get(flight.definition.semanticKey) ?? 1) - 1);
     if (semanticActive === 0) this.activeBySemanticKey.delete(flight.definition.semanticKey);
     else this.activeBySemanticKey.set(flight.definition.semanticKey, semanticActive);
     this.pump();
@@ -865,52 +452,20 @@ export class DiagnosticsDemandCoordinator {
     this.flights.delete(flight.key);
   }
 
-  private receipt(
-    definition: DiagnosticsOperationDefinition,
-    generation: DemandGeneration,
-    requestIdentity: string,
-    phase: "queued" | "admitted" | "shared" | "cancel_requested" | "waiter_detached" | "frontend_abort_signaled" | "backend_cancel_observed" | "terminal" | "superseded_completion",
-    details: Record<string, unknown>,
-    level: "info" | "warn" | "error" = "info",
-  ): void {
+  private receipt(definition: DiagnosticsOperationDefinition, generation: DemandGeneration, requestIdentity: string, phase: ReceiptPhase, details: Record<string, unknown>, level: "info" | "warn" | "error" = "info"): void {
     void this.trace("diagnostics_demand_scheduler", {
-      phase,
-      operation_id: definition.id,
-      semantic_key: definition.semanticKey,
-      span_id: typeof details.flight_span_id === "string"
-        ? details.flight_span_id
-        : `diagnostics-request:${requestIdentity}`,
-      request_identity: requestIdentity,
-      owner: generation.owner,
-      generation: generation.id,
-      cost_class: definition.costClass,
-      cancellation: definition.cancellation,
-      ...details,
+      phase, operation_id: definition.id, semantic_key: definition.semanticKey,
+      span_id: typeof details.flight_span_id === "string" ? details.flight_span_id : `diagnostics-request:${requestIdentity}`,
+      request_identity: requestIdentity, owner: generation.owner, generation: generation.id,
+      cost_class: definition.costClass, ...details,
     }, level).catch(() => undefined);
   }
 
-  private snapshot(
-    definition: DiagnosticsOperationDefinition,
-    generation: DemandGeneration,
-    state: DiagnosticsDemandState,
-    shared: boolean,
-    queuedAtMs: number | null,
-    admittedAtMs: number | null,
-    verifiedAtMs: number | null,
-    error: string | null,
-  ): DiagnosticsDemandSnapshot {
+  private snapshot(definition: DiagnosticsOperationDefinition, generation: DemandGeneration, state: DiagnosticsDemandState, shared: boolean, queuedAtMs: number | null, admittedAtMs: number | null, verifiedAtMs: number | null, error: string | null): DiagnosticsDemandSnapshot {
     return {
-      operation_id: definition.id as DiagnosticsOperationId,
-      semantic_key: definition.semanticKey,
-      owner: generation.owner,
-      generation: generation.id,
-      state,
-      queued_at_ms: queuedAtMs,
-      admitted_at_ms: admittedAtMs,
-      verified_at_ms: verifiedAtMs,
-      freshness_ms: definition.freshnessMs,
-      shared,
-      error,
+      operation_id: definition.id as DiagnosticsOperationId, semantic_key: definition.semanticKey, owner: generation.owner,
+      generation: generation.id, state, queued_at_ms: queuedAtMs, admitted_at_ms: admittedAtMs, verified_at_ms: verifiedAtMs,
+      freshness_ms: definition.freshnessMs, shared, error,
     };
   }
 

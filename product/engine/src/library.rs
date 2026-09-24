@@ -173,6 +173,15 @@ fn cache_media_path_observation(path: &str, observation: MediaPathObservation) {
     cache.insert(path.to_string(), (Instant::now(), observation));
 }
 
+// WP-0320: the fresh probe is never cached (see `observe_media_path_fresh`); NAS probe load is
+// bounded by the persisted observation refresh interval in `commit_media_path_observation_if_current`.
+// Thread-local (not a shared global) so parallel `cargo test` threads cannot inflate each
+// other's dispatch counts; each `#[test]` runs on its own thread.
+#[cfg(test)]
+thread_local! {
+    static MEDIA_PATH_FRESH_PROBE_DISPATCH_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// A disconnected or heavily contended NAS must not pin a Tauri worker indefinitely. Cache a
 /// bounded observation briefly, and distinguish timeout/error from an authoritative missing file.
 pub(crate) fn observe_media_path(paths: &AppPaths, path: &str) -> MediaPathObservation {
@@ -276,10 +285,11 @@ fn observe_media_path_for_preflight(
     observe_media_path_fresh_with_causal(paths, path, causal)
 }
 
-/// Execution-boundary callers must not reuse the short-lived observation cache: a cleanup,
-/// relocation, or restore can change a canonical path while an old job remains queued.
-/// The actual filesystem probe stays timeout-bounded and must be called outside a DB
-/// transaction.
+/// Execution-boundary callers must not reuse the general short-lived observation cache: a
+/// cleanup, relocation, or restore can change a canonical path while an old job remains queued.
+/// The actual filesystem probe stays timeout-bounded and must be called outside a DB transaction.
+/// Never cached: safety checks such as the queue-identity pre-apply verification rely on it
+/// observing a deletion that happened moments ago (WP-0320).
 pub(crate) fn observe_media_path_fresh(paths: &AppPaths, path: &str) -> MediaPathObservation {
     observe_media_path_fresh_with_causal(paths, path, None)
 }
@@ -324,6 +334,8 @@ fn observe_media_path_fresh_with_causal(
             return observation;
         }
     };
+    #[cfg(test)]
+    MEDIA_PATH_FRESH_PROBE_DISPATCH_COUNT.with(|count| count.set(count.get() + 1));
     let (sender, receiver) = mpsc::sync_channel(1);
     let observation = match media_path_probe_pool().try_send((candidate, sender)) {
         Ok(()) => media_path_observation_from_probe_receive(
@@ -416,6 +428,9 @@ fn invalidate_media_path_observation_memory(path: &str) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .remove(path);
+    // WP-0320 MT-2: every correctness-boundary invalidation path funnels through here, so the
+    // narrower fresh-probe `present` cache must be cleared alongside the general one or a caller
+    // that invalidated "the" observation for `path` would still read a stale cached `Present`.
     let mut generations = media_path_observation_generations()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -508,7 +523,10 @@ fn commit_media_path_observation_if_current(
     };
     let observed_at_ms = now_ms();
     let refresh_after_ms = match observation {
-        MediaPathObservation::Present => 10 * 60 * 1000,
+        // WP-0320: present files are re-verified hourly instead of every 10 minutes; in-app
+        // deletions and relocations invalidate explicitly, so only out-of-band removals wait
+        // for the next refresh. Measured before: 985 NAS probes in 70 min, avg 878 ms.
+        MediaPathObservation::Present => 60 * 60 * 1000,
         MediaPathObservation::Missing => 2 * 60 * 1000,
         MediaPathObservation::Unreachable => 30 * 1000,
         MediaPathObservation::Slow => 15 * 1000,
@@ -3300,29 +3318,20 @@ LIMIT ?2
 }
 
 /// Exact count of older YouTube-looking video items that have no durable lineage row yet.
-/// This is intentionally separate from the primary history page because the legacy predicates
-/// require a full `library_item` scan on existing databases.
+///
+/// WP-0321 S1: this used to run the classification predicate directly against every
+/// `library_item` row at query time (a 152s full scan measured on 144k rows). Schema v56 moved
+/// the identical predicate into a `youtube_video_candidate` flag maintained by triggers at write
+/// time (see `apply_schema_v56` in db.rs), backed by a partial index. The returned count and its
+/// semantics are unchanged; this now just reads the precomputed flag plus the existing
+/// primary-key-backed anti-join against `library_download_lineage`.
 pub fn count_youtube_single_unclassified(paths: &AppPaths) -> Result<usize> {
     let conn = db::open_readonly(paths)?;
     let count: i64 = conn.query_row(
         r#"
 SELECT COUNT(*)
 FROM library_item
-WHERE
-  (
-    lower(source_uri) LIKE '%youtube.com%'
-    OR lower(source_uri) LIKE '%youtu.be%'
-    OR lower(source_type) LIKE '%youtube%'
-  )
-  AND (
-    width IS NOT NULL
-    OR height IS NOT NULL
-    OR video_codec IS NOT NULL
-    OR lower(media_path) LIKE '%.mp4'
-    OR lower(media_path) LIKE '%.mkv'
-    OR lower(media_path) LIKE '%.webm'
-    OR lower(media_path) LIKE '%.mov'
-  )
+WHERE library_item.youtube_video_candidate = 1
   AND NOT EXISTS (
     SELECT 1
     FROM library_download_lineage
@@ -4139,7 +4148,10 @@ WHERE service=?4 AND media_id=?5
 
     match previous_media_path {
         Some(previous_path) => {
-            invalidate_media_path_observation_rewrite_memory(&previous_path, &item.media_path)
+            invalidate_media_path_observation_rewrite_memory(&previous_path, &item.media_path);
+            // WP-0320 MT-2: the download job that produced this item finalized/moved its output
+            // to `item.media_path`; drop any stale fresh-probe `present` entry for both the old
+            // and new canonical path.
         }
         None => invalidate_media_path_observation_memory(&item.media_path),
     };
@@ -4801,6 +4813,190 @@ INSERT INTO job (
             .find(|item| item.id == "legacy-unknown")
             .expect("legacy item in normal list");
         assert!(normal_unknown.lineage_origin_kind.is_none());
+    }
+
+    /// WP-0321 S1: schema v56 moved `count_youtube_single_unclassified`'s predicate into a
+    /// write-time trigger-maintained flag instead of a per-query full-table scan. This seeds a
+    /// few hundred rows spanning every predicate branch (youtube.com/youtu.be/source_type match,
+    /// each video-file extension, width/height/codec-only rows, non-youtube rows, and rows with
+    /// an existing lineage row) and asserts the new indexed query returns exactly the same count
+    /// as the original full-scan SQL (kept here verbatim as the test oracle), on identical data.
+    #[test]
+    fn count_youtube_single_unclassified_matches_original_full_scan_oracle() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let conn = db::open(&paths).expect("open db");
+        db::migrate(&conn).expect("migrate");
+
+        let mut inserted = 0usize;
+        let mut expected_unclassified = 0usize;
+        let mut seed = |id: String,
+                         source_type: &str,
+                         source_uri: &str,
+                         media_path: &str,
+                         width: Option<i64>,
+                         height: Option<i64>,
+                         video_codec: Option<&str>,
+                         with_lineage: bool| {
+            conn.execute(
+                r#"
+INSERT INTO library_item (
+  id, created_at_ms, source_type, source_uri, title, media_path,
+  duration_ms, width, height, container, video_codec, audio_codec, thumbnail_path
+) VALUES (?1, ?2, ?3, ?4, 'seeded title', ?5, NULL, ?6, ?7, NULL, ?8, NULL, NULL)
+"#,
+                params![
+                    id,
+                    inserted as i64,
+                    source_type,
+                    source_uri,
+                    media_path,
+                    width,
+                    height,
+                    video_codec
+                ],
+            )
+            .expect("seed library item");
+            if with_lineage {
+                conn.execute(
+                    r#"
+INSERT INTO library_download_lineage (
+  item_id, source_job_id, source_batch_id, source_subscription_id,
+  service, origin_kind, work_track, item_created_at_ms, recorded_at_ms
+) VALUES (?1, 'oracle-job', NULL, NULL, 'youtube', 'single', 'youtube_single', 0, 0)
+"#,
+                    params![id],
+                )
+                .expect("seed lineage row");
+            }
+            inserted += 1;
+        };
+
+        // 200 unclassified youtube-single-video-shaped rows across the different match branches.
+        for i in 0..200 {
+            let id = format!("unclassified-{i}");
+            match i % 4 {
+                0 => seed(
+                    id,
+                    "url_direct",
+                    &format!("https://www.YouTube.com/watch?v={i}"),
+                    &format!("C:\\media\\video_{i}.MP4"),
+                    Some(1920),
+                    Some(1080),
+                    None,
+                    false,
+                ),
+                1 => seed(
+                    id,
+                    "url_direct",
+                    &format!("https://youtu.be/{i}"),
+                    &format!("C:\\media\\video_{i}.mkv"),
+                    None,
+                    None,
+                    Some("h264"),
+                    false,
+                ),
+                2 => seed(
+                    id,
+                    "YouTube",
+                    &format!("https://example.com/mirrors/{i}"),
+                    &format!("C:\\media\\video_{i}.webm"),
+                    None,
+                    None,
+                    None,
+                    false,
+                ),
+                _ => seed(
+                    id,
+                    "url_direct",
+                    &format!("https://www.youtube.com/watch?v=mov-{i}"),
+                    &format!("C:\\media\\video_{i}.mov"),
+                    Some(1280),
+                    Some(720),
+                    None,
+                    false,
+                ),
+            }
+            expected_unclassified += 1;
+        }
+
+        // 100 youtube-video-shaped rows that already have a durable lineage row: must not count.
+        for i in 0..100 {
+            seed(
+                format!("classified-{i}"),
+                "url_direct",
+                &format!("https://www.youtube.com/watch?v=classified-{i}"),
+                &format!("C:\\media\\classified_{i}.mp4"),
+                Some(1920),
+                Some(1080),
+                None,
+                true,
+            );
+        }
+
+        // 100 non-youtube or non-video rows: must not count.
+        for i in 0..100 {
+            seed(
+                format!("other-{i}"),
+                "url_direct",
+                &format!("https://example.com/not-youtube/{i}"),
+                &format!("C:\\media\\other_{i}.mp4"),
+                Some(1920),
+                Some(1080),
+                None,
+                false,
+            );
+        }
+        for i in 0..50 {
+            seed(
+                format!("youtube-no-video-signal-{i}"),
+                "url_direct",
+                &format!("https://www.youtube.com/watch?v=no-signal-{i}"),
+                &format!("C:\\media\\no_signal_{i}.txt"),
+                None,
+                None,
+                None,
+                false,
+            );
+        }
+
+        let oracle_count: i64 = conn
+            .query_row(
+                r#"
+SELECT COUNT(*)
+FROM library_item
+WHERE
+  (
+    lower(source_uri) LIKE '%youtube.com%'
+    OR lower(source_uri) LIKE '%youtu.be%'
+    OR lower(source_type) LIKE '%youtube%'
+  )
+  AND (
+    width IS NOT NULL
+    OR height IS NOT NULL
+    OR video_codec IS NOT NULL
+    OR lower(media_path) LIKE '%.mp4'
+    OR lower(media_path) LIKE '%.mkv'
+    OR lower(media_path) LIKE '%.webm'
+    OR lower(media_path) LIKE '%.mov'
+  )
+  AND NOT EXISTS (
+    SELECT 1
+    FROM library_download_lineage
+    WHERE library_download_lineage.item_id = library_item.id
+  )
+"#,
+                [],
+                |row| row.get(0),
+            )
+            .expect("oracle count");
+        assert_eq!(oracle_count as usize, expected_unclassified);
+
+        drop(conn);
+        let new_count =
+            count_youtube_single_unclassified(&paths).expect("indexed unclassified count");
+        assert_eq!(new_count, oracle_count as usize);
     }
 
     #[test]
@@ -6001,6 +6197,54 @@ fn media_availability_observation_persists_and_invalidation_forces_refresh() {
     assert_eq!(row.1, "fresh_probe");
     assert!(row.2 >= 0);
     assert!(row.3.is_none());
+}
+
+// Explicitly `#[cfg(test)]`-gated (not relying on enclosing `mod tests`, which closes above this
+// point in the file) so a plain, non-test `cargo check`/build does not try to resolve the
+// `#[cfg(test)]`-gated `MEDIA_PATH_FRESH_PROBE_DISPATCH_COUNT` thread-local.
+#[cfg(test)]
+fn media_path_fresh_probe_dispatch_count() -> u64 {
+    MEDIA_PATH_FRESH_PROBE_DISPATCH_COUNT.with(|count| count.get())
+}
+
+#[cfg(test)]
+#[test]
+fn fresh_probe_is_never_cached_and_observes_a_deletion_immediately() {
+    // WP-0320: the fresh probe is the execution-boundary and safety-check truth source, so it
+    // must dispatch a real probe on every call and see a file removed a moment ago.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = AppPaths::new(dir.path().join("app_data"));
+    db::ensure_schema(&paths).expect("schema");
+    let media = dir.path().join("fresh_present.mkv");
+    std::fs::write(&media, b"fixture").expect("write fixture");
+    let media_text = media.to_string_lossy().to_string();
+
+    let before = media_path_fresh_probe_dispatch_count();
+    assert_eq!(
+        observe_media_path_fresh(&paths, &media_text),
+        MediaPathObservation::Present
+    );
+    assert_eq!(
+        media_path_fresh_probe_dispatch_count(),
+        before + 1,
+        "first call must dispatch a probe"
+    );
+    assert_eq!(
+        observe_media_path_fresh(&paths, &media_text),
+        MediaPathObservation::Present
+    );
+    assert_eq!(
+        media_path_fresh_probe_dispatch_count(),
+        before + 2,
+        "a fresh probe must never be served from a cache"
+    );
+
+    std::fs::remove_file(&media).expect("remove fixture");
+    assert_eq!(
+        observe_media_path_fresh(&paths, &media_text),
+        MediaPathObservation::Missing,
+        "a deletion must be observed by the very next fresh probe"
+    );
 }
 
 #[test]

@@ -1,0 +1,63 @@
+{
+  "schema": "voxvulgi.cosyvoice_model_manifest.v1",
+  "cosyvoice": {
+    "provider": "huggingface",
+    "repo": "FunAudioLLM/CosyVoice2-0.5B",
+    "revision": "eec1ae6c79877dbd9379285cf8789c9e0879293d",
+    "files": [
+      {"path": ".gitattributes", "bytes": 1914, "sha256": "73138813a47c81e47a6ab599a0d179d0c4362ff3474941f7aad5c7a7b0d14aa7"},
+      {"path": "asset/dingding.png", "bytes": 122824, "sha256": "7f04815e2e676d31b089af6fa270135f3214f2193d5e0ad98b491d007d48f1c6"},
+      {"path": "campplus.onnx", "bytes": 28303423, "sha256": "a6ac6a63997761ae2997373e2ee1c47040854b4b759ea41ec48e4e42df0f4d73"},
+      {"path": "config.json", "bytes": 2, "sha256": "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"},
+      {"path": "configuration.json", "bytes": 47, "sha256": "c502b6328c67638b401df8dd05de89e9e8d1cff9cd0ada10dfbdbe13556c20de"},
+      {"path": "CosyVoice-BlankEN/config.json", "bytes": 659, "sha256": "168aa1bd401abc3bc262ba15ba4e499627a8b4e006e9d050b47c22de20660185"},
+      {"path": "CosyVoice-BlankEN/generation_config.json", "bytes": 242, "sha256": "e558847a8b4402616f1273797b015104dc266fe4b520056fca88823ba8f8ebe6"},
+      {"path": "CosyVoice-BlankEN/merges.txt", "bytes": 1402109, "sha256": "ac8ff86a72bee70828fbc1119bc4398c6f3a9a6e490d7b0dbe917be025478bd0"},
+      {"path": "CosyVoice-BlankEN/model.safetensors", "bytes": 988097824, "sha256": "130282af0dfa9fe5840737cc49a0d339d06075f83c5a315c3372c9a0740d0b96"},
+      {"path": "CosyVoice-BlankEN/tokenizer_config.json", "bytes": 1287, "sha256": "482bd979881423375ca5414e4e0d94cd7c5349dbb17fffd46b4d36d71e62a1bc"},
+      {"path": "CosyVoice-BlankEN/vocab.json", "bytes": 2776833, "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"},
+      {"path": "cosyvoice2.yaml", "bytes": 7330, "sha256": "0af2c0d010c477187c39f3e8fd5f1ae2e4e6f90ad03ba37c10ed6c6a87b05959"},
+      {"path": "flow.decoder.estimator.fp32.onnx", "bytes": 286317026, "sha256": "cd54e4281701e6630730da64502d77b7e8b6e5c057cca65128bffb50f85cbf98"},
+      {"path": "flow.pt", "bytes": 450575567, "sha256": "ff4c2f867674411e0a08cee702996df13fa67c1cd864c06108da88d16d088541"},
+      {"path": "hift.pt", "bytes": 83390254, "sha256": "3386cc880324d4e98e05987b99107f49e40ed925b8ecc87c1f4939432d429879"},
+      {"path": "llm.pt", "bytes": 2023316821, "sha256": "b144ef55b51ce8cfb79a73c90dbba0bdaba4e451c0ebcfab20f769264f84a608"},
+      {"path": "README.md", "bytes": 12073, "sha256": "7b00725016d3fe143fc13cef1df27615df6ba9cd98c6716c5b98bbc54aefd525"},
+      {"path": "speech_tokenizer_v2.batch.onnx", "bytes": 496095794, "sha256": "5b45a98572ed21e3a3ebf50201f3020567f7db40e9a57509b790b2982f5c07b7"},
+      {"path": "speech_tokenizer_v2.onnx", "bytes": 496082973, "sha256": "d43342aa12163a80bf07bffb94c9de2e120a8df2f9917cd2f642e7f4219c6f71"}
+    ]
+  },
+  "wetext": {
+    "provider": "modelscope",
+    "repo": "pengzhendong/wetext",
+    "revision": "b04bc07588601f7619b20efbb01cd1fa7278ccbc",
+    "directories": ["en", "en/itn", "en/tn", "ja", "ja/itn", "ja/tn", "zh", "zh/itn", "zh/tn"],
+    "files": [
+      {"path": ".gitattributes", "bytes": 2063, "sha256": "95a079c6d77efc0d5614c13741e919e6f1007f054250534cc13dce49948004d4"},
+      {"path": "__init__.py", "bytes": 0, "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+      {"path": "configuration.json", "bytes": 36, "sha256": "9a9b41224519cc2cd5e993d9bd161a4165bb0f7ddc58a91a63f8b0ced41ad4de"},
+      {"path": "en_tn_tagger.fst", "bytes": 5731710, "sha256": "53c602049b21c8041c6c1e2e28315315e236eee2944fbab059f46ee3654d51bd"},
+      {"path": "en_tn_verbalizer.fst", "bytes": 2040454, "sha256": "2d3c0ef6fd2b82be3e36c581786531735be106e693e5a4396642d3f3907fd7b9"},
+      {"path": "full_to_half.fst", "bytes": 15634, "sha256": "3ac164703b7e83133a8864c8d5dd3cd44ea398c74f49480258e6d986c73b21ad"},
+      {"path": "README.md", "bytes": 1389, "sha256": "2f85e7d37b9202ebc3d32ea9a55bb6eaa005352aebc9923d326f241e98cfa811"},
+      {"path": "remove_interjections.fst", "bytes": 11322, "sha256": "70f36aa8071968f72278fb8db9f17a060e8f8ac73a5e4161a009e33c688fedc1"},
+      {"path": "remove_puncts.fst", "bytes": 16642, "sha256": "0d69853648848ddad69e0b7a6398e5bc15be39b5559aa0119938aa6e60632538"},
+      {"path": "tag_oov.fst", "bytes": 468802, "sha256": "7d58b861760f691b24f095ca17dcac6ccb79de1871282847895380249f2b034b"},
+      {"path": "en/itn/tagger.fst", "bytes": 687174, "sha256": "d33019ac11e5ce41f0bdec16d50696823105e0882da92c2c75c44c980eb9c2ae"},
+      {"path": "zh/itn/tagger.fst", "bytes": 1928858, "sha256": "1b57d35fa33030b50f2699d77b3c2cf2c3d5961c45d450322f5cf9aa729b810c"},
+      {"path": "zh/tn/tagger.fst", "bytes": 527178, "sha256": "cf341314c51f7ce59049f3b2c42f0ce8fd71e6d08d4d6969613aad384a5e2ae8"},
+      {"path": "en/tn/tagger.fst", "bytes": 5645674, "sha256": "245e2dc9174cdd007a8e9e50f3339773d1adbbc7535b71cf67478dc1683cc3ec"},
+      {"path": "ja/itn/tagger.fst", "bytes": 242794, "sha256": "cb0ec2a70b5e9c61d6532b5146ea5676ed9cdd808c8c737be8e5b3abe7002b23"},
+      {"path": "ja/tn/tagger.fst", "bytes": 401870, "sha256": "4e07b61a391df366ed8e2d249a36fa16fdbed9cbb505c186e12352429187aa88"},
+      {"path": "ja/itn/tagger_enable_0_to_9.fst", "bytes": 223022, "sha256": "e6c63f48e7156ec99bd6080f682945ddb67bd4d89c69df354c6af86aa603abab"},
+      {"path": "zh/itn/tagger_enable_0_to_9.fst", "bytes": 1998630, "sha256": "a29dad112b1725e79f96f5a84e8b7f2ceb9dc3d88ffc785ebf994899701ccc9f"},
+      {"path": "traditional_to_simple.fst", "bytes": 401134, "sha256": "01ff345b2416ac19b20bbc46236ed6a6923cf2a430a96411ae3b4f60ea9bf01d"},
+      {"path": "en/tn/verbalizer.fst", "bytes": 6398822, "sha256": "03155c88f317b2795969e264c19f87faf98b9853d5ac631e419bacdc3b3ee15a"},
+      {"path": "en/itn/verbalizer.fst", "bytes": 748106, "sha256": "89db991f319cd1e5f27e3b33dc69642e97c83bc5df0333e6a53cafeae806e121"},
+      {"path": "zh/itn/verbalizer.fst", "bytes": 1453678, "sha256": "440ac75aaeda3dd81f91b42abec4c08e84b7b0186462cc536a3a74d3ad1f13c4"},
+      {"path": "ja/itn/verbalizer.fst", "bytes": 273998, "sha256": "4f4deac5ce1c5af61ca359dfb13289aed506eba22979c4a9ceaae238d9c86acc"},
+      {"path": "ja/tn/verbalizer.fst", "bytes": 328042, "sha256": "34d9cc3a219f23052273e00e2f8810f6f24614f291794914d2ba52ecc39a6cfc"},
+      {"path": "zh/tn/verbalizer.fst", "bytes": 1069758, "sha256": "5a13cd679dd54637d12d2bd1bd33ee2165d91c867e14468c93195af02256e5da"},
+      {"path": "zh/tn/verbalizer_remove_erhua.fst", "bytes": 1069842, "sha256": "4ecdea636b97cb7dff2637499713815836ec703d29cf044f17106d428f258ee5"}
+    ]
+  }
+}

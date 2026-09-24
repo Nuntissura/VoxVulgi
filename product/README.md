@@ -20,7 +20,8 @@ From `product/desktop/`:
 
 From `product/desktop/`:
 
-- Build with managed target folder: `npm run build:desktop:target`
+- Build the app against the separately managed runtime: `npm run build:desktop:target:core-only`.
+- Compiler artifacts are reused from `product/desktop/build_target/cargo_cache`; published app outputs go to `product/desktop/build_target/Current`.
 - Default build validates and reuses the existing bundled offline payload when it matches the pinned dependency inputs.
 - Refresh the bundled offline payload explicitly with `npm run build:desktop:target:refresh`.
 - Force a clean dependency refresh with `npm run build:desktop:target:force-refresh`.

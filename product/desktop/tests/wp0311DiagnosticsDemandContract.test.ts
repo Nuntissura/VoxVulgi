@@ -143,9 +143,11 @@ test("ordinary protection projection crosses the Tauri boundary through one snap
   assert.doesNotMatch(command, /replay_youtube_protection_history/);
   assert.equal((projection.match(/db::open_readonly\(paths\)/g) ?? []).length, 1);
   assert.equal((projection.match(/transaction_with_behavior\(TransactionBehavior::Deferred\)/g) ?? []).length, 1);
-  assert.match(projection, /OPERATION_DOWNLOAD/);
-  assert.match(projection, /OPERATION_ENUMERATION/);
-  assert.equal((projection.match(/policy_history_conn\(/g) ?? []).length, 2);
+  // WP-0321 S4: downloads and subscription checks share one protection state per sign-in
+  // identity, so the snapshot reads one shared state and one history.
+  assert.match(projection, /POLICY_STATE_OPERATION/);
+  assert.doesNotMatch(projection, /OPERATION_ENUMERATION/);
+  assert.equal((projection.match(/policy_history_conn\(/g) ?? []).length, 1);
   assert.match(tauri, /generate_handler!\[[\s\S]*youtube_protection_snapshot_get/);
 });
 

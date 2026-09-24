@@ -3556,6 +3556,10 @@ function App() {
             return;
           }
         }
+        if (target === "options" && typeof payload !== "string" && String(payload.section_id) === "options-manual") {
+          localStorage.setItem("voxvulgi.v1.options.active_module", "manual");
+          window.dispatchEvent(new Event("voxvulgi-open-manual"));
+        }
         switchPage(target);
         if (typeof payload !== "string") {
           const sectionId = payload.section_id ?? payload.sectionId ?? null;
@@ -3638,11 +3642,6 @@ function App() {
                 : (() => {
                     throw new Error(`unsupported UI audit operation: ${String(operation)}`);
                   })();
-          await new Promise<void>((resolve) => {
-            window.requestAnimationFrame(() => {
-              window.requestAnimationFrame(() => resolve());
-            });
-          });
           const response = {
             ok: true,
             request_id: requestId,
@@ -3660,6 +3659,18 @@ function App() {
               action:
                 operation === "action"
                   ? ((event.payload?.request ?? {}) as AgentUiActionRequest).action ?? null
+                  : null,
+              product_action_id:
+                operation === "action" && typeof (result as Record<string, unknown>).product_action_id === "string"
+                  ? (result as Record<string, unknown>).product_action_id
+                  : null,
+              effect_class:
+                operation === "action" && typeof (result as Record<string, unknown>).effect_class === "string"
+                  ? (result as Record<string, unknown>).effect_class
+                  : null,
+              actor_id:
+                operation === "action" && typeof (result as Record<string, unknown>).actor_id === "string"
+                  ? (result as Record<string, unknown>).actor_id
                   : null,
             },
           );
@@ -4168,63 +4179,63 @@ function App() {
               <nav className="nav" data-no-drag="true">
                 <button
                   className={page === "localization" ? "active" : ""}
-                  onClick={() => switchPage("localization")}
+                  data-agent-action-id="navigation.localization" data-agent-effect-class="read_only" onClick={() => switchPage("localization")}
                   type="button"
                 >
                   Localization Studio
                 </button>
                 <button
                   className={page === "video_ingest" ? "active" : ""}
-                  onClick={() => switchPage("video_ingest")}
+                  data-agent-action-id="navigation.video_ingest" data-agent-effect-class="read_only" onClick={() => switchPage("video_ingest")}
                   type="button"
                 >
                   Video Archiver
                 </button>
                 <button
                   className={page === "instagram_archive" ? "active" : ""}
-                  onClick={() => switchPage("instagram_archive")}
+                  data-agent-action-id="navigation.instagram_archive" data-agent-effect-class="read_only" onClick={() => switchPage("instagram_archive")}
                   type="button"
                 >
                   Instagram Archiver
                 </button>
                 <button
                   className={page === "tiktok_archive" ? "active" : ""}
-                  onClick={() => switchPage("tiktok_archive")}
+                  data-agent-action-id="navigation.tiktok_archive" data-agent-effect-class="read_only" onClick={() => switchPage("tiktok_archive")}
                   type="button"
                 >
                   TikTok Archiver
                 </button>
                 <button
                   className={page === "image_archive" ? "active" : ""}
-                  onClick={() => switchPage("image_archive")}
+                  data-agent-action-id="navigation.image_archive" data-agent-effect-class="read_only" onClick={() => switchPage("image_archive")}
                   type="button"
                 >
                   Image Archive
                 </button>
                 <button
                   className={page === "media_library" ? "active" : ""}
-                  onClick={() => switchPage("media_library")}
+                  data-agent-action-id="navigation.media_library" data-agent-effect-class="read_only" onClick={() => switchPage("media_library")}
                   type="button"
                 >
                   Media Library
                 </button>
                 <button
                   className={page === "jobs" ? "active" : ""}
-                  onClick={() => switchPage("jobs")}
+                  data-agent-action-id="navigation.jobs" data-agent-effect-class="read_only" onClick={() => switchPage("jobs")}
                   type="button"
                 >
                   Jobs/Queue
                 </button>
                 <button
                   className={page === "diagnostics" ? "active" : ""}
-                  onClick={() => switchPage("diagnostics")}
+                  data-agent-action-id="navigation.diagnostics" data-agent-effect-class="read_only" onClick={() => switchPage("diagnostics")}
                   type="button"
                 >
                   Diagnostics
                 </button>
                 <button
                   className={page === "options" ? "active" : ""}
-                  onClick={() => switchPage("options")}
+                  data-agent-action-id="navigation.options" data-agent-effect-class="read_only" onClick={() => switchPage("options")}
                   type="button"
                 >
                   Options
@@ -4307,7 +4318,7 @@ function App() {
                   <button type="button" onClick={() => void setSafeModeEnabled(false)}>
                     Exit Safe Mode
                   </button>
-                  <button type="button" onClick={() => switchPage("diagnostics")}>
+                  <button type="button" data-agent-action-id="navigation.diagnostics" data-agent-effect-class="read_only" onClick={() => switchPage("diagnostics")}>
                     Open Diagnostics
                   </button>
                 </div>
@@ -4382,7 +4393,7 @@ function App() {
                   <button type="button" onClick={() => setStartupDetailsOpen(true)}>
                     Loading details
                   </button>
-                  <button type="button" onClick={() => switchPage("diagnostics")}>
+                  <button type="button" data-agent-action-id="navigation.diagnostics" data-agent-effect-class="read_only" onClick={() => switchPage("diagnostics")}>
                     Open Diagnostics
                   </button>
                 </div>
@@ -4504,7 +4515,7 @@ function App() {
               </table>
             </div>
             <div className="row">
-              <button type="button" onClick={() => switchPage("diagnostics")}>
+              <button type="button" data-agent-action-id="navigation.diagnostics" data-agent-effect-class="read_only" onClick={() => switchPage("diagnostics")}>
                 Open Diagnostics
               </button>
               <button type="button" onClick={() => setStartupDetailsOpen(false)}>

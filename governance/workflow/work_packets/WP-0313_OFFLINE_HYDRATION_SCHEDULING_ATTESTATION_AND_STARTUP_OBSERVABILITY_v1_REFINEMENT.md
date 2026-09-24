@@ -26,7 +26,7 @@ updated_at: 2026-08-23
 
 # Authority and packet boundaries
 
-- Installer/offline policy in `AGENTS.md`, `CLAUDE.md`, `governance/spec/PRODUCT_SPEC.md` sections 8.1.8/8.1.9, `governance/spec/TECHNICAL_DESIGN.md` section 2.1, and `governance/release/OFFLINE_INSTALLER_BUILD_MANUAL.md` remains authoritative.
+- Installer/offline policy in `offline-installer-runtime/GUIDE.md` remains authoritative; product detail stays in `PRODUCT_SPEC.md` sections 8.1.8/8.1.9 and `TECHNICAL_DESIGN.md` section 2.1.
 - Readiness must reflect verified bytes on disk, never network reachability; default operation remains fully offline.
 - WP-0310's database-first ordering remains a hard predecessor and must not regress.
 - WP-0298 owns bounded incident traces/captures and final exact-current-case closure. It is an authority/integration consumer, not a completion predecessor for WP-0313.
@@ -184,7 +184,7 @@ updated_at: 2026-08-23
 8. Integrate foreground-pressure signals from page/job activity without letting verification disappear or authorize stale bytes.
 9. Run slow-tree, tamper, reparse, interrupted-write, restart, single-flight, pre-attestation execution refusal, queue saturation, and event reconnect tests only against owned disposable payload/app-data fixtures; record source/output path identities and prove no operator payload/config/database path aliases a mutation target.
 10. Run the exact packaged full payload headlessly only after setting `VOXVULGI_AGENT_HEADLESS_BASE_DIR` to a preflighted owned disposable absolute root, then prove database/config/trace/bridge sidecars resolve there. Run the agent-driven controlled normal-window case with `vvwatch` only inside an owned disposable VM/snapshot. Optional current-profile evidence may observe an already operator-started process but may not launch, navigate, mutate, or stop it. Capture before/after duration, scan count, bridge/navigation, resource, and heartbeat delivery evidence.
-11. Propagate the implemented verification phases, current-process attestation, event/revision, heartbeat timing/acknowledgement, scheduling, and recovery contracts into `governance/spec/PRODUCT_SPEC.md`, `governance/spec/TECHNICAL_DESIGN.md`, `product/desktop/src/pages/DiagnosticsPage.tsx`, and `governance/release/OFFLINE_INSTALLER_BUILD_MANUAL.md` only where its canonical release procedure actually changes. Repo search on 2026-08-23 found no standalone product-code/governance topology or general built-in model-manual artifact; do not invent or claim those updates. Record each missing surface in proof and route a separate operator proposal for its canonical path.
+11. Propagate the implemented verification phases, current-process attestation, event/revision, heartbeat timing/acknowledgement, scheduling, and recovery contracts into `governance/spec/PRODUCT_SPEC.md`, `governance/spec/TECHNICAL_DESIGN.md`, `product/desktop/src/pages/DiagnosticsPage.tsx`, and `offline-installer-runtime/GUIDE.md` only where its canonical release procedure actually changes. Repo search on 2026-08-23 found no standalone product-code/governance topology or general built-in model-manual artifact; do not invent or claim those updates. Record each missing surface in proof and route a separate operator proposal for its canonical path.
 12. Build the governed semantic version, inspect startup/Diagnostics surfaces visually after the timed window, run independent adversarial review, remedy findings, and hand the corrected timing contract to WP-0314 and integration evidence to WP-0298.
 
 # Acceptance criteria

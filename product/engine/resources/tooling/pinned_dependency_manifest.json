@@ -1,5 +1,5 @@
 {
-  "schema_version": 2,
+  "schema_version": 3,
   "allow_unpinned_fallback_env": "VOXVULGI_ALLOW_UNPINNED_FALLBACK",
   "lockfiles": {
     "demucs": "lockfiles/demucs.lock.json",
@@ -7,6 +7,10 @@
     "tts_preview": "lockfiles/tts_preview.lock.json",
     "tts_neural_local_v1": "lockfiles/tts_neural_local_v1.lock.json",
     "tts_voice_preserving_local_v1": "lockfiles/tts_voice_preserving_local_v1.lock.json"
+  },
+  "offline_python_environment_locks": {
+    "main_windows_x64_cp311": "final_environment_locks/main_windows_x64_cp311.lock.json",
+    "cosyvoice_windows_x64_cp311": "final_environment_locks/cosyvoice_windows_x64_cp311.lock.json"
   },
   "yt_dlp_windows": {
     "version": "2026.07.04",
@@ -75,6 +79,9 @@
     "node_modules_tree_sha256_hex": "28ED8B72BE8F8AFF827B94ABDF3722F0A1DEE1B3CEAA575ADB561A9AFD22A486",
     "server_entrypoint_sha256_hex": "13E5077999589EF61D710E879DBC52BFFC64EE2AE1E793737B438A71200CA31F",
     "application_complete_tree_sha256_hex": "28A699B7B70B8D5B5F8B1ADB2848BBFBF60F90319D4F9CE0643EE3303957D684",
+    "canvas_prebuilt_url": "https://github.com/Automattic/node-canvas/releases/download/v3.2.3/canvas-v3.2.3-napi-v7-win32-x64.tar.gz",
+    "canvas_prebuilt_sha256_hex": "BA953CC8C38303AB94CC83461C7561506A5A3AF37D6C678DE4A47914D2D0BB48",
+    "canvas_prebuilt_file_bytes": 15235616,
     "source_label": "github:Brainicism/bgutil-ytdlp-pot-provider"
   },
   "spleeter": {
@@ -96,16 +103,20 @@
   },
   "demucs": {
     "pinned_spec": "demucs-infer==4.1.2",
-    "unpinned_fallback_spec": "demucs-infer"
+    "unpinned_fallback_spec": "demucs-infer",
+    "model_url": "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/955717e8-8726e21a.th?versionId=B0.WixD4GWkLxaKCs4ae4Lwdx1jvLjni",
+    "model_relative_path": "tools/python/models/demucs/hub/checkpoints/955717e8-8726e21a.th",
+    "model_file_bytes": 84141911,
+    "model_sha256_hex": "8726E21A993978C7BA086D3872E7608D7D5BFCA646CA4ACA459FFDA844FAA8B4"
   },
   "diarization": {
     "pinned": [
       "resemblyzer==0.1.4",
       "numpy==1.26.4",
       "librosa==0.11.0",
-      "numba==0.65.0",
-      "llvmlite==0.47.0",
-      "scikit-learn==1.8.0",
+      "numba==0.66.0",
+      "llvmlite==0.48.0",
+      "scikit-learn==1.9.0",
       "webrtcvad==2.0.10",
       "soundfile==0.13.1"
     ],
@@ -141,19 +152,34 @@
       "transformers==4.49.0",
       "huggingface_hub==0.34.4"
     ],
-    "unpinned_fallback": [
-      "kokoro",
-      "numpy",
-      "soundfile",
-      "torch",
-      "transformers",
-      "huggingface_hub"
-    ],
-    "warmup_recovery_force_reinstall": [
-      "transformers==4.49.0",
-      "huggingface_hub==0.34.4",
-      "kokoro==0.9.4"
-    ]
+    "spacy_model": {
+      "version": "3.8.0",
+      "url": "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+      "sha256_hex": "1932429DB727D4BFF3DEED6B34CFC05DF17794F4A52EEB26CF8928F7C1A0FB85",
+      "file_bytes": 12806118,
+      "source_label": "github:explosion/spacy-models"
+    },
+    "kokoro_model": {
+      "repo_id": "hexgrad/Kokoro-82M",
+      "revision": "f3ff3571791e39611d31c381e3a41a3af07b4987",
+      "files": [
+        {
+          "filename": "config.json",
+          "file_bytes": 2351,
+          "sha256_hex": "5ABB01E2403B072BF03D04FDE160443E209D7A0DAD49A423BE15196B9B43C17F"
+        },
+        {
+          "filename": "kokoro-v1_0.pth",
+          "file_bytes": 327212226,
+          "sha256_hex": "496DBA118D1A58F5F3DB2EFC88DBDC216E0483FC89FE6E47EE1F2C53F18AD1E4"
+        },
+        {
+          "filename": "voices/af_heart.pt",
+          "file_bytes": 523425,
+          "sha256_hex": "0AB5709B8FFAB19BFD849CD11D98F75B60AF7733253AD0D67B12382A102CB4FF"
+        }
+      ]
+    }
   },
   "tts_voice_preserving_local_v1": {
     "openvoice_git_spec": "git+https://github.com/myshell-ai/OpenVoice.git@74a1d147b17a8c3092dd5430504bd83ef6c7eb23",

@@ -1,0 +1,898 @@
+{
+  "schema_version": 1,
+  "title": "VoxVulgi user and agent manual",
+  "commands": [
+    {
+      "name": "jobs.list",
+      "description": "Read a page of the canonical job store. Continue paging; visible rows are not the whole queue.",
+      "read_only": true,
+      "effect": "read_only",
+      "input": {
+        "limit": "1-200; default 50",
+        "offset": "default 0"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "jobs.list"
+          },
+          "limit": {
+            "description": "1-200; default 50",
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          },
+          "offset": {
+            "description": "default 0",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "jobs.inspect",
+      "description": "Read exact jobs, their current pacing, and up to 5 recent attempts (attempt_no, status, error, timestamps, batch_id). Downloads reopen the same id on retry; other job types still link a separate replacement job.",
+      "read_only": true,
+      "effect": "read_only",
+      "input": {
+        "job_ids": "1-25 unique exact IDs"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "job_ids"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "jobs.inspect"
+          },
+          "job_ids": {
+            "description": "1-25 unique exact IDs",
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 25,
+            "uniqueItems": true,
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "jobs.overview",
+      "description": "Read counts and bounded previews; previews are not the full canonical set.",
+      "read_only": true,
+      "effect": "read_only",
+      "input": {
+        "view": "optional view",
+        "track": "optional track"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "jobs.overview"
+          },
+          "view": {
+            "description": "optional view",
+            "type": "string"
+          },
+          "track": {
+            "description": "optional track",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "downloads.presets",
+      "description": "Read saved download profiles.",
+      "read_only": true,
+      "effect": "read_only",
+      "input": {},
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "downloads.presets"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "downloads.pacing",
+      "description": "Change only the current default preset pacing. Queued jobs read it when starting; existing child processes retain their launch settings.",
+      "read_only": false,
+      "effect": "reversible_state_change",
+      "input": {
+        "preset_id": "expected current default ID",
+        "request_sleep_secs": "integer 0-600",
+        "download_sleep_secs": "integer 0-3600"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "preset_id",
+          "request_sleep_secs",
+          "download_sleep_secs",
+          "operation_id"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "downloads.pacing"
+          },
+          "preset_id": {
+            "description": "expected current default ID",
+            "type": "string"
+          },
+          "request_sleep_secs": {
+            "description": "integer 0-600",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 600
+          },
+          "download_sleep_secs": {
+            "description": "integer 0-3600",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3600
+          },
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "downloads.enqueue",
+      "description": "Submit URLs through the normal queue, deduplication and MKV download path.",
+      "read_only": false,
+      "effect": "reversible_state_change",
+      "input": {
+        "urls": "1-25 URLs",
+        "output_dir": "optional existing configured destination",
+        "preset_id": "optional preset"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "urls",
+          "operation_id"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "downloads.enqueue"
+          },
+          "urls": {
+            "description": "1-25 URLs",
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 25,
+            "uniqueItems": true,
+            "items": {
+              "type": "string"
+            }
+          },
+          "output_dir": {
+            "description": "optional existing configured destination",
+            "type": "string"
+          },
+          "preset_id": {
+            "description": "optional preset",
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "jobs.retry",
+      "description": "Retry exact jobs with current preset safety settings. Downloads reopen the same row (same id, attempt_no+1); other job types insert and link a replacement job.",
+      "read_only": false,
+      "effect": "reversible_state_change",
+      "input": {
+        "job_ids": "1-25 unique exact IDs"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "job_ids",
+          "operation_id"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "jobs.retry"
+          },
+          "job_ids": {
+            "description": "1-25 unique exact IDs",
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 25,
+            "uniqueItems": true,
+            "items": {
+              "type": "string"
+            }
+          },
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "jobs.cancel",
+      "description": "Cancel exact jobs through the runner; records and media remain.",
+      "read_only": false,
+      "effect": "reversible_state_change",
+      "input": {
+        "job_ids": "1-25 unique exact IDs",
+        "confirmation": "JOBS.CANCEL:<sorted comma-separated IDs>"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "job_ids",
+          "confirmation",
+          "operation_id"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "jobs.cancel"
+          },
+          "job_ids": {
+            "description": "1-25 unique exact IDs",
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 25,
+            "uniqueItems": true,
+            "items": {
+              "type": "string"
+            }
+          },
+          "confirmation": {
+            "description": "JOBS.CANCEL:<sorted comma-separated IDs>",
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "downloads.restart_current",
+      "description": "Cancel an owned active download, wait for the old execution to drain, then reopen the same job id at the next attempt_no using current pacing. Repeating an already-restarted original is idempotent and returns the same id.",
+      "read_only": false,
+      "effect": "reversible_state_change",
+      "input": {
+        "job_ids": "1-25 unique exact IDs",
+        "confirmation": "DOWNLOADS.RESTART_CURRENT:<sorted comma-separated IDs>"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "job_ids",
+          "confirmation",
+          "operation_id"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "downloads.restart_current"
+          },
+          "job_ids": {
+            "description": "1-25 unique exact IDs",
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 25,
+            "uniqueItems": true,
+            "items": {
+              "type": "string"
+            }
+          },
+          "confirmation": {
+            "description": "DOWNLOADS.RESTART_CURRENT:<sorted comma-separated IDs>",
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "operation.get",
+      "description": "Poll a mutation receipt. Accepted is not completed; completed enqueue/retry is not downloaded.",
+      "read_only": true,
+      "effect": "read_only",
+      "input": {
+        "operation_id": "same operation ID as original request"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "operation_id"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "operation.get"
+          },
+          "operation_id": {
+            "description": "same operation ID as original request",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "jobs.logs",
+      "description": "Read up to 64 KiB of the canonical job log tail with existing diagnostics redaction.",
+      "read_only": true,
+      "effect": "read_only",
+      "input": {
+        "job_ids": "exactly one job ID"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "job_ids"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "jobs.logs"
+          },
+          "job_ids": {
+            "description": "exactly one job ID",
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1,
+            "uniqueItems": true,
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "jobs.activity",
+      "description": "Read canonical paged activity with process-local structured transfer bytes, speed, ETA and bounded live messages. source: all, youtube, instagram, tiktok, images, other, localization. view: now, attention, history. Missing live telemetry is explicit; transfer completion does not prove saved output.",
+      "read_only": true,
+      "effect": "read_only",
+      "input": {
+        "source": "default all",
+        "view": "default now",
+        "offset": "default 0",
+        "limit": "1-50; default 20"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string"
+          },
+          "command": {
+            "const": "jobs.activity"
+          },
+          "source": {
+            "type": "string"
+          },
+          "view": {
+            "type": "string"
+          },
+          "offset": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000000
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "subscriptions.failed_downloads",
+      "description": "Page the complete canonical failed recurring video set with fixed since/until bounds and after_id. Use jobs.retry in exact groups of 25; poll receipts and reconcile every replacement. This query does not resume inactive subscriptions.",
+      "read_only": true,
+      "effect": "read_only",
+      "input": {
+        "since_ms": "since_ms",
+        "until_ms": "until_ms",
+        "after_id": "after_id",
+        "limit": "limit"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string"
+          },
+          "command": {
+            "const": "subscriptions.failed_downloads"
+          },
+          "since_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "until_ms": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "after_id": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 200
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "queue.resume",
+      "description": "Explicitly resume queued work. In isolated headless sessions this starts the normal production runner; it never starts automatically. This may download media/network resources. Normal sessions resume their existing runner.",
+      "read_only": false,
+      "effect": "reversible_state_change",
+      "input": {},
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "operation_id"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string"
+          },
+          "command": {
+            "const": "queue.resume"
+          },
+          "operation_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "youtube.controlled_probe",
+      "description": "Request one controlled video retry during a download cooldown. Keeps exclusive canary admission and all pacing; earliest five minutes after latest outcome. Does not clear other holds or resume a paused queue. Later failures retain normal backoff.",
+      "read_only": false,
+      "effect": "external_probe",
+      "input": {},
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string"
+          },
+          "command": {
+            "const": "youtube.controlled_probe"
+          },
+          "operation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "operation_id"
+        ]
+      }
+    },
+    {
+      "name": "youtube.return_to_baseline",
+      "description": "Explicitly return the current download protection context to saved baseline after its failure cause has been resolved. Retains history, authentication settings and all quality validation. Equivalent to the download portion of Options Return to saved baseline.",
+      "read_only": false,
+      "effect": "reversible_state_change",
+      "input": {},
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string"
+          },
+          "command": {
+            "const": "youtube.return_to_baseline"
+          },
+          "operation_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "operation_id"
+        ]
+      }
+    },
+    {
+      "name": "jobs.purge_terminal_history",
+      "description": "Delete finished (failed/canceled, optionally succeeded) job history rows older than a cutoff, after writing a full-database VACUUM INTO backup first (newest 3 app-created backups retained). dry_run previews the exact counts only and never backs up or deletes. Queued, running and localization rows are never touched.",
+      "read_only": false,
+      "effect": "reversible_state_change",
+      "input": {
+        "older_than_days": "integer 0-3650; 0 means no age filter",
+        "include_succeeded": "boolean; also purge succeeded terminal jobs",
+        "dry_run": "boolean; true previews counts only, no backup or delete",
+        "confirmation": "required only when dry_run is false: JOBS.PURGE_TERMINAL_HISTORY:<older_than_days>:<include_succeeded>"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "older_than_days",
+          "include_succeeded",
+          "dry_run",
+          "operation_id"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "jobs.purge_terminal_history"
+          },
+          "older_than_days": {
+            "description": "integer 0-3650; 0 means no age filter",
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 3650
+          },
+          "include_succeeded": {
+            "description": "boolean; also purge succeeded terminal jobs",
+            "type": "boolean"
+          },
+          "dry_run": {
+            "description": "boolean; true previews counts only, no backup or delete",
+            "type": "boolean"
+          },
+          "confirmation": {
+            "description": "required only when dry_run is false: JOBS.PURGE_TERMINAL_HISTORY:<older_than_days>:<include_succeeded>",
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  ],
+  "endpoints": [
+    {
+      "method": "GET",
+      "path": "/agent/health",
+      "description": "Liveness; short timeout up to 3 seconds."
+    },
+    {
+      "method": "GET",
+      "path": "/agent/state",
+      "description": "Current page, version, headless mode and action availability."
+    },
+    {
+      "method": "GET",
+      "path": "/agent/capabilities",
+      "description": "This catalog plus current runtime availability."
+    },
+    {
+      "method": "GET",
+      "path": "/agent/manual",
+      "description": "Built-in manual and command catalog."
+    },
+    {
+      "method": "POST",
+      "path": "/agent/navigate",
+      "description": "{page, section_id?}; Options manual uses page=options, section_id=options-manual. No desktop focus."
+    },
+    {
+      "method": "POST",
+      "path": "/agent/snapshot",
+      "description": "{subfolder?,label?,scroll_top?}; saved PNG path, up to 30 seconds. Open the image to inspect."
+    },
+    {
+      "method": "POST",
+      "path": "/agent/dump",
+      "description": "{subfolder?,label?}; paired state/console dump path."
+    },
+    {
+      "method": "POST",
+      "path": "/agent/ui_audit",
+      "description": "{bridge_token,limit?,include_offscreen?}; semantic inventory, bounds, current audit IDs and allowed actions."
+    },
+    {
+      "method": "POST",
+      "path": "/agent/ui_action",
+      "description": "{bridge_token,audit_id,action,actor_id,expected_product_action_id,...}; only audited safe actions. Re-audit after changes."
+    },
+    {
+      "method": "POST",
+      "path": "/agent/command",
+      "description": "{bridge_token,actor_id,command,operation_id?,...}; typed backend controls below. Independent of WebView responsiveness."
+    },
+    {
+      "method": "GET",
+      "path": "/agent/jobs_tracks",
+      "description": "Job track runtime state."
+    },
+    {
+      "method": "GET",
+      "path": "/agent/subscriptions_activity",
+      "description": "Subscription activity projection."
+    },
+    {
+      "method": "POST",
+      "path": "/agent/freeze_dump",
+      "description": "{limit?,note?}; freeze evidence even while WebView is hung."
+    },
+    {
+      "method": "POST",
+      "path": "/agent/freeze_event",
+      "description": "Worker telemetry ingress; not a user action."
+    },
+    {
+      "method": "POST",
+      "path": "/agent/subscription_status",
+      "description": "Headless only: explicit subscription lifecycle status; preserves records."
+    },
+    {
+      "method": "GET/POST",
+      "path": "/agent/provider_verify",
+      "description": "Headless only: start/poll full-byte provider verification."
+    },
+    {
+      "method": "GET/POST",
+      "path": "/agent/localization_offline_proof",
+      "description": "Headless only: localization offline proof."
+    }
+  ],
+  "topics": [
+    {
+      "title": "Using VoxVulgi",
+      "body": "Video Archiver submits single URLs, playlists and subscriptions. Jobs shows attempts, errors and retry lineage. Media Library browses managed media. Localization edits translation and dubbing work. Options configures storage, providers, pacing and diagnostics. Newly managed video outputs are MKV with available selected subtitles embedded. Existing media is preserved."
+    },
+    {
+      "title": "Quiet startup and discovery",
+      "body": "Read agent_bridge.json under the active app-data root. Confirm its PID is alive before trusting its port, then probe localhost /agent/health with a timeout of at most 3 seconds. Keep bridge_token secret. For disposable tests use --agent-headless with VOXVULGI_AGENT_HEADLESS_BASE_DIR set to an isolated absolute folder; it mounts the hidden WebView and starts no runner unless queue.resume is explicitly requested. To run the installed app quietly against real production data, first verify no existing app instance, then launch --agent-background. This retains normal startup, subscriptions and downloads while keeping the window minimized without activation (restore it from the taskbar); GET /agent/state reports agent_background=true and agent_headless=false. Background and headless flags cannot be combined. Do not use isolated results as proof of production recovery."
+    },
+    {
+      "title": "Navigation and visual inspection",
+      "body": "Use /agent/navigate, /agent/ui_audit, /agent/ui_action, /agent/snapshot and /agent/dump. Navigation and DOM interaction do not raise the native window or simulate OS input. For Options manual navigate with section_id=options-manual. Read each audited control\u2019s safe_actions, product_action_id, effect and input choices. Audit IDs expire on rerender. Capture and open snapshots after interaction to inspect readability, clipping and layout. A successful action receipt proves dispatch only; re-read the resulting UI and backend state."
+    },
+    {
+      "title": "Interaction and availability",
+      "body": "Localhost token authentication is required for semantic and backend commands. Live actions are enabled by default; VOXVULGI_AGENT_LIVE_ACTIONS=0 explicitly disables mutations. /agent/capabilities reports availability. No arbitrary JavaScript, SQL, selectors or unrestricted IPC is exposed. Credential/destructive UI controls are intentionally unavailable; report unsupported controls precisely rather than claiming all app interaction is impossible. Computer Use is a last resort requiring operator authorization; build missing product controls when requested."
+    },
+    {
+      "title": "Parallel agents and recovery",
+      "body": "Each mutation needs a stable actor_id and unique operation_id (1-80 letters, digits, dot, colon, dash or underscore). Reuse that operation ID only for identical input. Mutations serialize; at most four are admitted. Poll operation.get with the same actor and operation ID. Receipts survive restarts. Interrupted receipts require inspecting job attempts before issuing a new operation. Exact job commands affect only the supplied IDs, not a filtered UI subset. For downloads, restart_current reopens the same job id (attempt_no increments); repeating restart_current on the same id is idempotent. Non-download job types still return a separate replacement id; verify it independently until its actual output is complete."
+    },
+    {
+      "title": "Download pacing and stuck jobs",
+      "body": "Request sleep applies between metadata/extraction requests; it is not merely a pause between videos. A 600-second request sleep can delay a single video repeatedly. Download sleep applies before media transfer. Preparation at 5% is not measured byte progress. Use current preset pacing for new jobs and retries; an already running downloader keeps its launch arguments. Restart exact jobs through downloads.restart_current after inspecting them. Provider cooldowns and authentication failures remain distinct from configured pacing. A queued replacement is not proof that bytes are downloading."
+    },
+    {
+      "title": "Troubleshooting",
+      "body": "Read Jobs errors and lineage, Diagnostics traces and /agent/freeze_dump. If the bridge is alive while the WebView is frozen, backend commands remain available. Verify current PID, version and runtime root again after restart. Do not write the production database directly, stop unrelated processes, or delete library metadata. See the repo process-stop policy before terminating processes. Preserve media and subscription records. Report the exact missing capability or failed receipt and its recovery path."
+    },
+    {
+      "title": "Backend request example",
+      "body": "POST /agent/command with {\"bridge_token\":\"<from-sidecar>\",\"actor_id\":\"codex.downloads\",\"command\":\"jobs.inspect\",\"job_ids\":[\"<original-id>\"]}. To restart use command downloads.restart_current, a new operation_id, the same exact job_ids and confirmation DOWNLOADS.RESTART_CURRENT:<sorted IDs>. Poll operation.get; the receipt's job.id equals the original id for downloads (attempt_no incremented) or a separate replacement id for other job types; inspect job attempts. Read input_schema in /agent/capabilities for machine-readable fields."
+    },
+    {
+      "title": "Download activity in Jobs and archivers",
+      "body": "Jobs and each archiver show a shared activity list. Running work comes first; Details opens bounded live downloader output. Percentage, bytes, speed and remaining time describe the current transfer only when the provider reports them. Saving and subtitle processing follow transfer completion. Unknown progress stays indeterminate. Jobs offers source and activity filters, per-attempt Stop and Retry, and Pause new starts. Queue settings, grouped history and maintenance are available on demand. Use jobs.activity for the same canonical paged backend data; params and credentials are omitted. A title may be unavailable before provider metadata arrives. Image Archive supports one-time web-page and Pinterest crawls; recurring image subscriptions are not implemented."
+    },
+    {
+      "title": "Archive quality, captions and subscription recovery",
+      "body": "All managed video downloads request best available video and original audio, without a resolution ceiling or forced source codec. Legacy queued and retried jobs use this policy too. Files finalize as MKV using stream copy. Available original-language and English captions are embedded, preferring authored captions; automatic captions or source-provided English translations are labeled accordingly. Missing source captions are shown explicitly. Jobs activity shows selected/verified resolution and subtitle results. A lone YouTube 360p fallback fails with an actionable quality error instead of becoming a successful archive. Downloader warnings and archive_quality.json receipts are retained with each job. The exact dot subscription folder template means the already-resolved subscription folder. For recovery, collect subscriptions.failed_downloads with fixed time bounds, continue after_id until empty, retry exact IDs using jobs.retry, then reconcile: downloads reopen the same id (check attempt_no via jobs.inspect), other job types return a separate replacement id. Then explicitly queue.resume. Do not replace existing media or stop unrelated processes. Headless mode starts no worker until explicit queue.resume."
+    },
+    {
+      "title": "Controlled retry after a cooldown",
+      "body": "Options \u2192 Video Archiver \u2192 YouTube protection \u2192 Try one video after cooldown, or youtube.controlled_probe. The app keeps one active canary and waits at least five minutes after the last outcome. It retains quality, subtitles and request spacing. Successful canaries recover the queue through normal policy; repeated server failures keep it held. This is an explicit request, not a guarantee that YouTube has lifted its limit."
+    },
+    {
+      "title": "YouTube translated subtitles and sign-in",
+      "body": "YouTube automatic translations receive a 60-second wait before each subtitle request because immediate requests can return HTTP 429. Native/manual captions do not get this additional delay. Your selected browser sign-in remains in use after errors. After verifying that the failure cause is repaired, youtube.return_to_baseline clears the current download hold without deleting evidence or changing saved pacing."
+    }
+  ]
+}

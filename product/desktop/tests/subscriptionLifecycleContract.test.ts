@@ -12,15 +12,17 @@ function readRepoFile(...parts: string[]): string {
 }
 
 test("HTTP 404 is presented as unavailable without claiming channel deletion", () => {
+  // WP-0322 Scope C: 404 and "channel does not exist" both classify as source_gone / "Source is gone".
   const failure = classifyFailure("Unable to download API page: HTTP Error 404: Not Found");
-  assert.equal(failure.label, "Unavailable");
-  assert.match(failure.requirement, /does not prove its hosting channel was deleted/i);
+  assert.equal(failure.kind, "source_gone");
+  assert.equal(failure.label, "Source is gone");
 
   const network = classifyFailure("network connection timed out");
-  assert.notEqual(network.label, "Unavailable");
+  assert.notEqual(network.label, "Source is gone");
 
   const searchResult = classifyFailure("YouTube said: This channel does not exist.");
-  assert.equal(searchResult.label, "Channel/handle not found");
+  assert.equal(searchResult.kind, "source_gone");
+  assert.equal(searchResult.label, "Source is gone");
 });
 
 test("subscription manager uses preserved manual status instead of destructive Delete", () => {

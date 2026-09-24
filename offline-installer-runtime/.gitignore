@@ -1,0 +1,4 @@
+# Generated packaging output (GUIDE.md "Minimal recovery state"): payload archives and ISOs.
+# Never commit; they are multi-GB and reproducible from the qualification/package entrypoints.
+qualified_runtime/
+package_candidates/

@@ -1,48 +1,74 @@
-// WP-0264: Failure-state telegraphing — single, DRY classifier shared by the
-// subscription panel (LibraryPage) and the Jobs/Queue view (JobsPage).
+// WP-0322: Actionable error catalogue — single source of truth ("Scope C" in
+// governance/workflow/work_packets/WP-0322_ACTIONABLE_ERRORS_AND_SUBSCRIPTION_EXPORT_v1.md).
 //
-// It turns a raw YouTube / yt-dlp error string into a plain STATE + a plain
-// REQUIRED ACTION so the operator immediately knows what (if anything) to do:
-// a rate-limit, an expired cookie, and a genuinely dead channel must look
-// visibly distinct instead of all reading as the same wall of jargon.
+// Turns a raw YouTube / yt-dlp / Instagram error string into a plain-language
+// explanation that always states WHO ACTS (you vs the app) and, when the app
+// acts, WHAT it will do. Every failure surface (subscription chips/detail,
+// Jobs "Needs attention", DownloadActivity rows, Instagram/TikTok archivers)
+// renders from this one classifier so the wording never drifts between pages.
 //
-// Pure + dependency-free by design (WP-0264 red-team: the patterns must live in
-// exactly one file so the classifier can be extended as new wording appears
-// without touching either page). Display-only: the engine still makes the
-// authoritative failure / retry / skip decisions; this only changes what the
-// operator reads. Keep the raw error one expander away — never invent a
-// requirement for `unknown`.
+// Pure + dependency-free by design so it can be extended as new wording
+// appears without touching any rendering surface. Display-only: the engine
+// still makes the authoritative failure/retry/skip decisions.
 //
-// ORDER MATTERS — evaluate most-specific first. The HTTP status code is
-// decisive (learned from live data on 2026-07-01: "Unable to download API
-// page: HTTP Error 404" is URL-level unavailability, NOT proof about its
-// hosting channel and NOT a rate-limit; a bare "Unable to download API page"
-// with no status code stays `unknown`).
+// ORDER MATTERS (Scope C, "first match wins"): app_busy is evaluated before
+// ANY timeout/network rule so an internal database-contention retry is never
+// shown to the operator as "Network problem".
 
 export type FailureKind =
   | "ok"
-  | "auth_required"
-  | "channel_not_found"
-  | "rate_limited"
+  | "app_busy"
+  | "youtube_blocked"
+  | "sign_in_rejected"
+  | "youtube_helper"
+  | "youtube_not_responding"
+  | "wrong_link"
+  | "source_gone"
   | "members_only"
-  | "download_missing"
   | "stalled"
   | "storage"
-  | "tool"
-  | "busy"
-  | "network"
+  | "instagram_checkpoint"
+  | "internal"
   | "unknown";
 
+export type WhoActs = "you" | "app";
+
 export type FailureTone = "info" | "warn" | "error" | "action";
+
+// Every action button renders from this fixed vocabulary. A page wires only
+// the ids it has a real, existing command for; unwired ids are simply not
+// rendered (never invent a backend call — see FailureExplainer.tsx).
+export type FailureActionId =
+  | "retry_now"
+  | "return_to_normal"
+  | "slower_pacing"
+  | "reconnect_signin"
+  | "connect_signin"
+  | "check_again"
+  | "repair_helper"
+  | "open_on_youtube"
+  | "edit_link"
+  | "keep_as_archive"
+  | "mark_deleted"
+  | "open_folder"
+  | "change_folder"
+  | "open_instagram"
+  | "retry_later";
 
 export type FailureState = {
   kind: FailureKind;
   label: string;
-  requirement: string;
+  whatHappened: string;
+  whoActs: WhoActs | null; // null only for the "ok" sentinel
+  appWillDo?: string;
+  yourFix?: string;
+  actions: FailureActionId[];
+  // Back-compat fields — existing renderers (LibraryPage/JobsPage/DownloadActivity)
+  // read `.tone` and `.requirement` directly; keep populating them.
   tone: FailureTone;
+  requirement: string;
 };
 
-// Human-facing one-word tone name, handy for aggregate strips / titles.
 export const TONE_LABEL: Record<FailureTone, string> = {
   info: "Info",
   warn: "Warning",
@@ -50,18 +76,8 @@ export const TONE_LABEL: Record<FailureTone, string> = {
   action: "Action needed",
 };
 
-type ToneStyle = {
-  color: string;
-  background: string;
-  border: string;
-};
+type ToneStyle = { color: string; background: string; border: string };
 
-// Inline chip styling per tone (kept here so both pages render identical chips
-// without touching App.css). Colours mirror the WP-0264 tone map:
-//   info   = gray   (#6b7280)  — nothing to do, retries automatically
-//   warn   = amber  (#b45309 on #fffbeb)
-//   error  = red    (#b91c1c on #fef2f2)
-//   action = blue   (#1d4ed8 on #eff6ff) — the operator must do something
 const TONE_STYLE: Record<FailureTone, ToneStyle> = {
   info: { color: "#6b7280", background: "#f3f4f6", border: "#d1d5db" },
   warn: { color: "#b45309", background: "#fffbeb", border: "#fcd34d" },
@@ -69,9 +85,6 @@ const TONE_STYLE: Record<FailureTone, ToneStyle> = {
   action: { color: "#1d4ed8", background: "#eff6ff", border: "#93c5fd" },
 };
 
-// A compact inline-style object for a state chip of the given tone. Returned as
-// a plain React.CSSProperties-compatible object so callers can spread it into
-// `style={{ ...toneStyle(tone), ... }}`.
 export function toneStyle(tone: FailureTone): {
   color: string;
   background: string;
@@ -102,125 +115,240 @@ export function toneStyle(tone: FailureTone): {
 const OK: FailureState = {
   kind: "ok",
   label: "OK",
-  requirement: "",
+  whatHappened: "",
+  whoActs: null,
+  actions: [],
   tone: "info",
+  requirement: "",
 };
 
-// Rules (first match wins). See ORDER MATTERS note above.
-const RULES: Array<{ kind: FailureKind; test: RegExp; label: string; requirement: string; tone: FailureTone }> = [
+type Rule = {
+  kind: FailureKind;
+  test: RegExp;
+  label: string;
+  whatHappened: string;
+  whoActs: WhoActs;
+  appWillDo?: string;
+  yourFix?: string;
+  actions: FailureActionId[];
+  tone: FailureTone;
+};
+
+// Scope C catalogue, in the exact numbered order from the WP. First match wins.
+const RULES: Rule[] = [
   {
-    kind: "auth_required",
-    // 403 / cookie rejection / sign-in wall.
-    test: /auth is blocked|cookies were rejected|sign in to confirm|http error 403|403:\s*forbidden|login required|--cookies/i,
-    label: "Sign-in needed",
-    requirement: "Open Options > YouTube sign-in, then Connect and test your browser session (or import fresh YouTube-only cookies).",
-    tone: "action",
-  },
-  {
-    kind: "channel_not_found",
-    // Exact HTTP 404 is the only failure that maps to the Unavailable lifecycle wording.
-    // It is URL-level availability and never proof that the hosting channel was deleted.
-    test: /http error 404|http response error 404|404:\s*not found|status code 404|status=404|status:\s*404/i,
-    label: "Unavailable",
-    requirement:
-      "This subscription URL is unavailable. This does not prove its hosting channel was deleted; the URL may be renamed, private, restricted, temporarily unavailable, or undisclosed.",
-    tone: "action",
-  },
-  {
-    kind: "channel_not_found",
-    // Extractor/search wording without an HTTP 404 remains a distinct attention result.
-    // It must not visually impersonate the durable Unavailable lifecycle status.
-    test: /does not have a videos tab|channel does not exist|this channel does not/i,
-    label: "Channel/handle not found",
-    requirement: "Check the saved URL or handle, then queue it again.",
-    tone: "action",
-  },
-  {
-    kind: "rate_limited",
-    // 429 only — a bare "Unable to download API page" without a code is NOT this.
-    test: /http error 429|too many requests|rate.?limit/i,
-    label: "YouTube is rate-limiting",
-    requirement: "Retries automatically — no action needed.",
-    tone: "warn",
-  },
-  {
-    kind: "members_only",
-    test: /members-only|members only|join this channel|private video|is private/i,
-    label: "Members-only / private",
-    requirement: "Needs an account with access, or remove it.",
-    tone: "warn",
-  },
-  {
-    kind: "download_missing",
-    test: /reported a missing file|did not report an output file|downloaded an empty file|no downloadable formats/i,
-    label: "Downloaded file missing",
-    requirement: "Retry once. If it repeats, open technical details and update the downloader in Diagnostics.",
-    tone: "warn",
-  },
-  {
-    kind: "stalled",
-    test: /job stalled|no progress for|watchdog backstop|underlying step may be deadlocked/i,
-    label: "Stalled",
-    requirement: "Retry once. If it stalls again, open the job log and check the network and destination folder.",
-    tone: "warn",
-  },
-  {
-    kind: "storage",
-    test: /no space left|disk full|access is denied|permission denied|read-only file system|cannot write|failed to create.*file/i,
-    label: "Could not save the file",
-    requirement: "Check the destination folder, free space, and NAS connection, then retry.",
-    tone: "action",
-  },
-  {
-    kind: "tool",
-    test: /external tool missing|ffmpeg|ffprobe|yt-dlp.*not found|bundled yt-dlp refresh failed/i,
-    label: "Downloader tool problem",
-    requirement: "Open Diagnostics and repair or update the downloader tools, then retry.",
-    tone: "action",
-  },
-  {
-    kind: "busy",
-    // db-lock / file-in-use / io contention — internal, auto-retries.
-    test: /database is locked|being used by another process|io error/i,
-    label: "Busy (temporary)",
-    requirement: "Retries automatically.",
+    // 1. app_busy — internal database contention. Must be checked before any
+    // timeout/network rule (58 of the 195 live errors were mislabeled "Network
+    // problem" this way).
+    kind: "app_busy",
+    test: /writer_admission_timeout|read_admission_timeout|database is locked|database runtime error/i,
+    label: "App was busy",
+    whatHappened: "VoxVulgi's own database was briefly busy with other work; this was not a real download failure.",
+    whoActs: "app",
+    appWillDo: "Retries automatically after a short delay.",
+    actions: [],
     tone: "info",
   },
   {
-    kind: "network",
-    test: /timed out|timeout|connection|network|getaddrinfo|temporary failure|bytes read.*expected|incomplete read|connection reset/i,
-    label: "Network problem",
-    requirement: "Check your connection; retries automatically.",
+    // 2. youtube_blocked — rate limit / bot check (not a cookie rejection).
+    kind: "youtube_blocked",
+    test: /http error 429|too many requests|rate.?limit|sign in to confirm you'?re not a bot/i,
+    label: "YouTube is blocking requests",
+    whatHappened: "YouTube temporarily rate-limited or challenged this request.",
+    whoActs: "app",
+    appWillDo: "Cools down and tries again automatically at the next scheduled check.",
+    actions: ["retry_now", "return_to_normal", "slower_pacing"],
+    tone: "warn",
+  },
+  {
+    // 3. sign_in_rejected — cookies rejected / auth circuit open.
+    kind: "sign_in_rejected",
+    test: /cookies? (were|was) rejected|auth is blocked|http error 403|403:\s*forbidden|login required/i,
+    label: "YouTube sign-in was rejected",
+    whatHappened: "YouTube rejected the saved browser sign-in (cookies).",
+    whoActs: "you",
+    yourFix: "Reconnect your YouTube sign-in in Options.",
+    actions: ["reconnect_signin"],
+    tone: "action",
+  },
+  {
+    // 4. youtube_helper — PO provider integrity/bootstrap, engine unavailable.
+    kind: "youtube_helper",
+    test: /po provider|provider payload failed integrity validation|selected download engine is unavailable|bootstrap.*(fail|error)|ffmpeg|ffprobe|yt-dlp.*not found|bundled yt-dlp refresh failed|external tool missing/i,
+    label: "YouTube download helper problem",
+    whatHappened: "VoxVulgi's YouTube download helper failed to start or verify correctly.",
+    whoActs: "app",
+    appWillDo: "Rechecks and repairs the helper automatically before the next attempt.",
+    actions: ["check_again", "repair_helper"],
+    tone: "warn",
+  },
+  {
+    // 5. youtube_not_responding — yt-dlp timed out (and generic connection
+    // failures, folded in here so no failure silently loses a bucket).
+    kind: "youtube_not_responding",
+    test: /yt-dlp.*timed out after \d+s|managed_yt_dlp timed out|timed out after \d+s|timed out|timeout|connection reset|getaddrinfo|temporary failure|bytes read.*expected|incomplete read/i,
+    label: "YouTube stopped responding",
+    whatHappened: "yt-dlp stopped getting a response from YouTube — usually throttling, not a real outage.",
+    whoActs: "app",
+    appWillDo: "Retries automatically at the next scheduled check.",
+    actions: ["retry_now"],
+    tone: "warn",
+  },
+  {
+    // 6. wrong_link — needs sign-in tab / wrong tab type.
+    kind: "wrong_link",
+    test: /does not have a videos tab|playlists that require authentication/i,
+    label: "Wrong link for this source",
+    whatHappened: "The saved link points at a page (or tab) VoxVulgi cannot read directly.",
+    whoActs: "you",
+    yourFix: "Open the channel on YouTube and copy its /videos, /shorts, or /streams link, or connect sign-in if it needs one.",
+    actions: ["open_on_youtube", "edit_link", "connect_signin"],
+    tone: "action",
+  },
+  {
+    // 7. source_gone — playlist/channel removed or terminated, 404.
+    kind: "source_gone",
+    test: /playlist does not exist|channel was removed|channel does not exist|account has been terminated|http error 404|http response error 404|404:\s*not found|status code 404|status[:=]\s*404/i,
+    label: "Source is gone",
+    whatHappened: "YouTube reports this channel, playlist, or account no longer exists.",
+    whoActs: "you",
+    yourFix: "Decide whether to keep it as an archive (stop checking) or mark it deleted. Downloaded videos are kept either way.",
+    actions: ["keep_as_archive", "mark_deleted"],
+    tone: "action",
+  },
+  {
+    // 8. members_only.
+    kind: "members_only",
+    test: /members-only|members only|join this channel|private video|is private/i,
+    label: "Members-only or private",
+    whatHappened: "This video or channel requires membership or private access.",
+    whoActs: "you",
+    yourFix: "Connect a sign-in with access, or keep it as an archive.",
+    actions: ["connect_signin", "keep_as_archive"],
+    tone: "action",
+  },
+  {
+    // 9. stalled — watchdog, no progress.
+    kind: "stalled",
+    test: /job stalled|no progress for|watchdog backstop|underlying step may be deadlocked/i,
+    label: "Stalled",
+    whatHappened: "The job stopped making progress and the watchdog stepped in.",
+    whoActs: "app",
+    appWillDo: "Retries automatically.",
+    actions: ["retry_now"],
+    tone: "warn",
+  },
+  {
+    // 10. storage — disk/permission.
+    kind: "storage",
+    test: /no space left|disk full|access is denied|permission denied|read-only file system|cannot write|failed to create.*file/i,
+    label: "Could not save the file",
+    whatHappened: "VoxVulgi could not write to the destination folder.",
+    whoActs: "you",
+    yourFix: "Check free space, permissions, and the NAS connection, or change the destination folder.",
+    actions: ["open_folder", "change_folder"],
+    tone: "action",
+  },
+  {
+    // 11. instagram_checkpoint.
+    kind: "instagram_checkpoint",
+    test: /feedback_required|challenge_required|checkpoint_required/i,
+    label: "Instagram checkpoint",
+    whatHappened: "Instagram is asking for a checkpoint / challenge confirmation on this account.",
+    whoActs: "you",
+    yourFix: "Open Instagram in your browser, complete any prompt, then wait about 24 hours before retrying.",
+    actions: ["open_instagram", "retry_later"],
+    tone: "action",
+  },
+  {
+    // 12. internal — app invariants (merge intent, already finalizing, missing
+    // output file the app itself failed to report correctly).
+    kind: "internal",
+    test: /merge intent.*(target or members are )?invalid|already being finalized|reported a missing file|did not report an output file|downloaded an empty file|no downloadable formats/i,
+    label: "App-internal problem",
+    whatHappened: "VoxVulgi hit an internal consistency problem, not a real download failure.",
+    whoActs: "app",
+    appWillDo: "Retries automatically.",
+    actions: ["retry_now"],
     tone: "warn",
   },
 ];
 
+const UNKNOWN: Omit<FailureState, "kind"> & { kind: "unknown" } = {
+  kind: "unknown",
+  label: "Unrecognized error",
+  whatHappened: "This error has not been classified yet.",
+  whoActs: "you",
+  yourFix: "Open technical details below and copy the raw message if you need help.",
+  actions: [],
+  tone: "error",
+  requirement: "See details below.",
+};
+
+export type ClassifyOptions = {
+  // WP-0322 Scope C item 5: after >=3 consecutive failures, youtube_not_responding
+  // additionally suggests slower pacing. Optional + additive so existing
+  // single-argument call sites keep working unchanged.
+  consecutiveFailures?: number;
+};
+
 // Classify a raw error string into a plain state + required action.
 // Null / empty / whitespace-only input is treated as "no failure" (kind "ok");
-// callers should guard on `kind === "ok"` (and typically also on
-// consecutive_failures / status) before rendering a chip.
-export function classifyFailure(errorText: string | null | undefined): FailureState {
+// callers should guard on `kind === "ok"` before rendering anything.
+export function classifyFailure(
+  errorText: string | null | undefined,
+  options?: ClassifyOptions,
+): FailureState {
   const raw = (errorText ?? "").trim();
   if (!raw) return OK;
 
   for (const rule of RULES) {
     if (rule.test.test(raw)) {
+      let actions = rule.actions;
+      if (
+        rule.kind === "youtube_not_responding" &&
+        (options?.consecutiveFailures ?? 0) >= 3 &&
+        !actions.includes("slower_pacing")
+      ) {
+        actions = [...actions, "slower_pacing"];
+      }
       return {
         kind: rule.kind,
         label: rule.label,
-        requirement: rule.requirement,
+        whatHappened: rule.whatHappened,
+        whoActs: rule.whoActs,
+        appWillDo: rule.appWillDo,
+        yourFix: rule.yourFix,
+        actions,
         tone: rule.tone,
+        requirement: rule.yourFix ?? rule.appWillDo ?? "",
       };
     }
   }
 
-  // Else (incl. a bare "Unable to download API page" with no status code):
-  // do NOT invent a requirement — point at the raw detail, which stays one
-  // expander away in both surfaces.
-  return {
-    kind: "unknown",
-    label: "Error",
-    requirement: "See details below.",
-    tone: "error",
-  };
+  return { ...UNKNOWN };
+}
+
+// Human-readable "last failed <relative>" / "next automatic try <HH:MM>" helpers,
+// shared by every failure surface so wording matches exactly.
+export function formatLastFailed(lastErrorAtMs: number | null | undefined): string | null {
+  if (!lastErrorAtMs) return null;
+  const deltaMs = Date.now() - lastErrorAtMs;
+  if (deltaMs < 0) return "Last failed just now";
+  const minutes = Math.floor(deltaMs / 60000);
+  if (minutes < 1) return "Last failed just now";
+  if (minutes < 60) return `Last failed ${minutes} minute${minutes === 1 ? "" : "s"} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `Last failed ${hours} hour${hours === 1 ? "" : "s"} ago`;
+  const days = Math.floor(hours / 24);
+  return `Last failed ${days} day${days === 1 ? "" : "s"} ago`;
+}
+
+export function formatNextTry(nextCheckAtMs: number | null | undefined): string | null {
+  if (!nextCheckAtMs) return null;
+  const d = new Date(nextCheckAtMs);
+  if (Number.isNaN(d.getTime())) return null;
+  const hh = String(d.getHours()).padStart(2, "0");
+  const mm = String(d.getMinutes()).padStart(2, "0");
+  return `Next automatic try ${hh}:${mm}`;
 }

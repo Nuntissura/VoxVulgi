@@ -13,9 +13,12 @@ import {
   type DisplayJobTrack,
   type JobContextSummary,
 } from "../lib/archiverRuntime";
-// WP-0264: shared failure-state classifier (same rules the subscription panel uses).
+// WP-0264/WP-0322: shared failure-state classifier (same rules the subscription panel uses).
 import { classifyFailure, toneStyle } from "../lib/failureStates";
+import { FailureExplainer, type FailureActionHandlers } from "../components/FailureExplainer";
+import { youtubeGateText } from "../lib/youtubeGateText";
 import { diagnosticsTrace } from "../lib/diagnosticsTrace";
+import { DownloadActivity } from "../components/DownloadActivity";
 import {
   titleProvenanceLabel,
   type CanonicalTitleProjection,
@@ -36,8 +39,11 @@ type JobRow = CanonicalTitleProjection & {
   finished_at_ms: number | null;
   logs_path: string;
   params_json?: string;
+  // WP-0321 S6: downloads reuse the same row on retry, so these stay null for downloads; use
+  // attempt_no > 1 there instead. Other job types still insert+link a replacement row.
   retry_of_job_id?: string | null;
   retry_replacement_job_id?: string | null;
+  attempt_no?: number;
   // WP-0270: durable scheduler classification. Null/unknown means the engine
   // has not backfilled a legacy row; the UI must render it as Unclassified.
   track?: string | null;
@@ -232,6 +238,9 @@ type YoutubeGateState = {
   state: "ready" | "waiting" | "held" | string;
   next_eligible_at_ms: number | null;
   hold_reason: string | null;
+  mode: string | null;
+  cooldown_attempt: number;
+  entered_at_ms: number | null;
 };
 
 // Provisional WP-0270 desktop contract shared with the Tauri layer:
@@ -279,6 +288,16 @@ type JobCleanupSummary = {
   skipped_external_output_dirs: number;
   removed_cache_entries: number;
   failed_paths: JobCleanupFailure[];
+};
+
+// WP-0320: `jobs_purge_terminal_history` dry-run/execute receipt.
+type JobsPurgeTerminalHistoryCount = { type: string; status: string; count: number };
+type JobsPurgeTerminalHistoryReceipt = {
+  dry_run: boolean;
+  counts_by_type_status: JobsPurgeTerminalHistoryCount[];
+  total: number;
+  backup_path: string | null;
+  deleted: number;
 };
 
 type ClearTerminalJobsSearchSummary = {
@@ -582,6 +601,13 @@ function isRetryable(status: JobStatus): boolean {
   return status === "failed" || status === "canceled";
 }
 
+// WP-0321 S6: downloads reopen the same row on retry, so retry_of_job_id/retry_replacement_job_id
+// stay null and attempt_no > 1 is the only signal; other job types still populate those fields.
+function wasRetried(job: JobRow): boolean {
+  if (job.job_type === "download_direct_url") return (job.attempt_no ?? 1) > 1;
+  return Boolean(job.retry_of_job_id || job.retry_replacement_job_id);
+}
+
 function isIndividuallyDeletable(status: JobStatus): boolean {
   return status === "failed" || status === "canceled";
 }
@@ -630,6 +656,7 @@ function jobRowsEqual(a: JobRow[], b: JobRow[]): boolean {
       x.target_title_problem !== y.target_title_problem ||
       x.retry_of_job_id !== y.retry_of_job_id ||
       x.retry_replacement_job_id !== y.retry_replacement_job_id ||
+      x.attempt_no !== y.attempt_no ||
       x.batch_id !== y.batch_id ||
       x.item_id !== y.item_id ||
       x.track !== y.track
@@ -791,6 +818,7 @@ function summarizeGroupType(jobs: JobRow[]): string {
 
 function renderJobProgress(job: JobRow, outputs: ItemOutputs | null) {
   const pct = Math.round((job.progress ?? 0) * 100);
+  const preparing = job.job_type === "download_direct_url" && job.status === "running" && (job.progress ?? 0) <= 0.05001;
   const stage = outputs?.terminal_stage_label?.trim() || "";
   const summary = outputs?.terminal_summary?.trim() || "";
   const detail = outputs?.terminal_detail?.trim() || "";
@@ -803,7 +831,7 @@ function renderJobProgress(job: JobRow, outputs: ItemOutputs | null) {
       <div className="job-bar">
         <div className={`job-bar-fill job-bar-${job.status}`} style={{ width: `${pct}%` }} />
       </div>
-      <div style={{ fontWeight: 600 }}>{pct}%</div>
+      <div style={{ fontWeight: 600 }}>{preparing ? "Preparing / provider pacing" : `${pct}%`}</div>
       {lines.length ? (
         <div style={{ color: "#4b5563", fontSize: 12, lineHeight: 1.3 }}>
           {lines.join(" | ")}
@@ -847,6 +875,38 @@ function parseExternalToolMissing(error: string | null): string | null {
 }
 
 export function JobsPage({ visible = true }: { visible?: boolean }) {
+  const [advanced, setAdvanced] = useState(false);
+  // WP-0320: the landing view must say why nothing starts (cooldown/hold/safe-start wait),
+  // not only "no downloads running or waiting". Same read-only snapshot the advanced
+  // section and the Video Archiver use; polled while the page is visible.
+  const [landingGateText, setLandingGateText] = useState<string | null>(null);
+  useEffect(() => {
+    if (!visible) return;
+    let alive = true;
+    const read = async () => {
+      try {
+        const snapshot = await invoke<{ youtube_gate: YoutubeGateState }>("jobs_track_runtime_get");
+        if (alive) setLandingGateText(youtubeGateText(snapshot.youtube_gate));
+      } catch (error) {
+        // Never hide the reason: the diagnostics dump carries the console buffer.
+        console.warn("[jobs] landing gate read failed", String(error));
+        if (alive) setLandingGateText(null);
+      }
+    };
+    void read();
+    const timer = window.setInterval(() => { void read(); }, 30_000);
+    return () => { alive = false; window.clearInterval(timer); };
+  }, [visible]);
+  return <section>
+    {!advanced && <DownloadActivity visible={visible} gateText={landingGateText} />}
+    <details open={advanced} onToggle={e => setAdvanced(e.currentTarget.open)}>
+      <summary>Queue settings, grouped history and maintenance</summary>
+      {advanced && <AdvancedJobsPage visible={visible} />}
+    </details>
+  </section>;
+}
+
+function AdvancedJobsPage({ visible = true }: { visible?: boolean }) {
   // WP-0256: keep polling and rendering tied to page visibility, but do not pause jobs view
   // while the browser window is only blurred. Subscriptions/jobs keep arriving; a visible Jobs page
   // should reflect that without forcing users to click through focus.
@@ -891,6 +951,12 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     Record<string, BatchOperationSnapshot>
   >({});
   const [busy, setBusy] = useState(false);
+  // WP-0320: backup-first purge of finished (terminal) job history.
+  const [purgeOlderThanDaysDraft, setPurgeOlderThanDaysDraft] = useState("30");
+  const [purgeIncludeSucceeded, setPurgeIncludeSucceeded] = useState(true);
+  const [purgePreview, setPurgePreview] = useState<JobsPurgeTerminalHistoryReceipt | null>(null);
+  const [purgeBusy, setPurgeBusy] = useState(false);
+  const [purgeMessage, setPurgeMessage] = useState("");
   const [dummySeconds, setDummySeconds] = useState(10);
   const [queuePaused, setQueuePaused] = useState(false);
   const [trackRuntime, setTrackRuntime] = useState<JobsTrackRuntimeSnapshot | null>(null);
@@ -1359,11 +1425,14 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
         : viewJobs.filter((job) => {
             if (jobsFilter === "failed") return job.status === "failed" || job.status === "canceled";
             if (jobsFilter === "auth_blocked") return isAuthBlockedJob(job);
-            if (jobsFilter === "retried") return Boolean(job.retry_of_job_id || job.retry_replacement_job_id);
+            // WP-0321 S6: downloads reopen the same row on retry (retry_of_job_id/
+            // retry_replacement_job_id stay null there), so attempt_no > 1 is the retried
+            // signal for downloads. Other job types still insert+link a replacement row.
+            if (jobsFilter === "retried") return wasRetried(job);
             if (jobsFilter === "unretried") {
               return isRetryable(job.status) && !job.retry_replacement_job_id;
             }
-            if (jobsFilter === "succeeded_retry") return job.status === "succeeded" && Boolean(job.retry_of_job_id);
+            if (jobsFilter === "succeeded_retry") return job.status === "succeeded" && wasRetried(job);
             if (jobsFilter === "missing_title") {
               return job.job_type === "download_direct_url" && !job.target_title;
             }
@@ -2292,6 +2361,58 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
     }
   }
 
+  // WP-0320: backup-first purge of terminal (succeeded/failed/canceled) job history.
+  // Preview never writes; Execute is only enabled once a matching preview has run.
+  function purgeOlderThanDays(): number {
+    return Math.max(0, Math.round(Number(purgeOlderThanDaysDraft) || 0));
+  }
+
+  async function previewPurgeTerminalHistory() {
+    setPurgeBusy(true);
+    setPurgeMessage("");
+    try {
+      const receipt = await invoke<JobsPurgeTerminalHistoryReceipt>("jobs_purge_terminal_history", {
+        olderThanDays: purgeOlderThanDays(),
+        includeSucceeded: purgeIncludeSucceeded,
+        dryRun: true,
+      });
+      setPurgePreview(receipt);
+      setPurgeMessage(`Preview: ${receipt.total} finished job${receipt.total === 1 ? "" : "s"} would be removed.`);
+    } catch (e) {
+      setPurgePreview(null);
+      setPurgeMessage(`Error: ${String(e)}`);
+    } finally {
+      setPurgeBusy(false);
+    }
+  }
+
+  async function executePurgeTerminalHistory() {
+    if (!purgePreview) return;
+    const ok = await confirm(
+      `Permanently delete ${purgePreview.total} finished job row${purgePreview.total === 1 ? "" : "s"}? A database backup is created first.`,
+      { title: "Purge finished job history", kind: "warning" },
+    );
+    if (!ok) return;
+    setPurgeBusy(true);
+    setPurgeMessage("");
+    try {
+      const receipt = await invoke<JobsPurgeTerminalHistoryReceipt>("jobs_purge_terminal_history", {
+        olderThanDays: purgeOlderThanDays(),
+        includeSucceeded: purgeIncludeSucceeded,
+        dryRun: false,
+      });
+      setPurgePreview(receipt);
+      setPurgeMessage(
+        `Deleted ${receipt.deleted} row${receipt.deleted === 1 ? "" : "s"}. Backup: ${receipt.backup_path ?? "not created"}.`,
+      );
+      await refresh();
+    } catch (e) {
+      setPurgeMessage(`Error: ${String(e)}`);
+    } finally {
+      setPurgeBusy(false);
+    }
+  }
+
   const trackRows = canonicalTrackRows(trackRuntime);
   const unclassifiedTrackTotals = trackRuntime?.unclassified ?? null;
   const youtubeGate = trackRuntime?.youtube_gate ?? null;
@@ -2319,7 +2440,9 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
   const displayLabel = jobDisplayLabel(job, jobContext?.label);
 
     return (
-      <tr key={job.id} className={nested ? "batch-child-row" : undefined}>
+      // WP-0321 S6: a reopened download keeps its id across attempts, so pair id with
+      // attempt_no for a stable key wherever the same id can appear more than once.
+      <tr key={`${job.id}:${job.attempt_no ?? 1}`} className={nested ? "batch-child-row" : undefined}>
         <td>
           {nested ? "\u251C\u2500 " : ""}
           {(() => {
@@ -2332,33 +2455,15 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
               return rawError ? `${job.status}: ${rawError}` : job.status;
             }
             const state = classifyFailure(rawError);
+            const actionHandlers: FailureActionHandlers = {
+              retry_now: isRetryable(job.status) ? () => void retry(job.id) : undefined,
+            };
             return (
               <div>
-                <div style={{ fontWeight: 700, color: toneStyle(state.tone).color }}>
-                  {job.status === "failed" ? "Failed" : "Canceled"} &mdash; {state.label}
+                <div style={{ fontWeight: 700, fontSize: 12, color: "#4b5563" }}>
+                  {job.status === "failed" ? "Failed" : "Canceled"}
                 </div>
-                {state.requirement ? (
-                  <div style={{ color: "#4b5563", fontSize: 12, lineHeight: 1.3, marginTop: 2 }}>
-                    {state.requirement}
-                  </div>
-                ) : null}
-                <details style={{ marginTop: 4 }}>
-                  <summary style={{ cursor: "pointer", color: "#4b5563", fontSize: 12 }}>
-                    Show technical details
-                  </summary>
-                  <div
-                    style={{
-                      color: "#4b5563",
-                      fontSize: 12,
-                      lineHeight: 1.3,
-                      marginTop: 4,
-                      overflowWrap: "anywhere",
-                      whiteSpace: "pre-wrap",
-                    }}
-                  >
-                    {rawError}
-                  </div>
-                </details>
+                <FailureExplainer failure={state} rawMessage={rawError} actionHandlers={actionHandlers} />
               </div>
             );
           })()}
@@ -2375,6 +2480,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
           <div className="jobs-row-id" title={job.id}>
             Job <code>{job.id.slice(0, 8)}</code>
             {job.item_id ? <> · Item <code>{job.item_id.slice(0, 8)}</code></> : null}
+            {(job.attempt_no ?? 1) > 1 ? <> · Attempt {job.attempt_no}</> : null}
           </div>
           {titleProvenanceLabel(job.target_title_provenance) ? (
             <div style={{ color: "#6b7a8a", fontSize: 11 }}>
@@ -2720,6 +2826,9 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
           {trackRuntimeState !== "error" && youtubeGate?.next_eligible_at_ms ? (
             <small>Next eligible start: {formatTs(youtubeGate.next_eligible_at_ms)}</small>
           ) : null}
+          {trackRuntimeState !== "error" && youtubeGateText(youtubeGate) ? (
+            <small>{youtubeGateText(youtubeGate)}</small>
+          ) : null}
         </div>
         </details>
         <details className="jobs-toolbar-more">
@@ -2766,6 +2875,81 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
             Queue budgets are edited in Options → Jobs / Queue. A reported hold stops new starts on that
             track while running work continues. Retry creates new queued work; it does not cancel older running jobs.
           </div>
+
+          <div className="jobs-purge-terminal-history" data-testid="jobs-purge-terminal-history">
+            <h3 style={{ margin: "8px 0 4px" }}>Purge finished history…</h3>
+            <div className="jobs-help-text">
+              Backup-first: a database backup is created before any row is deleted. Queued and running
+              jobs, subscriptions, and localization job types are never removed.
+            </div>
+            <div className="row" style={{ marginTop: 6, alignItems: "center" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <span>Older than (days)</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={3650}
+                  value={purgeOlderThanDaysDraft}
+                  disabled={purgeBusy}
+                  onChange={(event) => {
+                    setPurgeOlderThanDaysDraft(event.currentTarget.value);
+                    setPurgePreview(null);
+                  }}
+                />
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <input
+                  type="checkbox"
+                  checked={purgeIncludeSucceeded}
+                  disabled={purgeBusy}
+                  onChange={(event) => {
+                    setPurgeIncludeSucceeded(event.currentTarget.checked);
+                    setPurgePreview(null);
+                  }}
+                />
+                <span>Include succeeded</span>
+              </label>
+              <button type="button" disabled={purgeBusy} onClick={() => void previewPurgeTerminalHistory()}>
+                Preview
+              </button>
+              <button type="button" disabled={purgeBusy || !purgePreview} onClick={() => void executePurgeTerminalHistory()}>
+                Execute
+              </button>
+            </div>
+            {purgeMessage ? <p role="status">{purgeMessage}</p> : null}
+            {purgePreview ? (
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Type</th>
+                      <th>Status</th>
+                      <th>Count</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {purgePreview.counts_by_type_status.map((row) => (
+                      <tr key={`${row.type}-${row.status}`}>
+                        <td>{row.type}</td>
+                        <td>{row.status}</td>
+                        <td>{row.count}</td>
+                      </tr>
+                    ))}
+                    <tr>
+                      <th scope="row" colSpan={2}>Total</th>
+                      <td>{purgePreview.total}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+            {!purgePreview?.dry_run && purgePreview?.backup_path ? (
+              <div className="jobs-help-text">
+                Backup: <code>{purgePreview.backup_path}</code> · Deleted {purgePreview.deleted} row{purgePreview.deleted === 1 ? "" : "s"}.
+              </div>
+            ) : null}
+          </div>
+
           <div className="row" style={{ marginTop: 8 }}>
             <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span>Test duration (seconds)</span>
@@ -2816,7 +3000,9 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
               </thead>
               <tbody>
                 {selectedJobDetail.attempts.map((attempt) => (
-                  <tr key={attempt.job.id}>
+                  // WP-0321 S6: a batch/job detail can list several history attempts that share
+                  // the same reopened download id at different attempt_no values.
+                  <tr key={`${attempt.job.id}:${attempt.job.attempt_no ?? 1}`}>
                     <td>
                       <strong>{attempt.status_label}</strong>
                       <div
@@ -2827,7 +3013,7 @@ export function JobsPage({ visible = true }: { visible?: boolean }) {
                       </div>
                     </td>
                     <td>
-                      <div>Job <code>{attempt.job.id.slice(0, 8)}</code></div>
+                      <div>Job <code>{attempt.job.id.slice(0, 8)}</code>{(attempt.job.attempt_no ?? 1) > 1 ? ` · Attempt ${attempt.job.attempt_no}` : ""}</div>
                       {attempt.job.batch_id ? <div>Batch <code>{attempt.job.batch_id.slice(0, 8)}</code></div> : null}
                       {attempt.job.retry_of_job_id ? <div>Retry of <code>{attempt.job.retry_of_job_id.slice(0, 8)}</code></div> : null}
                       {attempt.job.retry_replacement_job_id ? <div>Replaced by <code>{attempt.job.retry_replacement_job_id.slice(0, 8)}</code></div> : null}

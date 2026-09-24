@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use voxvulgi_engine::models::ModelStore;
 use voxvulgi_engine::paths::AppPaths;
 use voxvulgi_engine::pinned_dependency_manifest;
-use voxvulgi_engine::{cmd, db, tools, EngineError, Result};
+use voxvulgi_engine::{db, tools, EngineError, Result};
 
 fn main() -> std::result::Result<(), String> {
     run().map_err(|e| e.to_string())
@@ -72,7 +72,7 @@ fn run() -> Result<()> {
     if force {
         let _ = std::fs::remove_dir_all(paths.tools_dir());
         let _ = std::fs::remove_dir_all(paths.models_dir());
-        let _ = std::fs::remove_dir_all(paths.cache_dir().join("huggingface"));
+        let _ = std::fs::remove_dir_all(paths.huggingface_cache_dir());
         let _ = std::fs::remove_dir_all(paths.voice_backends_dir());
         paths.ensure_dirs()?;
     }
@@ -321,63 +321,63 @@ fn run() -> Result<()> {
         }
     }
 
-    println!("pre-downloading demucs weights (best-effort)...");
-    let _ = predownload_demucs_weights(&paths);
-
-    println!("exporting offline payload...");
-    export_offline_payload(&paths, &out_dir)?;
+    println!("acquiring pinned Demucs model bytes...");
+    acquire_demucs_weights(&paths).map_err(|error| {
+        EngineError::InstallFailed(format!(
+            "required Demucs weights could not be prepared for the offline payload: {error}"
+        ))
+    })?;
 
     println!("done.");
     Ok(())
 }
 
-fn predownload_demucs_weights(paths: &AppPaths) -> Result<()> {
-    let venv_python = tools::python_venv_python_path(paths)?;
-
-    let work_dir = paths.cache_dir().join("offline_prep");
-    std::fs::create_dir_all(&work_dir)?;
-
-    let wav_path = work_dir.join("tone_1s.wav");
-    write_test_wav_44k_mono_16bit(&wav_path)?;
-
-    let output_dir = work_dir.join("demucs_out");
-    if output_dir.exists() {
-        let _ = std::fs::remove_dir_all(&output_dir);
+fn acquire_demucs_weights(paths: &AppPaths) -> Result<()> {
+    let pin = &pinned_dependency_manifest::manifest().demucs;
+    let target = paths.base_dir.join(Path::new(&pin.model_relative_path));
+    if exact_file_matches(&target, pin.model_file_bytes, &pin.model_sha256_hex)? {
+        println!("pinned Demucs model already present and verified.");
+        return Ok(());
     }
-    std::fs::create_dir_all(&output_dir)?;
-
-    let torch_home = paths.python_models_dir().join("demucs");
-    std::fs::create_dir_all(&torch_home)?;
-
-    let mut command = cmd::command(&venv_python);
-    command.args(["-m", "demucs_infer"]);
-    command.args(["--two-stems", "vocals"]);
-    command.arg("-o").arg(&output_dir);
-    command.arg(&wav_path);
-    command.env("PYTHONNOUSERSITE", "1");
-    command.env(
-        "XDG_CACHE_HOME",
-        paths
-            .cache_dir()
-            .join("python")
-            .to_string_lossy()
-            .to_string(),
-    );
-    command.env("TORCH_HOME", torch_home.to_string_lossy().to_string());
-
-    let output = command.output().map_err(|e| {
-        EngineError::InstallFailed(format!("failed to run demucs predownload: {e}"))
-    })?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(EngineError::InstallFailed(format!(
-            "demucs predownload failed (code={:?}): {}",
-            output.status.code(),
-            stderr.trim()
-        )));
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
     }
-
+    let partial = target.with_extension("th.voxvulgi-part");
+    remove_payload_file_if_present(&partial)?;
+    tools::download_verified_file(
+        &pin.model_url,
+        &partial,
+        pin.model_file_bytes,
+        &pin.model_sha256_hex,
+        "pinned Demucs model",
+    )?;
+    remove_payload_file_if_present(&target)?;
+    std::fs::rename(&partial, &target)?;
+    if !exact_file_matches(&target, pin.model_file_bytes, &pin.model_sha256_hex)? {
+        return Err(EngineError::InstallFailed(
+            "pinned Demucs model changed during atomic promotion".to_string(),
+        ));
+    }
     Ok(())
+}
+
+fn exact_file_matches(path: &Path, expected_bytes: u64, expected_sha256_hex: &str) -> Result<bool> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_file()
+        || metadata.file_type().is_symlink()
+        || metadata.len() != expected_bytes
+    {
+        return Ok(false);
+    }
+    let observed = sha256_file(path)?
+        .iter()
+        .map(|byte| format!("{byte:02X}"))
+        .collect::<String>();
+    Ok(observed.eq_ignore_ascii_case(expected_sha256_hex))
 }
 
 fn export_offline_payload(paths: &AppPaths, out_dir: &Path) -> Result<()> {
@@ -393,7 +393,7 @@ fn export_offline_payload(paths: &AppPaths, out_dir: &Path) -> Result<()> {
 
     let tools_src = paths.tools_dir();
     let models_src = paths.models_dir();
-    let hf_cache_src = paths.cache_dir().join("huggingface");
+    let hf_cache_src = paths.huggingface_cache_dir();
 
     // WP-0129 remediation: keep completed files across an interrupted refresh. The payload is
     // large enough that deleting it before every attempt turns any crash or forced shutdown into
@@ -677,58 +677,6 @@ fn dir_size(root: &Path) -> Result<u64> {
     Ok(total)
 }
 
-fn write_test_wav_44k_mono_16bit(path: &Path) -> Result<()> {
-    // Minimal PCM WAV writer: 1s, 44.1kHz, mono, 16-bit.
-    let sample_rate: u32 = 44_100;
-    let channels: u16 = 1;
-    let bits_per_sample: u16 = 16;
-    let seconds: u32 = 1;
-    let total_samples: u32 = sample_rate * seconds;
-
-    let byte_rate: u32 = sample_rate * channels as u32 * (bits_per_sample as u32 / 8);
-    let block_align: u16 = channels * (bits_per_sample / 8);
-
-    let data_bytes: u32 = total_samples * channels as u32 * (bits_per_sample as u32 / 8);
-    let riff_chunk_size: u32 = 36 + data_bytes;
-
-    let mut out = Vec::<u8>::with_capacity((44 + data_bytes) as usize);
-
-    // RIFF header
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&riff_chunk_size.to_le_bytes());
-    out.extend_from_slice(b"WAVE");
-
-    // fmt chunk
-    out.extend_from_slice(b"fmt ");
-    out.extend_from_slice(&16u32.to_le_bytes()); // PCM fmt chunk size
-    out.extend_from_slice(&1u16.to_le_bytes()); // PCM format
-    out.extend_from_slice(&channels.to_le_bytes());
-    out.extend_from_slice(&sample_rate.to_le_bytes());
-    out.extend_from_slice(&byte_rate.to_le_bytes());
-    out.extend_from_slice(&block_align.to_le_bytes());
-    out.extend_from_slice(&bits_per_sample.to_le_bytes());
-
-    // data chunk
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&data_bytes.to_le_bytes());
-
-    // 440Hz sine wave at low amplitude.
-    let freq_hz: f64 = 440.0;
-    let amp: f64 = 0.08;
-    for n in 0..total_samples {
-        let t = (n as f64) / (sample_rate as f64);
-        let v = (amp * (2.0 * std::f64::consts::PI * freq_hz * t).sin()).clamp(-1.0, 1.0);
-        let sample = (v * (i16::MAX as f64)) as i16;
-        out.extend_from_slice(&sample.to_le_bytes());
-    }
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    std::fs::write(path, out)?;
-    Ok(())
-}
-
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -772,8 +720,7 @@ fn print_help() {
     println!(
         r#"voxvulgi_offline_bundle_prep
 
-Prepares a full offline payload (Phase 1 + Phase 2) in a staging app-data directory
-and exports it into the Tauri bundled resources folder.
+Prepares a full offline payload (Phase 1 + Phase 2) in a staging app-data directory.
 
 Usage:
   cargo run --bin voxvulgi_offline_bundle_prep -- \
@@ -783,7 +730,8 @@ Usage:
 
 Notes:
   - Downloads required tools/models during prep (build-time), but the exported payload is local-only.
-  - --export-only re-exports an already prepared stage without installs, downloads, or warmups.
+  - Normal preparation leaves the final trees directly under --stage-base-dir.
+  - --export-only re-exports an already prepared stage to --out-dir without installs or downloads.
   - The desktop app bootstraps the payload into the real app-data dir on first run.
 "#
     );

@@ -781,49 +781,88 @@ where
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderTransferPolicy {
+    pub sleep_interval_secs: u32,
+    /// WP-0321 S4: additional random jitter added on top of `sleep_interval_secs` (yt-dlp
+    /// `--max-sleep-interval` = interval + jitter). Defaulted so settings saved before this
+    /// field existed (schema 1) still load with jitter 0.
+    #[serde(default)]
+    pub sleep_jitter_secs: u32,
+    pub sleep_requests_secs: u32,
     pub concurrent_fragments: u32,
     pub limit_rate: Option<String>,
-    pub sleep_interval_secs: u32,
-    pub sleep_requests_secs: u32,
 }
 
 impl ProviderTransferPolicy {
     fn instagram_single_default() -> Self {
         Self {
+            sleep_interval_secs: 1,
+            sleep_jitter_secs: 0,
+            sleep_requests_secs: 1,
             concurrent_fragments: 2,
             limit_rate: None,
-            sleep_interval_secs: 1,
-            sleep_requests_secs: 1,
         }
     }
 
     fn instagram_recurring_default() -> Self {
         Self {
+            sleep_interval_secs: 3,
+            sleep_jitter_secs: 0,
+            sleep_requests_secs: 1,
             concurrent_fragments: 1,
             limit_rate: Some("4M".to_string()),
-            sleep_interval_secs: 3,
-            sleep_requests_secs: 1,
         }
     }
 
     fn tiktok_single_default() -> Self {
         Self {
+            sleep_interval_secs: 0,
+            sleep_jitter_secs: 0,
+            sleep_requests_secs: 0,
             concurrent_fragments: 2,
             limit_rate: None,
-            sleep_interval_secs: 0,
-            sleep_requests_secs: 0,
         }
     }
 
     fn tiktok_recurring_default() -> Self {
         Self {
+            sleep_interval_secs: 2,
+            sleep_jitter_secs: 0,
+            sleep_requests_secs: 1,
             concurrent_fragments: 1,
             limit_rate: Some("6M".to_string()),
-            sleep_interval_secs: 2,
-            sleep_requests_secs: 1,
+        }
+    }
+
+    /// WP-0321 S4: a foreground/manual YouTube download (paste, playlist, channel) is still the
+    /// same rate-limited service, so it keeps a real floor rather than the unthrottled default
+    /// the other single-item lanes use. Lane values are authoritative for YouTube (no merge with
+    /// the download preset's pacing fields, which now apply to non-YouTube sites only).
+    fn youtube_single_default() -> Self {
+        Self {
+            sleep_interval_secs: 5,
+            sleep_jitter_secs: 10,
+            sleep_requests_secs: 2,
+            concurrent_fragments: 1,
+            limit_rate: None,
+        }
+    }
+
+    /// WP-0321 S4: the recurring lane paces slower than single because it runs unattended and is
+    /// the lane most likely to trip YouTube's rate limiting over a long session.
+    fn youtube_recurring_default() -> Self {
+        Self {
+            sleep_interval_secs: 10,
+            sleep_jitter_secs: 5,
+            sleep_requests_secs: 3,
+            concurrent_fragments: 1,
+            limit_rate: None,
         }
     }
 }
+
+/// WP-0321 S4: current settings schema. The loader also accepts schema 1 (pre-jitter) files,
+/// upgrading them in memory; jitter defaults to 0 for lanes saved before the field existed.
+pub const PROVIDER_TRANSFER_SETTINGS_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProviderTransferSettings {
@@ -832,6 +871,13 @@ pub struct ProviderTransferSettings {
     pub instagram_recurring: ProviderTransferPolicy,
     pub tiktok_single: ProviderTransferPolicy,
     pub tiktok_recurring: ProviderTransferPolicy,
+    /// WP-0320: split from the shared global YouTube pacing so a foreground paste/playlist and
+    /// an unattended subscription child can be tuned independently. Defaulted so settings saved
+    /// before this field existed still load.
+    #[serde(default = "ProviderTransferPolicy::youtube_single_default")]
+    pub youtube_single: ProviderTransferPolicy,
+    #[serde(default = "ProviderTransferPolicy::youtube_recurring_default")]
+    pub youtube_recurring: ProviderTransferPolicy,
     #[serde(default)]
     pub tiktok_browser_cookie_source: Option<String>,
     #[serde(default)]
@@ -845,11 +891,13 @@ pub struct ProviderTransferSettings {
 impl Default for ProviderTransferSettings {
     fn default() -> Self {
         Self {
-            schema_version: 1,
+            schema_version: PROVIDER_TRANSFER_SETTINGS_SCHEMA_VERSION,
             instagram_single: ProviderTransferPolicy::instagram_single_default(),
             instagram_recurring: ProviderTransferPolicy::instagram_recurring_default(),
             tiktok_single: ProviderTransferPolicy::tiktok_single_default(),
             tiktok_recurring: ProviderTransferPolicy::tiktok_recurring_default(),
+            youtube_single: ProviderTransferPolicy::youtube_single_default(),
+            youtube_recurring: ProviderTransferPolicy::youtube_recurring_default(),
             tiktok_browser_cookie_source: None,
             tiktok_api_hostname: None,
             tiktok_app_info: None,
@@ -861,6 +909,8 @@ impl Default for ProviderTransferSettings {
 impl ProviderTransferSettings {
     pub fn policy_for_track(&self, track: &str) -> Option<&ProviderTransferPolicy> {
         match track {
+            "youtube_single" => Some(&self.youtube_single),
+            "youtube_recurring" => Some(&self.youtube_recurring),
             "instagram_single" => Some(&self.instagram_single),
             "instagram_recurring" => Some(&self.instagram_recurring),
             "tiktok_single" => Some(&self.tiktok_single),
@@ -913,7 +963,10 @@ fn normalize_provider_transfer_policy(
             "provider concurrent fragments must be between 1 and 32".to_string(),
         ));
     }
-    if policy.sleep_interval_secs > 86_400 || policy.sleep_requests_secs > 10_000 {
+    if policy.sleep_interval_secs > 86_400
+        || policy.sleep_jitter_secs > 86_400
+        || policy.sleep_requests_secs > 10_000
+    {
         return Err(EngineError::InstallFailed(
             "provider pacing delay is outside the supported range".to_string(),
         ));
@@ -925,17 +978,20 @@ fn normalize_provider_transfer_policy(
 fn normalize_provider_transfer_settings(
     mut settings: ProviderTransferSettings,
 ) -> Result<ProviderTransferSettings> {
-    if settings.schema_version != 1 {
+    if !matches!(settings.schema_version, 1 | 2) {
         return Err(EngineError::InstallFailed(format!(
             "unsupported provider transfer settings schema {}",
             settings.schema_version
         )));
     }
+    settings.schema_version = PROVIDER_TRANSFER_SETTINGS_SCHEMA_VERSION;
     settings.instagram_single = normalize_provider_transfer_policy(settings.instagram_single)?;
     settings.instagram_recurring =
         normalize_provider_transfer_policy(settings.instagram_recurring)?;
     settings.tiktok_single = normalize_provider_transfer_policy(settings.tiktok_single)?;
     settings.tiktok_recurring = normalize_provider_transfer_policy(settings.tiktok_recurring)?;
+    settings.youtube_single = normalize_provider_transfer_policy(settings.youtube_single)?;
+    settings.youtube_recurring = normalize_provider_transfer_policy(settings.youtube_recurring)?;
     settings.tiktok_browser_cookie_source = normalize_optional_provider_setting(
         settings.tiktok_browser_cookie_source,
         "TikTok browser cookie source",
@@ -1029,19 +1085,18 @@ pub fn save_provider_transfer_settings(
     load_provider_transfer_settings(paths)
 }
 
+/// WP-0321 S4: pacing fields (concurrent fragments, limit rate, sleep interval, sleep requests)
+/// moved to `ProviderTransferPolicy` per-lane settings and are no longer patched here; this patch
+/// keeps only the retry-shaping and throttled-rate fields that still apply preset-wide.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DownloadPresetSafetyPatch {
-    pub yt_dlp_concurrent_fragments: u32,
-    pub yt_dlp_limit_rate: Option<String>,
     pub yt_dlp_throttled_rate: Option<String>,
     pub yt_dlp_file_access_retries: u32,
     pub yt_dlp_retries: u32,
     pub yt_dlp_fragment_retries: u32,
-    pub yt_dlp_sleep_interval: u32,
-    pub yt_dlp_sleep_requests: u32,
 }
 
-/// Patch only the eight Options-owned safety fields on the authoritative current catalog.
+/// Patch only the four Options-owned safety fields on the authoritative current catalog.
 /// `expected_default_preset_id` is a CAS token: unrelated catalog additions are preserved, while
 /// a concurrent default switch/delete is rejected instead of applying stale fields to a new row.
 pub fn patch_default_download_preset_safety_fields(
@@ -1080,14 +1135,10 @@ pub fn patch_default_download_preset_safety_fields(
                     "the authoritative default download preset is unavailable".to_string(),
                 )
             })?;
-        preset.yt_dlp_concurrent_fragments = patch.yt_dlp_concurrent_fragments;
-        preset.yt_dlp_limit_rate = patch.yt_dlp_limit_rate.clone();
         preset.yt_dlp_throttled_rate = patch.yt_dlp_throttled_rate.clone();
         preset.yt_dlp_file_access_retries = patch.yt_dlp_file_access_retries;
         preset.yt_dlp_retries = patch.yt_dlp_retries;
         preset.yt_dlp_fragment_retries = patch.yt_dlp_fragment_retries;
-        preset.yt_dlp_sleep_interval = patch.yt_dlp_sleep_interval;
-        preset.yt_dlp_sleep_requests = patch.yt_dlp_sleep_requests;
         Ok(current)
     })
 }
@@ -1111,20 +1162,8 @@ fn normalize_download_presets_config(
             path_template.to_string()
         };
         let filename_template = preset.filename_template.trim();
-        let format_preference = preset
-            .format_preference
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty());
-        // Migrate only the exact built-in legacy default. Custom selectors remain operator
-        // choices, but none of them can bypass the MKV execution boundary in jobs.rs.
-        let format_preference = if id == "default"
-            && title == "Default"
-            && format_preference.as_deref() == Some(LEGACY_MP4_DOWNLOAD_FORMAT_PREFERENCE)
-        {
-            Some(DEFAULT_DOWNLOAD_FORMAT_PREFERENCE.to_string())
-        } else {
-            format_preference
-        };
+        // All managed video archives follow the current best-quality/caption policy.
+        let format_preference = Some(DEFAULT_DOWNLOAD_FORMAT_PREFERENCE.to_string());
         cleaned.push(DownloadPreset {
             id: id.to_string(),
             title: title.to_string(),
@@ -1135,14 +1174,8 @@ fn normalize_download_presets_config(
                 filename_template.to_string()
             },
             format_preference,
-            quality_preference: preset
-                .quality_preference
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty()),
-            subtitle_mode: preset
-                .subtitle_mode
-                .map(|v| v.trim().to_string())
-                .filter(|v| !v.is_empty()),
+            quality_preference: Some("best".to_string()),
+            subtitle_mode: Some("auto".to_string()),
             yt_dlp_concurrent_fragments: normalize_positive_u32_with_fallback(
                 preset.yt_dlp_concurrent_fragments,
                 DEFAULT_YT_DLP_CONCURRENT_FRAGMENTS,
@@ -1833,7 +1866,7 @@ mod tests {
     }
 
     #[test]
-    fn normalize_migrates_exact_legacy_builtin_mp4_selector_without_touching_custom_presets() {
+    fn normalize_archive_policy_replaces_legacy_and_custom_quality_caps() {
         let mut config = DownloadPresetsConfig::default();
         config.presets[0].format_preference =
             Some(LEGACY_MP4_DOWNLOAD_FORMAT_PREFERENCE.to_string());
@@ -1862,7 +1895,7 @@ mod tests {
         );
         assert_eq!(
             normalized.presets[1].format_preference.as_deref(),
-            Some(LEGACY_MP4_DOWNLOAD_FORMAT_PREFERENCE)
+            Some(DEFAULT_DOWNLOAD_FORMAT_PREFERENCE)
         );
     }
 
@@ -1890,14 +1923,10 @@ mod tests {
         .expect("library catalog mutation");
 
         let patch = DownloadPresetSafetyPatch {
-            yt_dlp_concurrent_fragments: 1,
-            yt_dlp_limit_rate: Some("4M".to_string()),
             yt_dlp_throttled_rate: Some("20K".to_string()),
             yt_dlp_file_access_retries: 22,
             yt_dlp_retries: 8,
             yt_dlp_fragment_retries: 8,
-            yt_dlp_sleep_interval: 8,
-            yt_dlp_sleep_requests: 6,
         };
         let merged = patch_default_download_preset_safety_fields(&paths, "default", &patch)
             .expect("merge safety patch");
@@ -1909,9 +1938,8 @@ mod tests {
             .iter()
             .find(|preset| preset.id == "default")
             .expect("default preset");
-        assert_eq!(patched.yt_dlp_concurrent_fragments, 1);
-        assert_eq!(patched.yt_dlp_limit_rate.as_deref(), Some("4M"));
         assert_eq!(patched.yt_dlp_throttled_rate.as_deref(), Some("20K"));
+        assert_eq!(patched.yt_dlp_file_access_retries, 22);
 
         // A Library default switch changes the row to which the fields would apply. CAS rejects
         // the stale Options action and leaves the authoritative catalog untouched.
@@ -2172,5 +2200,64 @@ mod tests {
         invalid = saved.clone();
         invalid.tiktok_api_hostname = Some("https://unsafe.example".to_string());
         assert!(save_provider_transfer_settings(&paths, &invalid).is_err());
+    }
+
+    #[test]
+    fn provider_transfer_v1_without_jitter_loads() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        paths.ensure_dirs().expect("dirs");
+        let legacy_json = serde_json::json!({
+            "schema_version": 1,
+            "instagram_single": {
+                "concurrent_fragments": 2,
+                "limit_rate": null,
+                "sleep_interval_secs": 1,
+                "sleep_requests_secs": 1
+            },
+            "instagram_recurring": {
+                "concurrent_fragments": 1,
+                "limit_rate": "4M",
+                "sleep_interval_secs": 3,
+                "sleep_requests_secs": 1
+            },
+            "tiktok_single": {
+                "concurrent_fragments": 2,
+                "limit_rate": null,
+                "sleep_interval_secs": 0,
+                "sleep_requests_secs": 0
+            },
+            "tiktok_recurring": {
+                "concurrent_fragments": 1,
+                "limit_rate": "6M",
+                "sleep_interval_secs": 2,
+                "sleep_requests_secs": 1
+            },
+            "youtube_single": {
+                "concurrent_fragments": 1,
+                "limit_rate": null,
+                "sleep_interval_secs": 5,
+                "sleep_requests_secs": 2
+            },
+            "youtube_recurring": {
+                "concurrent_fragments": 1,
+                "limit_rate": null,
+                "sleep_interval_secs": 10,
+                "sleep_requests_secs": 3
+            }
+        });
+        std::fs::write(
+            paths.provider_transfer_settings_path(),
+            serde_json::to_vec_pretty(&legacy_json).expect("serialize legacy"),
+        )
+        .expect("write legacy settings");
+
+        let loaded = load_provider_transfer_settings(&paths).expect("load legacy schema 1");
+        assert_eq!(loaded.schema_version, PROVIDER_TRANSFER_SETTINGS_SCHEMA_VERSION);
+        assert_eq!(loaded.youtube_single.sleep_jitter_secs, 0);
+        assert_eq!(loaded.youtube_recurring.sleep_jitter_secs, 0);
+        assert_eq!(loaded.instagram_single.sleep_jitter_secs, 0);
+        assert_eq!(loaded.youtube_single.sleep_interval_secs, 5);
+        assert_eq!(loaded.youtube_recurring.sleep_requests_secs, 3);
     }
 }
