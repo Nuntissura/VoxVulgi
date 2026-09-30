@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0184
 - Owner: Codex
-- Status: REVIEW
+- Status: IN_PROGRESS
 - Created: 2026-04-08
 - Target milestone: Voice Cloning Quality
 
@@ -56,3 +56,7 @@ Out of scope:
 ## Status updates
 
 - 2026-08-15: Adversarial inspection corrected stale upstream facts and proved the repository implementation is still a scaffold. Status remains `REVIEW`; no completion claim is valid until the managed runtime, weights, render, dub, comparison, and packaged proof gates above pass.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: IN_PROGRESS. 2026-08-15 adversarial inspection establishes a catalog/starter-recipe scaffold, not a managed Fish Speech integration. Remaining: Managed pinned source/environment/weights, bounded server lifecycle, real zero-shot render/dub, backend comparison, offline and packaged proof. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

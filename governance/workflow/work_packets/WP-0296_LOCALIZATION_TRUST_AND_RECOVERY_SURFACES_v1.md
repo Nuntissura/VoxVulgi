@@ -71,3 +71,7 @@ worse than item 11. A popover in the workspace header strip, not a card.
 ## Status updates
 - 2026-08-05: Created from review gaps G12, G14, G17, G19, G21 — trust/recovery work that fell
   between the five feature packets and was owned by none of them.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: BACKLOG. Packet records a reviewed implementation plan with no execution or closure evidence. Remaining: Pre-export QC confirmation, whole-item original/dub review, visible/restorable versions, shared localization failure wording, provenance and proof. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

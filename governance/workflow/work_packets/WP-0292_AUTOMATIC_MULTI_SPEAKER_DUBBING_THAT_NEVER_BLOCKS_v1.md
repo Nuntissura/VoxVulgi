@@ -122,3 +122,7 @@ The reference threshold that decides this is `voice_reference_candidates.rs`:
 - 2026-08-05: Review confirmed the defect claim line-for-line and rated this the strongest of the
   five packets. Added mount point, failure-state reuse, resume gap, visible provenance, ETA, and the
   AC4 citation requirement.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: BACKLOG. Packet records a reviewed implementation plan and an unresolved default decision, with no closure evidence. Remaining: Resolve standard-TTS versus leave-original default; implement per-speaker degradation, resume/provenance/ETA/terminal truth and exact multi-speaker proof. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

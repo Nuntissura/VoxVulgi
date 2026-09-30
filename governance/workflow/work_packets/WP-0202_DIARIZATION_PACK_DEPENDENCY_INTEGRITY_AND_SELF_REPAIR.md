@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0202
 - Owner: Codex
-- Status: REVIEW
+- Status: NEEDS_VALIDATION
 - Created: 2026-04-24
 - Target milestone: Localization runtime reliability
 
@@ -51,3 +51,7 @@ Out of scope:
 - 2026-04-25: Implementation pass started. Live managed venv reproduced the broken state: `numba` import fails because installed `llvmlite` is below its runtime requirement, while existing Diagnostics validation still only checked a subset of packages.
 - 2026-04-25: Moved to REVIEW. Added validated diarization pins, runtime warmup validation, Diagnostics broken/repair detail, and repair install flow. Live venv repaired to `numba 0.65.0`/`llvmlite 0.47.0`; VoiceEncoder validation and a Queen-media resemblyzer probe passed. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0202/2026-04-25_0315_wp0202_0204/summary.md`.
 - 2026-08-15: Independent review found the live managed venv drifted to `numba 0.65.1` while the bundled lock requires `0.65.0`. Diagnostics named the mismatch and set `repair_required=true`, but `diarization_pack_status` still returned `installed=true` solely because every distribution was present. That violates this packet's broken-state acceptance and WP-0229's canonical install short-circuit. Remediation now requires package presence, lockfile runtime readiness, and exact source-pin versions before `installed=true`; the version-drift counterfactual passes. Live product repair and current governed app-boundary proof remain required before `DONE`.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: NEEDS_VALIDATION. Opened April proof and managed_diarization_repair_20260815_2335/summary.md: exact 37-pin live repair and VoiceEncoder construction passed; packaged gate remains pending. Remaining: Current governed packaged Diagnostics broken/readiness/repair proof and offline hydration of the validated pins. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

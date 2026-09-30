@@ -2,7 +2,7 @@
 
 ## Status
 
-IN_PROGRESS (evidence-based diagnosis complete; fixes are operator-rebuild-gated — see honesty note)
+IN_PROGRESS
 
 ## Owner
 
@@ -69,3 +69,7 @@ ASR (`asr_local`, native whisper.cpp FFI — NOT the Python venv) → Translate 
 
 ## Notes
 - 2026-07-01: authored from the localization root-cause deep-dive during the overnight session. This WP is diagnosis + plan; the dependency repair is intentionally NOT blind-patched (unvalidatable without a build). Corrects the false "shipped 0.1.68/0.1.69" claim in WP-0252's notes (per proof-gated truthfulness) — those changes first ship in the 0.1.81 build made this session.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: IN_PROGRESS. Normalize board MOSTLY DONE and packet qualified IN_PROGRESS to one status. Later board history records Kokoro import compatibility and subtitles-only/visible multi-speaker failure; these do not prove full dub synthesis. Remaining: Full end-to-end dub synthesis, CosyVoice warm-import verification, installation precompile/warmup and offline payload/default model closure. Preserve July diagnosis as dated history. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

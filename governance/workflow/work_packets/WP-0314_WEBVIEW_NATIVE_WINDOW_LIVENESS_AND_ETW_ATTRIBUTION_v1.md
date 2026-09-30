@@ -1,10 +1,10 @@
 ---
 file_id: WP-0314-v1
 file_kind: work_packet
-updated_at: 2026-08-23
+updated_at: 2026-09-30
 ---
 
-<topic id="contract" status="backlog" version="v1" wp="WP-0314" updated_at="2026-08-23">
+<topic id="contract" status="blocked" version="v1" wp="WP-0314" updated_at="2026-08-23">
 
 # Work Packet: WP-0314 — WebView/native-window liveness and ETW attribution
 
@@ -12,7 +12,7 @@ updated_at: 2026-08-23
 
 - ID: WP-0314
 - Owner: —
-- Status: BACKLOG
+- Status: BLOCKED
 - Created: 2026-08-23
 - Refinement: `WP-0314_WEBVIEW_NATIVE_WINDOW_LIVENESS_AND_ETW_ATTRIBUTION_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md`
@@ -81,5 +81,13 @@ Explain and remediate the proven split in which the native VoxVulgi window is co
 
 - 2026-08-23: Created from the governed v0.1.179 127/127 native-window not-responding versus 127/127 bridge-healthy split, corrected hydration/heartbeat evidence, WP-0298 proof-tool interference, current source inspection, and Microsoft WebView2/WPR primary documentation.
 - 2026-08-23: Status is BACKLOG because the operator requested implementation-ready packets before later remediation. No renderer/window remediation is selected by this planning artifact.
+
+</topic>
+
+<topic id="status-reconciliation-2026-09-30" status="blocked" wp="WP-0314" updated_at="2026-09-30">
+
+## Status reconciliation — 2026-09-30
+
+Not started beyond planning; explicitly blocked by completed proof of WP-0311/WP-0312/WP-0313. Liveness/ETW capture remains required under its original contract. Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
 
 </topic>

@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0143
 - Owner: Codex
-- Status: BLOCKED
+- Status: NEEDS_VALIDATION
 - Created: 2026-03-12
 - Target milestone: Post-0.1.6 smoke regression recovery
 
@@ -53,3 +53,9 @@ Out of scope:
 - 2026-03-22: Reworked the Localization home surface into a first-screen dashboard: added a main-workflow hero with live counts, a current-item continuation card, a lightweight import/setup card, a staged workflow explainer, an outputs handoff card, and recent localization-item cards with direct open/run/output/advanced actions. Verified with `npm run build`; live operator smoke still pending.
 - 2026-03-22: Remaining first-screen hierarchy work is now split into `WP-0153` and `WP-0154` so the contract for dashboard-first presentation and shell-status demotion is explicit instead of staying implicit inside this broader recovery packet.
 - 2026-03-22: `WP-0154` is now implemented in code: the home screen has a `Now / Next / Last Output` orientation layer and generic recovery/startup cards are demoted into compact shell-status chrome. Verified with `npm run build`; live operator smoke is still the remaining closeout gate.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: NEEDS_VALIDATION
+- Operator home/handoff/progress/output implementation is recorded. Remaining is current installed first-screen continuation and output usability smoke; WP-0289 owns the actual first-dub deliverable, without replacing this packet's UI checks.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

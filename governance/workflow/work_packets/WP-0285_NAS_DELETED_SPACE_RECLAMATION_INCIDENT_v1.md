@@ -1,15 +1,15 @@
 ---
 file_id: WP-0285-v1
 file_kind: work-packet
-updated_at: 2026-07-30
+updated_at: 2026-09-30
 ---
 
-<topic id="contract" status="in-progress" version="v1" wp="WP-0285" updated_at="2026-07-29">
+<topic id="contract" status="review" version="v1" wp="WP-0285" updated_at="2026-07-29">
 
 # WP-0285 — NAS deleted-space reclamation incident and evidence handoff
 
 - Owner: Codex
-- Status: BLOCKED — OPERATOR REVIEW
+- Status: REVIEW
 - Created: 2026-07-29
 - Dependencies: `WP-0277`
 - Task-board row: `WP-0285`
@@ -1332,5 +1332,13 @@ transition.
   change, or file deletion occurred. The exact-byte UNC probe timed out, so the approximately
   `10.37 TB` displayed gain is explicitly rounded. DSM authentication expired before the named
   `Recovery`/`Projects`/`Video` File Station spot check, which remains not post-verified.
+
+</topic>
+
+<topic id="status-reconciliation-2026-09-30" status="review" wp="WP-0285" updated_at="2026-09-30">
+
+## Status reconciliation — 2026-09-30
+
+Packet explicitly records immediate NAS capacity blocker resolved. Remaining is operator review of the incident handoff. Residual Drive allocation attribution is optional under the original authorization boundary; no deletion, reinstall, restart or NAS action is required or authorized by this reconciliation. Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
 
 </topic>

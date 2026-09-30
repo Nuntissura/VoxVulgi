@@ -28,6 +28,14 @@ const ROOT_REBIND_METADATA_IO_TIMEOUT: Duration = Duration::from_secs(3);
 const ROOT_REBIND_IDENTITY_IO_TIMEOUT: Duration = Duration::from_secs(10);
 const ROOT_REBIND_IO_POLL: Duration = Duration::from_millis(50);
 const ALIAS_TARGET_PROBE_TIMEOUT: Duration = Duration::from_millis(300);
+/// WP-0325: new writes probe their destination with the same 3 s bound as
+/// `paths::download_root_reachable`; live NAS probes routinely take 0.5–3.5 s, so the 300 ms
+/// read-path bound failed healthy single downloads permanently.
+const ALIAS_WRITE_TARGET_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// WP-0325: stable marker for a destination that did not answer in time. Transient: the job
+/// runner requeues on it (`jobs::is_destination_unreachable_error`). Must not contain
+/// "timeout"/"timed out" so the UI does not classify it as YouTube not responding.
+pub(crate) const DESTINATION_NOT_RESPONDING: &str = "download folder is not responding";
 pub(crate) const ALIAS_TARGET_CACHE_TTL: Duration = Duration::from_secs(1);
 static ALIAS_TARGET_AVAILABILITY: OnceLock<Mutex<HashMap<String, (Instant, bool)>>> =
     OnceLock::new();
@@ -831,18 +839,12 @@ pub fn resolve_active_alias_path(
         })
         .ok_or_else(|| invalid("resolved root alias no longer has a unique active owner"))?;
     let target_root = PathBuf::from(&matched_alias.to_root);
-    let target_available = alias_target_available(&target_root, require_available);
     if require_available {
-        if !target_available
-            || !crate::paths::path_is_dir_bounded(&mapped, ALIAS_TARGET_PROBE_TIMEOUT)
-        {
-            return Err(invalid(format!(
-                "verified root alias target is currently unavailable: {}",
-                mapped.to_string_lossy()
-            )));
-        }
-        return Ok(mapped);
+        return classify_write_target(mapped, &target_root, |path| {
+            crate::paths::probe_path_bounded(path, ALIAS_WRITE_TARGET_PROBE_TIMEOUT)
+        });
     }
+    let target_available = alias_target_available(&target_root, false);
     // A rebind alias is a reversible physical-location projection, not a destructive rewrite of
     // historical identity. If the direct/NAS target is disconnected, reads must fall back to the
     // stored old-root path so restoring that root immediately restores open/reveal/availability
@@ -851,6 +853,38 @@ pub fn resolve_active_alias_path(
         return Ok(input.to_path_buf());
     }
     Ok(mapped)
+}
+
+/// WP-0325: fail-closed destination check for new writes. A folder that did not answer (or a
+/// "missing" folder whose alias root is itself unreachable, e.g. a disconnected mapped drive)
+/// is transient storage unavailability; a missing folder under a reachable root stays a
+/// permanent error. Never falls back to the historical root.
+fn classify_write_target(
+    mapped: PathBuf,
+    target_root: &Path,
+    probe: impl Fn(&Path) -> crate::paths::BoundedPathKind,
+) -> Result<PathBuf> {
+    use crate::paths::BoundedPathKind;
+    let not_responding = |path: &Path| {
+        invalid(format!(
+            "{DESTINATION_NOT_RESPONDING}: {} (the NAS or drive did not answer within {} s)",
+            path.to_string_lossy(),
+            ALIAS_WRITE_TARGET_PROBE_TIMEOUT.as_secs()
+        ))
+    };
+    match probe(&mapped) {
+        BoundedPathKind::Directory => Ok(mapped),
+        BoundedPathKind::Unreachable => Err(not_responding(&mapped)),
+        BoundedPathKind::Missing | BoundedPathKind::File => {
+            if mapped != target_root && probe(target_root) != BoundedPathKind::Directory {
+                return Err(not_responding(&mapped));
+            }
+            Err(invalid(format!(
+                "verified root alias target is currently unavailable: {}",
+                mapped.to_string_lossy()
+            )))
+        }
+    }
 }
 
 fn table_exists(conn: &Connection, table: &str) -> Result<bool> {
@@ -2464,6 +2498,64 @@ mod tests {
         assert!(
             resolve_active_alias_path(&paths, &old_root.join("new-output"), true).is_err(),
             "new writes must never fall back to the historical root"
+        );
+    }
+
+    #[test]
+    fn write_target_classification_separates_slow_storage_from_missing_folder() {
+        use crate::paths::BoundedPathKind;
+        let root = PathBuf::from(r"Z:\Video");
+        let mapped = root.join("4K Video");
+        let probe_with = |mapped_kind: BoundedPathKind, root_kind: BoundedPathKind| {
+            let mapped = mapped.clone();
+            let root = root.clone();
+            move |path: &Path| {
+                if path == mapped {
+                    mapped_kind
+                } else {
+                    assert_eq!(path, root, "only the destination and alias root are probed");
+                    root_kind
+                }
+            }
+        };
+
+        assert_eq!(
+            classify_write_target(
+                mapped.clone(),
+                &root,
+                probe_with(BoundedPathKind::Directory, BoundedPathKind::Unreachable)
+            )
+            .unwrap(),
+            mapped
+        );
+        let slow = classify_write_target(
+            mapped.clone(),
+            &root,
+            probe_with(BoundedPathKind::Unreachable, BoundedPathKind::Directory),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(slow.contains(DESTINATION_NOT_RESPONDING), "{slow}");
+        assert!(!slow.contains("timeout") && !slow.contains("timed out"), "{slow}");
+        let offline_drive = classify_write_target(
+            mapped.clone(),
+            &root,
+            probe_with(BoundedPathKind::Missing, BoundedPathKind::Missing),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(offline_drive.contains(DESTINATION_NOT_RESPONDING), "{offline_drive}");
+        let missing = classify_write_target(
+            mapped.clone(),
+            &root,
+            probe_with(BoundedPathKind::Missing, BoundedPathKind::Directory),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            missing.contains("verified root alias target is currently unavailable")
+                && !missing.contains(DESTINATION_NOT_RESPONDING),
+            "{missing}"
         );
     }
 

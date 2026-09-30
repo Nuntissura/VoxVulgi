@@ -95,3 +95,7 @@ and the plumbing is built. **Save-cast / apply-cast is in scope for this packet.
 - 2026-08-05: **Corrected after review.** Removed the false "text-entry only" premise; added the
   original-audio playback prerequisite (G2); un-deferred cast reuse (G7); added the re-diarize
   lost-work question (G13) and version history (G14); marked the Miyeon id as runtime-only state.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: BACKLOG. Packet records a reviewed implementation plan with no execution or closure evidence. Remaining: Original-audio timeline/playback, boundary/overlap/reference-budget editing, cast reuse, safe re-diarize/version recovery and packaged proof. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

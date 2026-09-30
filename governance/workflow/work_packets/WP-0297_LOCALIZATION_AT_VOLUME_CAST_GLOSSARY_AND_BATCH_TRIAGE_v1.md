@@ -66,3 +66,7 @@ one toolbar; a table, not per-item cards.
 ## Status updates
 - 2026-08-05: Created from review gaps G8-G11 (high-volume lens) — none of WP-0290..0294 carried
   anything across items.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: BACKLOG. Packet records a reviewed implementation plan with no execution or closure evidence. Remaining: Cross-item cast, channel/series glossary, automatic batch mix/timing presets, discoverable batch entry and triage/proof. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

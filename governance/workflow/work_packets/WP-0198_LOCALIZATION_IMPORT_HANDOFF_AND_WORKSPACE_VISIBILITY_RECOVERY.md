@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0198
 - Owner: Codex
-- Status: REVIEW
+- Status: NEEDS_VALIDATION
 - Created: 2026-04-24
 - Target milestone: Localization operator usability
 
@@ -47,3 +47,7 @@ Out of scope:
 
 - 2026-04-24: Created after operator smoke showed a completed Localization import that remained absent from `Continue current item` and `Localization Library`, while the job log recorded `added_to_localization_workspace=false`.
 - 2026-04-24: First implementation slice landed: Localization home now uses the Tauri command's camelCase invoke args, imports explicitly request workspace intake, and Localization-owned imports suppress automatic batch-on-import follow-on jobs so the workspace handoff can complete visibly before processing starts. Verification: `npm run build`, `cargo check`.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: NEEDS_VALIDATION. 2026-04-24 records the import handshake/workspace fix and compile checks; no own proof bundle was found. Remaining: Exact Localization import workspace/current-item/recent-item visibility plus pending/success/failure/canceled-duplicate handoff proof. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

@@ -4,7 +4,7 @@
 
 - ID: WP-0277
 - Owner: Codex
-- Status: REVIEW
+- Status: NEEDS_VALIDATION
 - Created: 2026-07-26
 - Refinement: `WP-0277_RECOVERABLE_NAS_DUPLICATE_CLEANUP_v1_REFINEMENT.md`
 - Dependencies: `WP-0275`, `WP-0276`
@@ -47,3 +47,7 @@ media during automated work.
 - 2026-07-26: Implemented schema v28 cleanup runs/files/groups/actions/cache, bounded resumable inventory, staged size/window/full SHA-256 comparison, exact-only review groups, explicit keeper approval, quarantine apply, identity relink, and rollback.
 - 2026-07-26: Disposable fixture proof confirms inventory does not mutate media, quarantine cannot overlap an inventory root, exact apply removes no metadata, and rollback restores byte-identical files; frontend production build and Tauri compile pass. Advanced to REVIEW pending packaged-app proof.
 - 2026-07-26: Final v0.1.113 build and focused final-state engine tests pass; the collapsed cleanup disclosure is visually clean and discoverable. Status remains REVIEW because the complete packaged UI approval, quarantine, and rollback flow has not been exercised against a disposable fixture. No operator NAS files were scanned, moved, or deleted. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0277/summary.md`.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: NEEDS_VALIDATION. Opened WP-0277/summary.md: fixture/engine/build/collapsed visual proof passes; complete packaged workflow explicitly remains pending. Remaining: Disposable packaged inventory/group review/keeper approval/quarantine/rollback proof. No operator media mutation is authorized. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

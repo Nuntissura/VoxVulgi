@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0148
 - Owner: Codex
-- Status: BLOCKED
+- Status: NEEDS_VALIDATION
 - Created: 2026-03-12
 - Target milestone: Post-0.1.6 smoke regression recovery
 
@@ -50,3 +50,9 @@ Out of scope:
 - 2026-03-13: Removed the floating-shell width cap and center alignment so the visible chassis now fills the native window surface in restored/maximized/fullscreen states instead of leaving transparent side margins inside the native bounds. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0148/20260313_000157/`.
 - 2026-03-13: Added explicit full-surface sizing (`100vw`/`100vh` shell host in maximized/fullscreen mode plus non-shrinking top-right chrome) so the visible shell and chrome cluster stay locked to the native window surface during maximize/restore transitions. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0148/20260313_020200/`.
 - 2026-03-22: Added viewport-based full-window inference so the shell still switches into the edge-aligned full-surface layout when the native maximize/fullscreen state arrives late or reports inconsistently, and hardened the shell host to occupy the entire webview surface (`100vw`/`100vh` with overflow clipped). This should eliminate the case where a larger transparent native window remains interactive outside the visible chassis while also keeping the chrome cluster compact in the top-right corner. Verification: `cargo check --offline --manifest-path product/desktop/src-tauri/Cargo.toml` and `npm run build`; side-by-side operator validation is still required.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: NEEDS_VALIDATION
+- Bounds/layout repairs are recorded and compiled. Remaining is installed maximize/restore/fullscreen, side-by-side invisible click-block area and controls proof. No runtime success inferred from age.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

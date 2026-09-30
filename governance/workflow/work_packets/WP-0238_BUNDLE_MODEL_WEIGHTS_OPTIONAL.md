@@ -76,3 +76,7 @@ Out of scope:
 ## Notes
 
 - 2026-05-18: WP created as Tier-3 hardening. Depends conceptually on WP-0237 for the bundling mechanism. License audit is the gating risk.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: BACKLOG. Unstarted original plan preserved. Optional installer variants/build-time model bundling are historical plans under the current one-ISO package-only authority. Remaining: Reconcile with WP-0316 qualified existing runtime: preserve model provenance/hash coverage, offline first dub and recorded license/variant decisions; exact release-ISO proof remains open. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

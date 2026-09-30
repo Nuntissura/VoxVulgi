@@ -51,3 +51,9 @@ Out of scope:
 - 2026-03-24: Created from the finding that reusable-voice power features now outnumber the basic educational-core path they are supposed to support.
 - 2026-03-24: Implementation started. First slice is a top-level Localization Studio basics lane built on current speaker refs plus voice memory so operators can capture, save, apply, and continue the dub without detouring through templates, cast packs, characters, or benchmark promotion first.
 - 2026-03-24: First basics-lane slice landed in the Localization window. Operators now get a dedicated `Reusable Voice Basics` card with current speaker status, next-step guidance, save/apply memory actions, a direct handoff to continue the localization run, and a visible link back to the full voice-plan power surfaces.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: IN_PROGRESS
+- First capture/save/apply basics-lane slice exists. Full cross-item capture -> save -> apply -> dub, reusable asset behavior, discoverability and advanced-control handoff remain; no complete implementation/proof record supports closure.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

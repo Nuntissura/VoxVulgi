@@ -12392,17 +12392,27 @@ fn claim_and_spawn_for_track(
                     job_type.as_str(),
                     "youtube_subscription_refresh_v1" | "download_direct_url"
                 );
-                if app_busy_eligible && is_app_busy_error(&err_text) {
+                // WP-0325: a NAS/drive destination that did not answer in time is transient
+                // too; it reuses the same bounded requeue instead of failing the download.
+                let destination_unreachable = job_type == "download_direct_url"
+                    && is_destination_unreachable_error(&err_text);
+                if app_busy_eligible && (is_app_busy_error(&err_text) || destination_unreachable)
+                {
                     match requeue_job_for_app_busy_or_exhausted(&paths_worker, &job_id) {
                         Ok(true) => {
                             // Requeued for a later attempt; the job row is already back to
                             // `queued`, so no failure bookkeeping runs here.
                         }
                         Ok(false) => {
+                            let prefix = if destination_unreachable {
+                                "download folder unreachable"
+                            } else {
+                                "app busy"
+                            };
                             let _ = set_failed(
                                 &paths_worker,
                                 &job_id,
-                                &format!("app busy: {err_text}"),
+                                &format!("{prefix}: {err_text}"),
                             );
                         }
                         Err(_) => {
@@ -21005,6 +21015,13 @@ pub(crate) fn is_app_busy_error(message: &str) -> bool {
     message.contains("writer_admission_timeout")
         || message.contains("read_admission_timeout")
         || message.contains("database is locked")
+}
+
+/// WP-0325: true when a download's destination folder did not answer within the bounded write
+/// probe (`root_rebind::DESTINATION_NOT_RESPONDING`); transient storage unavailability, not a
+/// real job failure.
+pub(crate) fn is_destination_unreachable_error(message: &str) -> bool {
+    message.contains(root_rebind::DESTINATION_NOT_RESPONDING)
 }
 
 /// WP-0322 B1: bounded number of silent app-busy requeues before the job is recorded as a real
@@ -42767,6 +42784,20 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
             "HTTP Error 429: Too Many Requests"
         ));
         assert!(!is_app_busy_error("playlist does not exist"));
+    }
+
+    #[test]
+    fn destination_unreachable_classifier_matches_only_the_slow_storage_error() {
+        let slow = format!(
+            "model/tool install failed: {}: Z:\\Video (the NAS or drive did not answer within 3 s)",
+            root_rebind::DESTINATION_NOT_RESPONDING
+        );
+        assert!(is_destination_unreachable_error(&slow));
+        assert!(!is_app_busy_error(&slow));
+        assert!(!is_destination_unreachable_error(
+            "model/tool install failed: verified root alias target is currently unavailable: Z:\\Video"
+        ));
+        assert!(!is_destination_unreachable_error("download folder not found: Z:\\Video"));
     }
 
     fn seed_app_busy_job_row(paths: &AppPaths, id: &str) {

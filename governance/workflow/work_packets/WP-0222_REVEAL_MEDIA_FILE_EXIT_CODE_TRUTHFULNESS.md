@@ -2,7 +2,7 @@
 
 ## Status
 
-BLOCKED
+NEEDS_VALIDATION
 
 ## Base Scope
 
@@ -66,3 +66,9 @@ BLOCKED
 
 - 2026-05-17: Created packet from operator report. Implemented in the same slice as WP-0221 freeze diagnostic and WP-0220 single-video subfolder follow-up. Ships in desktop v0.1.19.
 - 2026-08-15: Added a pure regression seam and Rust test proving exit 1 is accepted only for file-selection reveals; folder reveals, other codes, and missing codes remain failures. Added frontend contracts proving the genuine-failure path still copies the media path before showing the error. Rust test passed 1/1 and frontend contract passed 2/2. The packet is `BLOCKED` only on its explicit installed-app manual smoke because triggering Explorer would open a foreground window during agent testing. Partial proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0222/20260815_0530_v0_1_160/summary.md`.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: NEEDS_VALIDATION
+- Exit-one file-selection handling and clipboard recovery are regression-covered. Remaining is installed file/folder reveal smoke; no intermediate-console fix is claimed (the new popup report is separate).
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

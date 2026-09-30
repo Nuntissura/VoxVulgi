@@ -1,10 +1,10 @@
 ---
 file_id: WP-0298-v1
 file_kind: work-packet
-updated_at: 2026-08-23
+updated_at: 2026-09-30
 ---
 
-<topic id="contract" status="in-progress" version="v1" wp="WP-0298" updated_at="2026-08-23">
+<topic id="contract" status="blocked" version="v1" wp="WP-0298" updated_at="2026-08-23">
 
 # Work Packet: WP-0298 — Causal freeze performance boundary and diagnostic capture
 
@@ -12,7 +12,7 @@ updated_at: 2026-08-23
 
 - ID: WP-0298
 - Owner: agent-wp0298
-- Status: IN_PROGRESS
+- Status: BLOCKED
 - Created: 2026-08-09
 - Refinement: `WP-0298_CAUSAL_FREEZE_PERFORMANCE_BOUNDARY_AND_DIAGNOSTIC_CAPTURE_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md`
@@ -113,5 +113,13 @@ Make job startup and panel navigation responsive on the exact large local databa
 ### Verdict
 
 Code-level adversarial verdict: PASS after the operation-identity remediation. Overall WP verdict: NOT DONE until the residual runtime/build gates pass.
+
+</topic>
+
+<topic id="status-reconciliation-2026-09-30" status="blocked" wp="WP-0298" updated_at="2026-09-30">
+
+## Status reconciliation — 2026-09-30
+
+Diagnostic implementation exists; remaining causal integration requires WP-0311/0312/0313 proof and WP-0314 liveness attribution plus valid exact current-profile observation/isolated job-start/latency evidence. Historical invalid canonical-data agent run is not closure proof. Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
 
 </topic>

@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0146
 - Owner: Codex
-- Status: BLOCKED
+- Status: NEEDS_VALIDATION
 - Created: 2026-03-12
 - Target milestone: Post-0.1.6 smoke regression recovery
 
@@ -46,3 +46,9 @@ Out of scope:
 - 2026-03-12: Hardened the move handle hit path by keeping drag-region markers on the handle children, using direct pointer-down drag start on the explicit handle, and pinning the chrome cluster into the top-right grid area even on narrower layouts. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0146/20260312_044237/`.
 - 2026-03-12: Replaced the earlier button/drag-region hybrid with a dedicated chrome handle that starts window drag through the Tauri window API on `mousedown`, keeps maximize-on-double-click, and marks the control cluster as non-drag chrome. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0146/20260312_053054/`.
 - 2026-03-22: Tightened the top-right chrome contract again after fresh operator regression feedback: the move handle is now a compact grip anchored beside the window controls, uses pointer-down drag start, keeps maximize-on-double-click, and no longer consumes enough width to drift the control cluster across narrow restored windows. Added explicit edge/corner resize hit zones and a Rust-side resize-drag fallback so move/resize no longer depend on a single frontend window API path. Verification: `cargo check --offline --manifest-path product/desktop/src-tauri/Cargo.toml` and `npm run build`; live desktop smoke still pending.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: NEEDS_VALIDATION
+- Move/resize repairs are recorded and compiled. Remaining is installed native drag, double-click maximize, selection, scroll, edge/corner resize and top-right controls proof; not an unimplemented shell fix.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

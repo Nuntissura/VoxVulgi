@@ -38,6 +38,17 @@ const FIXTURES: Array<{ message: string; kind: FailureKind }> = [
   { message: "This video is members-only", kind: "members_only" },
   { message: "job stalled: no progress for 600s, watchdog backstop firing", kind: "stalled" },
   { message: "no space left on device", kind: "storage" },
+  // WP-0325: slow/offline NAS destination and missing alias destination (live 0.1.205 text).
+  {
+    message:
+      "download folder unreachable: model/tool install failed: download folder is not responding: Z:\\Video\\4K Video\\4K Video 21-08-2025 (the NAS or drive did not answer within 3 s)",
+    kind: "storage",
+  },
+  {
+    message:
+      "model/tool install failed: verified root alias target is currently unavailable: Z:\\Video\\4K Video\\4K Video 21-08-2025",
+    kind: "storage",
+  },
   { message: "some completely novel wording never seen before", kind: "unknown" },
 ];
 

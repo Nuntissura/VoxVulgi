@@ -2,7 +2,7 @@
 
 ## Status
 
-IN_PROGRESS
+NEEDS_VALIDATION
 
 ## Owner
 
@@ -86,3 +86,9 @@ Out of scope (tracked in WP-0252):
 - 2026-06-15: Diagnosis + durable fix implemented in `product/engine/src/tools.rs`; engine `cargo check` green; unit test `kokoro_app_cache_ready_requires_snapshot_files_not_just_marker` passes. Live app cache populated with Kokoro-82M so the operator's running build can complete a dub on retry.
 - Hardening follow-ups identified by the investigation (carried into WP-0252): offline-resolve verification at warmup time and at `payload.zip` hydration (`desktop/src-tauri/src/lib.rs` `extract_payload_zip_best_effort`); pin + sha-verify the Kokoro snapshot like OpenVoice in `pinned_dependency_manifest` + `offline_bundle_prep`; capture stdout (not only stderr) in `run_python_checked` for warmup diagnostics.
 - WP remains IN_PROGRESS pending: (1) full-job runtime proof (operator retry or smoke), (2) desktop rebuild that ships this fix together with WP-0252.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: NEEDS_VALIDATION
+- Kokoro offline-readiness fix was included in 0.1.81 per WP-0262; earlier waiting-for-rebuild note is historical. Remaining is full managed dub-job offline/cache/error proof, not only a standalone segment/import.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

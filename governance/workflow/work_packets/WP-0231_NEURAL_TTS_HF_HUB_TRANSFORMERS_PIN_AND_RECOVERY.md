@@ -2,7 +2,7 @@
 
 ## Status
 
-BLOCKED
+NEEDS_VALIDATION
 
 ## Owner
 
@@ -94,3 +94,9 @@ Out of scope:
 
 - 2026-05-18: WP created in response to operator-pasted Diagnostics error. Research basis above includes PyPI/repo evidence for the chosen pins.
 - 2026-05-18: Implementation landed (manifest pins + `--upgrade` + one-shot `--force-reinstall --no-deps` recovery). Engine + tauri `cargo test` green (163 + 8 passing). Proof bundle: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0231/20260518_191401/summary.md`. WP remains `IN_PROGRESS` pending operator-relayed verification on a real venv per PROOF_STANDARD §3.4.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: NEEDS_VALIDATION
+- Dependency/recovery implementation and later all-pack warmups exist; old exact May pins are historical and WP-0262 records the later compatible environment. Remaining is current managed-environment import/warmup and recovery evidence under the rebased WP-0239; do not reinstall obsolete pins.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

@@ -46,3 +46,7 @@ Out of scope:
 ## Status updates
 
 - 2026-03-24: Created to keep the reusable-voice basics remediation from turning into another surface-only fix while internal asset contracts continue to drift.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: BACKLOG. No execution/closure update is recorded in the packet. Remaining: Tighten shared reusable-asset persistence/apply/seeding contract; focused regressions and independent drift review. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

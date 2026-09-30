@@ -1,7 +1,7 @@
 ---
 file_id: WP-0323
 file_kind: work_packet
-updated_at: 2026-09-24
+updated_at: 2026-09-30
 ---
 
 # Work Packet: WP-0323 — Readers intermittently fail with "database is locked"
@@ -10,7 +10,7 @@ updated_at: 2026-09-24
 
 - ID: WP-0323
 - Owner: — (next session)
-- Status: NEEDS_VALIDATION
+- Status: IN_PROGRESS
 - Created: 2026-09-24
 - Board: `../TASK_BOARD.md`
 - Related: WP-0312 (SQLite runtime boundary), WP-0322 (actionable errors; the export retry is a symptom workaround)
@@ -47,3 +47,9 @@ Operator direction 2026-09-24: VoxVulgi cargo builds slow down the higher-priori
 ## Status updates
 
 - 2026-09-24: Created at operator direction. H1 tested and not reproduced; no code change made. Operator will record findings from daily use for the next session.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: IN_PROGRESS
+- Unresolved database-reader investigation, not a completed fix awaiting validation. H1 not reproduced; no remedial code exists for the quoted read_admission_timeout. Next work is exact active-reader/admission reproduction and evidence-led remediation; preserve H2-H4.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

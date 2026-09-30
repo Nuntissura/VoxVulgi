@@ -85,3 +85,7 @@
 ## Status updates
 - 2026-08-05: WP created from operator request for single/multi-speaker tabs.
 - 2026-08-05: **Rewritten after review.** Tab proposal withdrawn — the premise ("no tab shell") was factually wrong; a stage rail already ships. Repointed at the real defect the review surfaced: `speakers` and `dub` are empty stages whose own hint text says a follow-up WP is expected. Absorbed review gaps G1, G3, G5, G6, G9, G22, G24.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: BACKLOG. Packet records a reviewed implementation plan with no execution or closure evidence. Remaining: Real Speakers/Dub stage mounts, controls relocation, reduced cards, encoding/help corrections, hardware tier and eight-stage packaged proof. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

@@ -2,7 +2,7 @@
 
 ## Status
 
-IN_PROGRESS
+BLOCKED
 
 ## Owner
 
@@ -99,3 +99,9 @@ Out of scope:
 - 2026-05-21: Runtime proof captured after patching `product/engine/examples/wp0150_localization_run_smoke.rs` to accept env-driven speaker-count requests, validate observed speaker counts, and wait for item-scoped auto-resume jobs across batches. `cargo check --example wp0150_localization_run_smoke` passed. Haerin single-speaker proof passed with exact `1` speaker (`S1`) and deliverables under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0235/runtime_haerin_retry_20260521_180314/`. Queen/Miyeon multi-speaker proof passed with range `2..4`, observed `S1`, `S2`, `S3`, and deliverables under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0235/runtime_queen_20260521_183952/`.
 - 2026-05-21: Runtime proof surfaced follow-up defects: phase2 reports negative `delta_bytes` for `tts_preview` and `tts_voice_preserving_local_v1`, repeated install/revalidation churns the venv after preflight installs, and long pip steps still provide sparse progress. These do not block the sample runtime proof, but they keep WP-0235 aligned with WP-0230/WP-0236 before a user-facing DONE claim.
 - 2026-08-15: Governed v0.1.162 clean-state proof passed through the hidden agent bridge using a new headless-only isolated base-dir override. The setup flow, manifest-derived estimate, audit-approved Later click, compact reminder, and same-root restart reset were proven with snapshots/dumps and zero missing accessible names. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0235/20260815_0620_v0_1_162/summary.md`. WP remains `IN_PROGRESS` until its named WP-0236 repair dependency and WP-0230 progress-feed dependency are closed; neither dependency is being represented as complete by this UI proof.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: BLOCKED
+- Clean-state setup UI and sample runtime proof passed. Remaining full first-run progress and per-pack repair depend on WP-0230 and unimplemented WP-0236; those dependencies, not the completed setup slice, prevent closure.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

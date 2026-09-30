@@ -110,3 +110,9 @@ Historical baseline this must beat (measured 2026-07-31 on the operator machine)
   - NOT yet done for MT-11: no desktop build produced, so the running installed app (0.1.133)
     still contains the old MP4 mux. Needs a build + version bump + changelog entry before the
     operator can see this in the app.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: BLOCKED
+- First installed offline dubbed deliverable waits on WP-0288 frozen selections and listening gate. Original deliverable scope preserved; WP-0306 governs MKV for new video outputs, historical MP4 input compatibility retained.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

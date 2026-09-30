@@ -19,6 +19,10 @@ pub const READ_ADMISSION_TIMEOUT: Duration = Duration::from_secs(4);
 pub const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 pub const OPERATION_RECEIPT_CAPACITY: usize = 512;
 pub const IDEMPOTENT_RETRY_LIMIT: u32 = 3;
+/// WP-0324: an operation that made SQLite read at least this many bytes from the database, WAL
+/// or journal files emits a `database_heavy_read` trace row naming its call site, so repeated
+/// large scans can be attributed to the code that runs them.
+pub const HEAVY_READ_TRACE_BYTES: u64 = 16 * 1024 * 1024;
 pub const WRITER_BATCH_MAX_OPERATIONS: usize = 1;
 pub const LONG_READER_WARNING_MS: u64 = 5_000;
 pub const WRITER_FAIRNESS_POLICY: &str = "strict_fifo_no_priority_bypass";
@@ -157,6 +161,9 @@ pub struct ActiveDatabaseOperation {
     pub transaction_behavior: Option<String>,
     pub phase_ms: BTreeMap<String, u64>,
     pub row_count: Option<u64>,
+    /// Bytes SQLite read from the database/WAL/journal files on the operation's thread while its
+    /// context was open (read-counting VFS); recorded when the context closes on that thread.
+    pub file_bytes_read: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -178,6 +185,7 @@ pub struct DatabaseOperationReceipt {
     pub transaction_behavior: Option<String>,
     pub phase_ms: BTreeMap<String, u64>,
     pub row_count: Option<u64>,
+    pub file_bytes_read: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -259,6 +267,8 @@ struct RegistryState {
 #[derive(Debug)]
 struct RuntimeInner {
     database_path: PathBuf,
+    /// Paths of the first opener; used only to address the diagnostics trace.
+    paths: AppPaths,
     admission: Mutex<AdmissionState>,
     admission_changed: Condvar,
     registry: Mutex<RegistryState>,
@@ -284,6 +294,7 @@ impl RuntimeInner {
             transaction_behavior: None,
             phase_ms: BTreeMap::new(),
             row_count: None,
+            file_bytes_read: None,
         };
         self.registry
             .lock()
@@ -355,6 +366,23 @@ impl RuntimeInner {
         let execution_ms = operation
             .admitted_at_ms
             .map(|_| elapsed_ms.saturating_sub(operation.queue_wait_ms.unwrap_or(0)));
+        let outcome: String = outcome.into();
+        let heavy_read = operation
+            .file_bytes_read
+            .filter(|bytes| *bytes >= HEAVY_READ_TRACE_BYTES)
+            .map(|bytes| {
+                serde_json::json!({
+                    "operation_id": operation_id,
+                    "operation": operation.operation,
+                    "lane": operation.lane,
+                    "mode": operation.mode,
+                    "priority": operation.priority,
+                    "file_bytes_read": bytes,
+                    "execution_ms": execution_ms,
+                    "row_count": operation.row_count,
+                    "outcome": outcome,
+                })
+            });
         registry.receipts.push_back(DatabaseOperationReceipt {
             operation_id,
             lane: operation.lane,
@@ -368,14 +396,36 @@ impl RuntimeInner {
             queue_wait_ms: operation.queue_wait_ms,
             execution_ms,
             retry_count,
-            outcome: outcome.into(),
+            outcome,
             batch_identity: operation.batch_identity,
             transaction_behavior: operation.transaction_behavior,
             phase_ms: operation.phase_ms,
             row_count: operation.row_count,
+            file_bytes_read: operation.file_bytes_read,
         });
         while registry.receipts.len() > OPERATION_RECEIPT_CAPACITY {
             registry.receipts.pop_front();
+        }
+        drop(registry);
+        if let Some(details) = heavy_read {
+            crate::diagnostics::emit_trace_event(
+                &self.paths,
+                "database_heavy_read",
+                "warn",
+                details,
+            );
+        }
+    }
+
+    fn record_file_bytes_read(&self, operation_id: u64, bytes: u64) {
+        if let Some(operation) = self
+            .registry
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active
+            .get_mut(&operation_id)
+        {
+            operation.file_bytes_read = Some(bytes);
         }
     }
 
@@ -685,6 +735,7 @@ pub struct DatabaseWriteContext {
     connection: Option<Connection>,
     permit: Option<WriterPermit>,
     initial_total_changes: u64,
+    read_meter: ReadMeter,
 }
 
 impl Deref for DatabaseWriteContext {
@@ -705,6 +756,310 @@ impl DerefMut for DatabaseWriteContext {
     }
 }
 
+// WP-0324 read-counting VFS. SQLite's page-cache counter (`SQLITE_DBSTATUS_CACHE_MISS`) misses
+// overflow pages of large TEXT/BLOB values, which the bundled build reads straight from the file
+// (`SQLITE_DIRECT_OVERFLOW_READ`). This shim counts every `xRead` instead. It copies the default
+// VFS, overrides only `xOpen`, and wraps each opened file so every I/O method forwards to the
+// real file (same pattern as SQLite's ext/misc/appendvfs.c and vfsstat.c). Bytes are added to a
+// per-thread counter; a runtime context records the delta on the thread that opened it.
+
+const READ_COUNTING_VFS_NAME: &str = "voxvulgi_read_counting";
+const READ_COUNTING_FILE_HEADER: usize = std::mem::size_of::<rusqlite::ffi::sqlite3_file>();
+const SQLITE_IOERR_SHORT_READ: std::os::raw::c_int = rusqlite::ffi::SQLITE_IOERR | (2 << 8);
+
+thread_local! {
+    static THREAD_SQLITE_BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+fn thread_sqlite_bytes_read() -> u64 {
+    THREAD_SQLITE_BYTES_READ.with(std::cell::Cell::get)
+}
+
+static READ_COUNTING_BASE_VFS: OnceLock<usize> = OnceLock::new();
+
+/// The real file lives directly after the wrapper's `sqlite3_file` header in the same
+/// allocation (`szOsFile` = header + base `szOsFile`).
+unsafe fn read_counting_real_file(
+    file: *mut rusqlite::ffi::sqlite3_file,
+) -> *mut rusqlite::ffi::sqlite3_file {
+    file.cast::<u8>().add(READ_COUNTING_FILE_HEADER).cast()
+}
+
+macro_rules! forward_io {
+    ($file:expr, $method:ident, $missing:expr $(, $arg:expr)*) => {{
+        let real = read_counting_real_file($file);
+        let methods = (*real).pMethods;
+        match if methods.is_null() { None } else { (*methods).$method } {
+            Some(function) => function(real $(, $arg)*),
+            None => $missing,
+        }
+    }};
+}
+
+unsafe extern "C" fn counting_close(file: *mut rusqlite::ffi::sqlite3_file) -> std::os::raw::c_int {
+    forward_io!(file, xClose, rusqlite::ffi::SQLITE_OK)
+}
+
+unsafe extern "C" fn counting_read(
+    file: *mut rusqlite::ffi::sqlite3_file,
+    buffer: *mut std::os::raw::c_void,
+    amount: std::os::raw::c_int,
+    offset: rusqlite::ffi::sqlite3_int64,
+) -> std::os::raw::c_int {
+    let rc = forward_io!(file, xRead, rusqlite::ffi::SQLITE_IOERR, buffer, amount, offset);
+    if rc == rusqlite::ffi::SQLITE_OK || rc == SQLITE_IOERR_SHORT_READ {
+        let amount = amount.max(0) as u64;
+        THREAD_SQLITE_BYTES_READ.with(|total| total.set(total.get().saturating_add(amount)));
+    }
+    rc
+}
+
+unsafe extern "C" fn counting_write(
+    file: *mut rusqlite::ffi::sqlite3_file,
+    buffer: *const std::os::raw::c_void,
+    amount: std::os::raw::c_int,
+    offset: rusqlite::ffi::sqlite3_int64,
+) -> std::os::raw::c_int {
+    forward_io!(file, xWrite, rusqlite::ffi::SQLITE_IOERR, buffer, amount, offset)
+}
+
+unsafe extern "C" fn counting_truncate(
+    file: *mut rusqlite::ffi::sqlite3_file,
+    size: rusqlite::ffi::sqlite3_int64,
+) -> std::os::raw::c_int {
+    forward_io!(file, xTruncate, rusqlite::ffi::SQLITE_IOERR, size)
+}
+
+unsafe extern "C" fn counting_sync(
+    file: *mut rusqlite::ffi::sqlite3_file,
+    flags: std::os::raw::c_int,
+) -> std::os::raw::c_int {
+    forward_io!(file, xSync, rusqlite::ffi::SQLITE_IOERR, flags)
+}
+
+unsafe extern "C" fn counting_file_size(
+    file: *mut rusqlite::ffi::sqlite3_file,
+    size: *mut rusqlite::ffi::sqlite3_int64,
+) -> std::os::raw::c_int {
+    forward_io!(file, xFileSize, rusqlite::ffi::SQLITE_IOERR, size)
+}
+
+unsafe extern "C" fn counting_lock(
+    file: *mut rusqlite::ffi::sqlite3_file,
+    level: std::os::raw::c_int,
+) -> std::os::raw::c_int {
+    forward_io!(file, xLock, rusqlite::ffi::SQLITE_IOERR, level)
+}
+
+unsafe extern "C" fn counting_unlock(
+    file: *mut rusqlite::ffi::sqlite3_file,
+    level: std::os::raw::c_int,
+) -> std::os::raw::c_int {
+    forward_io!(file, xUnlock, rusqlite::ffi::SQLITE_IOERR, level)
+}
+
+unsafe extern "C" fn counting_check_reserved_lock(
+    file: *mut rusqlite::ffi::sqlite3_file,
+    result: *mut std::os::raw::c_int,
+) -> std::os::raw::c_int {
+    forward_io!(file, xCheckReservedLock, rusqlite::ffi::SQLITE_IOERR, result)
+}
+
+unsafe extern "C" fn counting_file_control(
+    file: *mut rusqlite::ffi::sqlite3_file,
+    op: std::os::raw::c_int,
+    argument: *mut std::os::raw::c_void,
+) -> std::os::raw::c_int {
+    forward_io!(file, xFileControl, rusqlite::ffi::SQLITE_NOTFOUND, op, argument)
+}
+
+unsafe extern "C" fn counting_sector_size(
+    file: *mut rusqlite::ffi::sqlite3_file,
+) -> std::os::raw::c_int {
+    forward_io!(file, xSectorSize, 0)
+}
+
+unsafe extern "C" fn counting_device_characteristics(
+    file: *mut rusqlite::ffi::sqlite3_file,
+) -> std::os::raw::c_int {
+    forward_io!(file, xDeviceCharacteristics, 0)
+}
+
+unsafe extern "C" fn counting_shm_map(
+    file: *mut rusqlite::ffi::sqlite3_file,
+    region: std::os::raw::c_int,
+    region_size: std::os::raw::c_int,
+    extend: std::os::raw::c_int,
+    mapped: *mut *mut std::os::raw::c_void,
+) -> std::os::raw::c_int {
+    forward_io!(
+        file,
+        xShmMap,
+        rusqlite::ffi::SQLITE_IOERR,
+        region,
+        region_size,
+        extend,
+        mapped
+    )
+}
+
+unsafe extern "C" fn counting_shm_lock(
+    file: *mut rusqlite::ffi::sqlite3_file,
+    offset: std::os::raw::c_int,
+    count: std::os::raw::c_int,
+    flags: std::os::raw::c_int,
+) -> std::os::raw::c_int {
+    forward_io!(file, xShmLock, rusqlite::ffi::SQLITE_IOERR, offset, count, flags)
+}
+
+unsafe extern "C" fn counting_shm_barrier(file: *mut rusqlite::ffi::sqlite3_file) {
+    forward_io!(file, xShmBarrier, ())
+}
+
+unsafe extern "C" fn counting_shm_unmap(
+    file: *mut rusqlite::ffi::sqlite3_file,
+    delete: std::os::raw::c_int,
+) -> std::os::raw::c_int {
+    forward_io!(file, xShmUnmap, rusqlite::ffi::SQLITE_OK, delete)
+}
+
+unsafe extern "C" fn counting_fetch(
+    file: *mut rusqlite::ffi::sqlite3_file,
+    offset: rusqlite::ffi::sqlite3_int64,
+    amount: std::os::raw::c_int,
+    mapped: *mut *mut std::os::raw::c_void,
+) -> std::os::raw::c_int {
+    // Without a real xFetch, report "no mapping" so SQLite falls back to xRead.
+    forward_io!(
+        file,
+        xFetch,
+        {
+            *mapped = std::ptr::null_mut();
+            rusqlite::ffi::SQLITE_OK
+        },
+        offset,
+        amount,
+        mapped
+    )
+}
+
+unsafe extern "C" fn counting_unfetch(
+    file: *mut rusqlite::ffi::sqlite3_file,
+    offset: rusqlite::ffi::sqlite3_int64,
+    mapped: *mut std::os::raw::c_void,
+) -> std::os::raw::c_int {
+    forward_io!(file, xUnfetch, rusqlite::ffi::SQLITE_OK, offset, mapped)
+}
+
+static READ_COUNTING_IO_METHODS: rusqlite::ffi::sqlite3_io_methods =
+    rusqlite::ffi::sqlite3_io_methods {
+        iVersion: 3,
+        xClose: Some(counting_close),
+        xRead: Some(counting_read),
+        xWrite: Some(counting_write),
+        xTruncate: Some(counting_truncate),
+        xSync: Some(counting_sync),
+        xFileSize: Some(counting_file_size),
+        xLock: Some(counting_lock),
+        xUnlock: Some(counting_unlock),
+        xCheckReservedLock: Some(counting_check_reserved_lock),
+        xFileControl: Some(counting_file_control),
+        xSectorSize: Some(counting_sector_size),
+        xDeviceCharacteristics: Some(counting_device_characteristics),
+        xShmMap: Some(counting_shm_map),
+        xShmLock: Some(counting_shm_lock),
+        xShmBarrier: Some(counting_shm_barrier),
+        xShmUnmap: Some(counting_shm_unmap),
+        xFetch: Some(counting_fetch),
+        xUnfetch: Some(counting_unfetch),
+    };
+
+unsafe extern "C" fn counting_open(
+    _vfs: *mut rusqlite::ffi::sqlite3_vfs,
+    name: rusqlite::ffi::sqlite3_filename,
+    file: *mut rusqlite::ffi::sqlite3_file,
+    flags: std::os::raw::c_int,
+    out_flags: *mut std::os::raw::c_int,
+) -> std::os::raw::c_int {
+    let Some(base) = READ_COUNTING_BASE_VFS
+        .get()
+        .map(|pointer| *pointer as *mut rusqlite::ffi::sqlite3_vfs)
+    else {
+        return rusqlite::ffi::SQLITE_ERROR;
+    };
+    let real = read_counting_real_file(file);
+    let rc = match (*base).xOpen {
+        Some(open) => open(base, name, real, flags, out_flags),
+        None => rusqlite::ffi::SQLITE_ERROR,
+    };
+    // SQLite calls xClose whenever pMethods is non-null after xOpen, even on failure, so the
+    // wrapper mirrors whether the real file needs closing.
+    (*file).pMethods = if (*real).pMethods.is_null() {
+        std::ptr::null()
+    } else {
+        &READ_COUNTING_IO_METHODS
+    };
+    rc
+}
+
+/// Registers the read-counting VFS once (not as the process default). `None` means
+/// registration failed and callers open with the default VFS, uncounted.
+fn read_counting_vfs_name() -> Option<&'static str> {
+    static REGISTERED: OnceLock<bool> = OnceLock::new();
+    let registered = *REGISTERED.get_or_init(|| {
+        // SAFETY: `sqlite3_vfs_find` auto-initializes SQLite and returns a VFS that lives for the
+        // process. The copied VFS keeps the base's pAppData/mxPathname for its forwarded methods,
+        // is leaked so it outlives every connection, and only its xOpen is replaced.
+        unsafe {
+            let base = rusqlite::ffi::sqlite3_vfs_find(std::ptr::null());
+            if base.is_null() || READ_COUNTING_BASE_VFS.set(base as usize).is_err() {
+                return false;
+            }
+            let mut vfs = *base;
+            vfs.szOsFile = READ_COUNTING_FILE_HEADER as std::os::raw::c_int + (*base).szOsFile;
+            vfs.pNext = std::ptr::null_mut();
+            vfs.zName = c"voxvulgi_read_counting".as_ptr();
+            vfs.xOpen = Some(counting_open);
+            let vfs = Box::into_raw(Box::new(vfs));
+            rusqlite::ffi::sqlite3_vfs_register(vfs, 0) == rusqlite::ffi::SQLITE_OK
+        }
+    });
+    registered.then_some(READ_COUNTING_VFS_NAME)
+}
+
+/// Opens an application-database connection through the read-counting VFS when it is available.
+pub(super) fn open_counted_connection(
+    path: &Path,
+    flags: rusqlite::OpenFlags,
+) -> rusqlite::Result<Connection> {
+    match read_counting_vfs_name() {
+        Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs),
+        None => Connection::open_with_flags(path, flags),
+    }
+}
+
+/// Start point of an operation's file-read measurement; valid only on the opening thread.
+#[derive(Debug, Clone, Copy)]
+struct ReadMeter {
+    thread: ThreadId,
+    start: u64,
+}
+
+impl ReadMeter {
+    fn start() -> Self {
+        Self {
+            thread: std::thread::current().id(),
+            start: thread_sqlite_bytes_read(),
+        }
+    }
+
+    /// `None` when the context is dropped on a different thread than it was opened on.
+    fn bytes_read(&self) -> Option<u64> {
+        (std::thread::current().id() == self.thread)
+            .then(|| thread_sqlite_bytes_read().saturating_sub(self.start))
+    }
+}
+
 impl Drop for DatabaseWriteContext {
     fn drop(&mut self) {
         if let (Some(connection), Some(permit)) = (self.connection.as_ref(), self.permit.as_ref()) {
@@ -714,6 +1069,11 @@ impl Drop for DatabaseWriteContext {
             permit
                 .runtime
                 .operation_metadata(permit.operation_id, None, None, Some(row_count));
+            if let Some(bytes) = self.read_meter.bytes_read() {
+                permit
+                    .runtime
+                    .record_file_bytes_read(permit.operation_id, bytes);
+            }
         }
         self.connection.take();
         self.permit.take();
@@ -723,6 +1083,7 @@ impl Drop for DatabaseWriteContext {
 pub struct DatabaseReadContext {
     connection: Option<Connection>,
     permit: Option<ReaderPermit>,
+    read_meter: ReadMeter,
 }
 
 impl DatabaseReadContext {
@@ -753,6 +1114,15 @@ impl DerefMut for DatabaseReadContext {
 
 impl Drop for DatabaseReadContext {
     fn drop(&mut self) {
+        if let (Some(_), Some(permit), Some(bytes)) = (
+            self.connection.as_ref(),
+            self.permit.as_ref(),
+            self.read_meter.bytes_read(),
+        ) {
+            permit
+                .runtime
+                .record_file_bytes_read(permit.operation_id, bytes);
+        }
         self.connection.take();
         self.permit.take();
     }
@@ -779,6 +1149,7 @@ impl AppDatabase {
         }
         let runtime = Arc::new(RuntimeInner {
             database_path: key.clone(),
+            paths: paths.clone(),
             admission: Mutex::new(AdmissionState::default()),
             admission_changed: Condvar::new(),
             registry: Mutex::new(RegistryState::default()),
@@ -806,6 +1177,7 @@ impl AppDatabase {
             super::migrate(&fixture_connection)?;
         }
         let permit = self.inner.acquire_writer(&context)?;
+        let read_meter = ReadMeter::start();
         let open_started = Instant::now();
         match open_write_raw(&self.inner.database_path) {
             Ok(connection) => {
@@ -815,6 +1187,7 @@ impl AppDatabase {
                     connection: Some(connection),
                     permit: Some(permit),
                     initial_total_changes,
+                    read_meter,
                 })
             }
             Err(error) => {
@@ -831,6 +1204,7 @@ impl AppDatabase {
 
     pub fn read_context(&self, context: DatabaseOperationContext) -> Result<DatabaseReadContext> {
         let permit = self.inner.acquire_reader(&context)?;
+        let read_meter = ReadMeter::start();
         let open_started = Instant::now();
         match open_readonly_raw(&self.inner.database_path) {
             Ok(connection) => {
@@ -843,6 +1217,7 @@ impl AppDatabase {
                 Ok(DatabaseReadContext {
                     connection: Some(connection),
                     permit: Some(permit),
+                    read_meter,
                 })
             }
             Err(error) => {
@@ -1953,6 +2328,69 @@ mod tests {
         assert!(
             !serialized.contains("SELECT 1"),
             "raw SQL must not enter receipts"
+        );
+    }
+
+    #[test]
+    fn wp0324_receipts_attribute_file_bytes_read_to_the_operation() {
+        let _serial = serial_test_guard();
+        let (_directory, paths, database) = fixture();
+        let raw = open_write_raw(&paths.db_dir().join("app.sqlite")).expect("open raw");
+        raw.execute_batch(
+            "CREATE TABLE wp0324_big(b BLOB NOT NULL);
+             WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 24)
+             INSERT INTO wp0324_big(b) SELECT randomblob(1048576) FROM n;",
+        )
+        .expect("seed 24 MiB table");
+        drop(raw);
+
+        // hex() needs every overflow page, so the scan must read the whole table from the file.
+        let hex_chars: i64 = database
+            .read(
+                DatabaseOperationContext::new("test", "wp0324_heavy_scan"),
+                |connection| {
+                    Ok(connection.query_row(
+                        "SELECT sum(length(hex(b))) FROM wp0324_big",
+                        [],
+                        |row| row.get(0),
+                    )?)
+                },
+            )
+            .expect("heavy read");
+        assert_eq!(hex_chars, 24 * 1_048_576 * 2);
+        let small: i64 = database
+            .read(
+                DatabaseOperationContext::new("test", "wp0324_small_read"),
+                |connection| Ok(connection.query_row("SELECT 1", [], |row| row.get(0))?),
+            )
+            .expect("small read");
+        assert_eq!(small, 1);
+
+        let receipts = database.snapshot().recent_receipts;
+        let heavy = receipts
+            .iter()
+            .rev()
+            .find(|receipt| receipt.operation == "wp0324_heavy_scan")
+            .expect("heavy receipt");
+        assert!(
+            heavy
+                .file_bytes_read
+                .is_some_and(|bytes| bytes >= HEAVY_READ_TRACE_BYTES),
+            "heavy scan must record at least the trace threshold: {:?}",
+            heavy.file_bytes_read
+        );
+        let small = receipts
+            .iter()
+            .rev()
+            .find(|receipt| receipt.operation == "wp0324_small_read")
+            .expect("small receipt");
+        assert!(
+            small
+                .file_bytes_read
+                .unwrap_or(0)
+                < HEAVY_READ_TRACE_BYTES,
+            "a small read must stay below the trace threshold: {:?}",
+            small.file_bytes_read
         );
     }
 }

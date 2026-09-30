@@ -2,7 +2,7 @@
 
 ## Status
 
-BLOCKED
+IN_PROGRESS
 
 ## Owner
 
@@ -86,3 +86,9 @@ Out of scope:
 
 - 2026-05-18: WP created as Tier-1 hardening for the voice-pack install reliability work. Direct successor to WP-0231 (which only patched the symptom, not the resolver-drift root cause).
 - 2026-05-18: Implementation complete. 5 of 6 lockfiles generated + committed (Kokoro 92 pkgs, OpenVoice deps 53, diarization 37, demucs 19, tts_preview 4). Spleeter lockfile NOT generated — `spleeter==2.4.2` requires `tensorflow-io-gcs-filesystem==0.32.0` which is unavailable on Python 3.11, surfacing a pre-existing manifest defect (the Spleeter install currently only works via runtime compatibility paths from WP-0050/WP-0051). Spleeter falls through to the legacy pinned-list install path; follow-up WP needed to fix Spleeter pins. Engine `cargo test`: 167 passing (+4 over baseline). Tauri: 8 passing. Proof bundle: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0232/20260518_231207/summary.md`. WP stays IN_PROGRESS until operator-relayed verification confirms a real install via the lockfile path.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: IN_PROGRESS
+- Five hashed lockfiles implemented. Current lockfile inventory still lacks spleeter.lock.json; the original sixth-pack gap is real, not merely an old operator checklist. Remaining is coverage of all intended packs plus real lockfile consumption/hash-refusal proof. Later all-pack warmup success does not prove all-pack hashed installation.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

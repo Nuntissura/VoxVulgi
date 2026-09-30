@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0169
 - Owner: Codex
-- Status: REVIEW
+- Status: NEEDS_VALIDATION
 - Created: 2026-04-08
 - Target milestone: UX Polish
 
@@ -38,3 +38,7 @@ Out of scope:
 ## Test / verification plan
 - Visual snapshot of Options page showing consolidated layout.
 - Verify override changes persist after page switch.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: NEEDS_VALIDATION. WP-0301 explicitly preserves Options consolidation and has packaged proof, but no WP-0169 proof bundle or complete original-criterion mapping exists. Remaining: Reconcile original feature-root table, authentication guidance/selection, free-disk-space display and override persistence against current Options; record exact missing behavior or qualifying successor proof. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

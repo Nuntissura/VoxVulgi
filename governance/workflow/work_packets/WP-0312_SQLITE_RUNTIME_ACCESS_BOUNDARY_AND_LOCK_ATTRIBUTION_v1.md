@@ -1,10 +1,10 @@
 ---
 file_id: WP-0312-v1
 file_kind: work_packet
-updated_at: 2026-08-23
+updated_at: 2026-09-30
 ---
 
-<topic id="contract" status="in-progress" version="v1" wp="WP-0312" updated_at="2026-08-23">
+<topic id="contract" status="needs-validation" version="v1" wp="WP-0312" updated_at="2026-08-23">
 
 # Work Packet: WP-0312 — SQLite runtime access boundary and lock attribution
 
@@ -12,7 +12,7 @@ updated_at: 2026-08-23
 
 - ID: WP-0312
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: NEEDS_VALIDATION
 - Created: 2026-08-23
 - Refinement: `WP-0312_SQLITE_RUNTIME_ACCESS_BOUNDARY_AND_LOCK_ATTRIBUTION_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md`
@@ -75,5 +75,13 @@ Retain SQLite while replacing repeated, unowned runtime `open()+migrate()` acces
 - 2026-08-23: Implementation began. Added the bounded database runtime, serialized writer and reader admission, overload/cancellation/shutdown and contention receipts, startup-only migration guards, production-caller migration, checkpoint/long-reader evidence, and short CAS-guarded media-cleanup publication after external I/O. Engine, desktop-contract, frontend-build, Tauri-check, governed-build, and independent adversarial gates passed. Status remains IN_PROGRESS because the exact isolated-clone proof, observation-only current-profile cell, and disposable-VM normal-window proof are not yet available. WP-0315 therefore remains blocked by this hard predecessor.
 - 2026-08-24: The integrated runtime boundary shipped into governed v0.1.181 after the six-pack offline warmup gate, optimized desktop build, NSIS build, 287/287 desktop contracts, and disposable packaged headless startup passed. Status remains `IN_PROGRESS`; the isolated-clone, observation-only current-profile, and disposable-VM normal-window proof cells are still required, so WP-0315 remains blocked.
 - 2026-08-24: The same bounded runtime shipped in governed v0.1.182 after the six-pack warmup gate completed green in 4,731 seconds, optimized EXE/NSIS and single-ISO builds passed, 287/287 contracts passed, and the exact packaged EXE independently reported version 0.1.182 through its isolated headless bridge. Status remains `IN_PROGRESS`; the isolated-clone, observation-only current-profile, and disposable-VM normal-window proof cells remain open, so WP-0315 remains blocked.
+
+</topic>
+
+<topic id="status-reconciliation-2026-09-30" status="needs-validation" wp="WP-0312" updated_at="2026-09-30">
+
+## Status reconciliation — 2026-09-30
+
+Bounded DB runtime implemented and packaged. Remaining isolated-clone contention/backup/restore, observation-only current-profile and VM normal-window proof. WP-0315 is DONE with reject decision; its old blocked sentence is historical. Current read-admission complaint remains unresolved, not fixed by status change. Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
 
 </topic>

@@ -2,7 +2,7 @@
 
 ## Status
 
-BLOCKED
+NEEDS_VALIDATION
 
 ## Owner
 
@@ -85,3 +85,9 @@ Out of scope:
 
 - 2026-05-18: WP created alongside WP-0232/WP-0233 as the third Tier-1 reliability hardening. With all three landed, the install path is reproducible, gated in CI, and crash-safe.
 - 2026-05-18: Implementation landed in scope-decision Option-C form (install-state journaling + auto force-reinstall on detected bad state). True atomicity / per-pack venv split deferred to a future follow-up. New `pack_install_state` module (8 unit tests) journals per-pack `{lockfile_sha, started/finished_at_ms, last_outcome, last_error}` to `<APPDATA>/tools/python/install_state/<pack>.json`. `install_pack_from_lockfile` (WP-0232) now consults the journal and promotes `--upgrade` to `--force-reinstall` when the prior install ended in `in_progress` (crash) or `failed`. Engine cargo: 175 passing (+8 over baseline). Tauri: 8 passing. Proof bundle: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0234/20260518_232902/summary.md`. WP stays IN_PROGRESS pending operator verification.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: NEEDS_VALIDATION
+- Operator-selected Option-C journal/force-reinstall implementation is recorded. Full staging/per-pack venv remains deferred by the original scope decision. Remaining is real interrupted/failed install journal and recovery proof under WP-0239.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

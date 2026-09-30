@@ -1,7 +1,7 @@
 ---
 file_id: WP-0322
 file_kind: work_packet
-updated_at: 2026-09-23
+updated_at: 2026-09-30
 ---
 
 # Work Packet: WP-0322 — Actionable errors and automatic subscription export
@@ -10,7 +10,7 @@ updated_at: 2026-09-23
 
 - ID: WP-0322
 - Owner: Claude
-- Status: NEEDS_VALIDATION (installed 2026-09-24 01:49 build; operator validates through daily use — see status updates)
+- Status: NEEDS_VALIDATION
 - Created: 2026-09-23
 - Board: `../TASK_BOARD.md`
 
@@ -65,3 +65,9 @@ Every rendering shows `last failed <relative time>` and, when the app acts, `nex
 - 2026-09-23: Created from live evidence; engine (A-engine, B) and frontend (A-UI, C) dispatched in parallel.
 - 2026-09-24: Implemented and installed (builds `20260924-005013`, `-014551`). Verified live: status strip reads "Needs your action: 22 / App is retrying: 170" with per-class chips (snapshot `governance/snapshots/WP-0322/status_strip_*.png`); "Network problem / Check your connection" no longer rendered; schema v59. Tests: engine 17 + regression 155/155 + follow-up 19/19; frontend 382/385 (3 pre-existing). Follow-ups in the same packet: who-acts colouring (app-handled grey "App retrying", operator action red "Your action needed"); `jobs_track_runtime_get` took 26–78 s because every identity-cache miss launched `yt-dlp --version` twice (measured 14–16 s per launch) — verified engine identity is now cached by executable size+mtime, measured afterwards 18 ms–0.9 s; export retries on busy database (was failing "database is locked").
 - 2026-09-24: Status NEEDS_VALIDATION, reason: operator direction to stop cargo work on VoxVulgi (it slows the higher-priority Handshake build); not yet validated live — Export now after the retry fix, the explainer buttons on each error class, the daily automatic export (first run ≥1 h after start), and the MKV audio-language retag on a real download. The remaining intermittent "database is locked" on reads is tracked in WP-0323.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: NEEDS_VALIDATION
+- Installed errors/export changes await exact export-after-retry, daily export, one-click errors and audio-language checks. Historical cargo pause is not a newly verified blocker.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

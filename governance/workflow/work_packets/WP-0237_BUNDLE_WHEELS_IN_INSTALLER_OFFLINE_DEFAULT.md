@@ -86,3 +86,7 @@ Out of scope:
 ## Notes
 
 - 2026-05-18: WP created as Tier-3 hardening. The big-bet WP: removes the entire network-during-install failure surface. Depends on WP-0232 (lockfile) being in place.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: BACKLOG. Unstarted original plan preserved. Its build-time bundling/first-run pip recipe conflicts with the later package-only authority. Remaining: Reconcile with WP-0316 existing-runtime qualification/package-only ISO: retain complete wheel hashes/offline first-run proof and explicitly resolve original size/time goals before executing any old recipe. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

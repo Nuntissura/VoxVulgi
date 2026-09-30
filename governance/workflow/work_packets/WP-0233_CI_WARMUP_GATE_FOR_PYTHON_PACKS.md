@@ -2,7 +2,7 @@
 
 ## Status
 
-BLOCKED
+NEEDS_VALIDATION
 
 ## Owner
 
@@ -76,3 +76,9 @@ Out of scope:
 
 - 2026-05-18: WP created alongside WP-0232 as Tier-1 reliability hardening.
 - 2026-05-18: Implementation landed. New Rust binary `voxvulgi_pack_warmup_gate` runs `install_python_toolchain` + selected `install_*_pack` against a throwaway APPDATA root, writes JSON + markdown reports. Wrapper script `governance/scripts/pack_warmup_gate.ps1`. Hooked into `build_desktop_target.ps1` as a pre-build step with `-SkipWarmupGate` + mandatory `-SkipWarmupGateReason` escape hatch. `build_rules.md` documents the gate as a release blocker. Smoke verified end-to-end against `tts_preview` (toolchain 63s + pack 60s = 126s; exit 0; report artifacts at `product/desktop/build_target/tool_artifacts/pack_warmup_gate/20260518_234347/`). Cargo: engine 175, tauri 8, all green. Proof bundle: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0233/20260518_234740/summary.md`. WP stays IN_PROGRESS pending operator's first full-stack run.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: NEEDS_VALIDATION
+- Warmup gate implemented; later release records report all six packs passing, so expected Spleeter failure and first-full-stack prerequisite are historical. Remaining is current-input full gate reuse/reconciliation and controlled gate-enforcement proof. Core-only builds are outside the pack gate per build_rules.md.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

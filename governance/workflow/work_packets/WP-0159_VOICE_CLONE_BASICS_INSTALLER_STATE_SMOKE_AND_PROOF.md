@@ -47,3 +47,7 @@ Out of scope:
 ## Status updates
 
 - 2026-03-24: Created as the proof gate for reusable voice basics after inspection confirmed that local reusable-asset tests alone are not enough.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: BACKLOG. No installer-state multi-item reuse proof is recorded. Remaining: Capture a reusable voice, apply to a later translated item, produce dub and independently prove clone versus fallback. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

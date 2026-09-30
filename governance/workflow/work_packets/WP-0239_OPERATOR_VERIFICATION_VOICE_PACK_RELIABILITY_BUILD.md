@@ -2,7 +2,7 @@
 
 ## Status
 
-BLOCKED
+NEEDS_VALIDATION
 
 ## Owner
 
@@ -11,6 +11,19 @@ Operator (to perform tests); Claude (to fix anything that fails)
 ## Operator Request Preserved
 
 - "create installer and exe. the create a wp that has list of items the operator need to test." (2026-05-18)
+
+## Current validation target — 2026-09-30
+
+The following current checklist supersedes obsolete build/version/expected-failure instructions in the preserved historical checklist below. It retains the original A–E proof dimensions; no case was executed by this reconciliation.
+
+- [WP-0239-T0] Identify the exact current artifact, assigned version and managed runtime through the PID-validated bridge and current installer authority. The inspected installed artifact is 0.1.205, matching the 2026-09-29 core-only published build except its installer marker. Do not install 0.1.27, restore old dependency pins, bump a version, or use an old runtime path from the historical checklist.
+- [WP-0239-CURRENT-A] Reconcile current-input selected-pack and full-stack gate reports. Successful full-stack acceptance requires all intended packs to pass; the historical expected Spleeter failure/exit 1 is obsolete (later BUILD_CHANGELOG records all-six-pack PASS). A core-only app build does not ship or certify a dependency pack; a historical PASS is reusable only when its asserted inputs remain unchanged.
+- [WP-0239-A3] Prove gate enforcement with a controlled failing dependency input in an owned isolated fixture. Do not manufacture failure by restoring obsolete Spleeter dependencies or modifying the operator runtime. Preserve the original requirement that a failed applicable gate prevents publication; current build_rules.md determines where the gate applies.
+- [WP-0239-CURRENT-B] Prove current hashed lockfile consumption, actual Kokoro warmup and hash refusal. Five current lockfiles do not prove the missing Spleeter hashed-install contract complete. Hash-corruption proof uses an owned disposable copy; never corrupt the operator runtime or canonical lockfiles. The historical optional B3 designation remains optional unless the upstream packet independently requires that proof.
+- [WP-0239-CURRENT-C] Prove completed/failed/interrupted journal and repair recovery in an owned disposable install. Only terminate children started by the proving session; do not execute the historical Task Manager kill instruction against an existing app or unrelated process. Current process-stop authority applies if a different exact target is required.
+- [WP-0239-CURRENT-D] Prove queued, installing, interrupted and all-done progress/headline/elapsed-time states through the current product surface. Preserve the byte/speed/ETA extension explicitly carved into WP-0230b; no matching packet was found, so it remains carried work in WP-0230 and the reconciliation receipt rather than silently disappearing.
+- [WP-0239-E1] Prove one complete managed voice-preserving dub with output identity and truthful clone-versus-fallback labeling. Resolve paths from current runtime/artifact receipts. New managed video output must follow the MKV policy; historical MP4 remains a valid input.
+- [WP-0239-CLOSURE] Reconcile A–E observations to each upstream packet's own acceptance criteria and PROOF_STANDARD.md before changing any packet to DONE. All-pack warmup does not by itself prove recovery, UI progress, hashed coverage or complete dubbing.
 
 ## Intent
 
@@ -171,3 +184,9 @@ Out of scope:
 ## Notes
 
 - 2026-05-18: WP created alongside the v0.1.27 build that ships WP-0231/0232/0233/0234/0230. See BUILD_CHANGELOG.md for the corresponding build entry.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: NEEDS_VALIDATION
+- Historical 0.1.27 checklist rebased to current retained-version artifact and runtime authority; all A-E acceptance dimensions preserved. Expected Spleeter failure is obsolete; no test is recorded newly passed. Remaining cases must reconcile to current-input evidence before upstream DONE changes.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

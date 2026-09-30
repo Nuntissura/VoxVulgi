@@ -56,3 +56,9 @@ Out of scope:
 - 2026-03-08: Scope expanded by `WP-0124` so the manual smoke also covers the current benchmark, voice-plan, experimental-backend, compare-history, recipe, and benchmark-promotion surfaces added after the original remediation tranche.
 - 2026-03-12: Blocked by post-0.1.6 smoke regressions; `WP-0149` and `WP-0150` are now complete, but manual closeout should resume only after the remaining recovery packets (`WP-0142` to `WP-0148`, especially `WP-0143`) land.
 - 2026-03-12: The blocked shell-smoke dependency explicitly includes verifying the move affordance and minimize/maximize/close controls are restored to the intended top-right chrome cluster.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: BLOCKED
+- Historical smoke umbrella; original benchmark, voice-plan, compare, recipe, output and shell criteria remain. Completion depends on unresolved localization deliverable/proof in WP-0289 and native shell checks WP-0146/WP-0148; the March regression wording is historical, not a new implementation list.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

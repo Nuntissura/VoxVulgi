@@ -241,7 +241,9 @@ const RULES: Rule[] = [
   {
     // 10. storage — disk/permission.
     kind: "storage",
-    test: /no space left|disk full|access is denied|permission denied|read-only file system|cannot write|failed to create.*file/i,
+    // WP-0325: slow/offline NAS destination (after bounded automatic retries) and a
+    // missing verified alias destination are storage problems, not "Unrecognized error".
+    test: /no space left|disk full|access is denied|permission denied|read-only file system|cannot write|failed to create.*file|download folder is not responding|download folder unreachable|root alias target is currently unavailable/i,
     label: "Could not save the file",
     whatHappened: "VoxVulgi could not write to the destination folder.",
     whoActs: "you",

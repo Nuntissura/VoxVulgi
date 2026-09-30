@@ -279,7 +279,7 @@ fn open_write_raw(db_path: &Path) -> Result<Connection> {
     if let Some(db_dir) = db_path.parent() {
         std::fs::create_dir_all(db_dir)?;
     }
-    let conn = Connection::open_with_flags(
+    let conn = database_runtime::open_counted_connection(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_WRITE
             | OpenFlags::SQLITE_OPEN_CREATE
@@ -298,7 +298,7 @@ fn open_write_raw(db_path: &Path) -> Result<Connection> {
 }
 
 fn open_readonly_raw(db_path: &Path) -> Result<Connection> {
-    let conn = Connection::open_with_flags(
+    let conn = database_runtime::open_counted_connection(
         db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
     )?;

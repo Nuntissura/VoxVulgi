@@ -56,3 +56,9 @@ Out of scope: anything that deletes user library/subscriptions/playlists.
 ## Notes
 
 - 2026-06-17: Workflow analysis complete; #1/#2/#5-engine implemented in jobs.rs with 3 new unit tests (single-rejection-no-block, old-block-auto-clear, backoff-escalates). #3/#4/#6 + retry-guard are the next tranche. Build pending after tests green.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: IN_PROGRESS
+- Implemented corroboration/TTL/backoff and later pacing/circuit-breaker work exist. Preserve unmapped retry guard, auth scope, structured transient failures and update-all recovery scenarios; WP-0299/WP-0320 overlap does not prove every original requirement complete.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

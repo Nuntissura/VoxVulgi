@@ -1,10 +1,10 @@
 ---
 file_id: WP-0299-v1
 file_kind: work-packet
-updated_at: 2026-08-10
+updated_at: 2026-09-30
 ---
 
-<topic id="contract" status="active" version="v1" wp="WP-0299" owner="agent-wp0299" updated_at="2026-08-10">
+<topic id="contract" status="needs-validation" version="v1" wp="WP-0299" owner="agent-wp0299" updated_at="2026-08-10">
 
 # Work Packet: WP-0299 — Secure downloader runtime and adaptive YouTube protection
 
@@ -12,7 +12,7 @@ updated_at: 2026-08-10
 
 - ID: WP-0299
 - Owner: agent-wp0299
-- Status: IN_PROGRESS
+- Status: NEEDS_VALIDATION
 - Created: 2026-08-09
 - Refinement: `WP-0299_SECURE_DOWNLOADER_RUNTIME_AND_ADAPTIVE_YOUTUBE_PROTECTION_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md#wp-0299`
@@ -89,5 +89,13 @@ Gates still open, all requiring runtime or app-boundary evidence that this revie
 - Governed target build, semantic version increment, changelog entry, and proof `summary.md`.
 
 WP-0299 must not be moved to DONE on the strength of this review. Part 1 clears the code-level and hard-predecessor gates only.
+
+</topic>
+
+<topic id="status-reconciliation-2026-09-30" status="needs-validation" wp="WP-0299" updated_at="2026-09-30">
+
+## Status reconciliation — 2026-09-30
+
+Source/runtime trust and adaptive protection work recorded implemented and reviewed. Remaining offline packaged, exact authenticated canary, restart/replay/recovery and UI proof; foreign-compilation delay was historical. Current version/changelog retention rules override historical increment instructions. Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
 
 </topic>

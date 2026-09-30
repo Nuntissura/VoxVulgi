@@ -104,3 +104,7 @@ with their proof-bundle path, not as facts a reader can re-derive from source.
 - 2026-08-05: Review added the timing-fit plumbing prerequisite (which also blocks WP-0294), QC
   taxonomy reconciliation, `empty_text` generalisation, async re-render design, and flagged the
   grounding numbers as runtime-only.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: BACKLOG. Packet records a reviewed implementation plan with no execution or closure evidence. Remaining: Automatic timing-fit plumbing, per-segment original/dub comparison, bounded stretch/rerender, shipped QC taxonomy reconciliation and proof. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

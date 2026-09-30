@@ -1,10 +1,10 @@
 ---
 file_id: WP-0316-v1
 file_kind: work-packet
-updated_at: 2026-08-30
+updated_at: 2026-09-30
 ---
 
-<topic id="contract" status="in-progress" version="v1" wp="WP-0316" updated_at="2026-08-30">
+<topic id="contract" status="needs-validation" version="v1" wp="WP-0316" updated_at="2026-08-30">
 
 # Work Packet: WP-0316 — Managed offline runtime and package-only installer
 
@@ -12,7 +12,7 @@ updated_at: 2026-08-30
 
 - ID: WP-0316
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: NEEDS_VALIDATION
 - Created: 2026-08-30
 - Refinement: `WP-0316_MANAGED_OFFLINE_RUNTIME_AND_PACKAGE_ONLY_INSTALLER_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md#wp-0316`
@@ -69,5 +69,13 @@ Ship one offline ISO for non-technical users by packaging an explicit already-bu
 - 2026-08-30 / `WP-0316-A003` / `VERSION_GUARD_PASS`: removed automatic patch-version calculation/writes and automatic release-changelog publication from `build_desktop_target.ps1`. Actual builds now require an exact `-ExpectedVersion`, retain that already-assigned version, and hash-check all three product-version files plus `BUILD_CHANGELOG.md` after packaging. Proof: PowerShell parse passed; six focused managed-runtime/build contracts and all 329 repository contracts passed; a real invocation without `-ExpectedVersion` failed before build/archive/publish work; all four protected hashes remained unchanged throughout. No desktop build or version change was performed.
 - 2026-09-23 / `WP-0316-A005` / `OPERATOR_DECISION`: the operator reviewed the no-bump policy this packet authored (`AGENTS.md`/`CLAUDE.md` VV-CODEX-VERSION-001…003, `build_rules.md` VV-BUILD-VERSION-001…004, `-ExpectedVersion` guard in `build_desktop_target.ps1`) after noticing builds had stopped incrementing, and confirmed it as intended authority: versions change only by an explicit operator release action. These authority edits are still uncommitted as of this note.
 - 2026-08-30 / `WP-0316-A004` / `LEGACY_MACHINE_MIGRATION_PASS`: fixed the exact mixed-scope failure shown by the operator. Live state contained current-user v0.1.204 under LocalAppData plus stale machine-wide v0.1.179 under Program Files; the old Program Files executable was administrator-owned and not writable by the current-user installer. The current-user NSIS initializer now treats HKLM as separate migration evidence, logs it, and unconditionally confines `$INSTDIR` to `%LOCALAPPDATA%\\VoxVulgi`, including against stale saved state and `/D`. Package-only recompilation reused the existing v0.1.204 desktop binary and produced setup SHA-256 `0dda2e70bf1e5db092ed28f296c3808b8c8507fe36d43938309a8a258e3b8ad8` (279,373,871 bytes) without a desktop build, version change, or changelog entry. The exact mixed-state passive reinstall exited 0 and logged the detected v0.1.179 path, enforced LocalAppData target, in-process cleanup, binary write, metadata write, and success; 14/14 protected database/config files (1,111,426,220 bytes) remained byte-identical. The legacy HKLM registration, public shortcuts, Program Files binary, and abandoned 1.83 GB offline payload were then removed while HKCU v0.1.204 remained. Installed-app proof on an isolated C: root returned health `ok`, `agent_headless=true`, and `app_version=0.1.204`; all 330 contracts passed. Evidence: `../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0316/20260830_legacy_machine_migration_v0_1_204/summary.md`. This closes the core-installer mixed-scope migration defect only; real runtime qualification and exact-ISO acceptance remain outstanding.
+
+</topic>
+
+<topic id="status-reconciliation-2026-09-30" status="needs-validation" wp="WP-0316" updated_at="2026-09-30">
+
+## Status reconciliation — 2026-09-30
+
+Package-only app/runtime split and maintenance/migration implementation recorded. Remaining real runtime qualification and exact full ISO clean/offline/update/rollback acceptance; sole current installer authority retained, not declared production-qualified. Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
 
 </topic>

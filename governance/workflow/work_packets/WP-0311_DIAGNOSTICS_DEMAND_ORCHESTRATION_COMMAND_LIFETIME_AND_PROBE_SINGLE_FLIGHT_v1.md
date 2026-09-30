@@ -1,10 +1,10 @@
 ---
 file_id: WP-0311-v1
 file_kind: work_packet
-updated_at: 2026-08-23
+updated_at: 2026-09-30
 ---
 
-<topic id="contract" status="in-progress" version="v1" wp="WP-0311" updated_at="2026-08-23">
+<topic id="contract" status="needs-validation" version="v1" wp="WP-0311" updated_at="2026-08-23">
 
 # Work Packet: WP-0311 — Diagnostics demand orchestration, command lifetime, and probe single-flight
 
@@ -12,7 +12,7 @@ updated_at: 2026-08-23
 
 - ID: WP-0311
 - Owner: Codex
-- Status: IN_PROGRESS
+- Status: NEEDS_VALIDATION
 - Created: 2026-08-23
 - Refinement: `WP-0311_DIAGNOSTICS_DEMAND_ORCHESTRATION_COMMAND_LIFETIME_AND_PROBE_SINGLE_FLIGHT_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md`
@@ -86,5 +86,13 @@ Stop Diagnostics and overlapping Options modules from automatically flooding Tau
 - 2026-08-23: Implementation began. Added shared Diagnostics/Options demand ownership, semantic Torch/Demucs single-flight, source-identity invalidation, owned-child timeout/kill/reap receipts, and a bounded protection snapshot. Engine, desktop-contract, frontend-build, Tauri-check, governed-build, and independent adversarial gates passed. Status remains IN_PROGRESS because the required disposable-VM normal-window `vvwatch` proof is unavailable; packaged/headless evidence cannot replace it.
 - 2026-08-24: The integrated implementation shipped into governed v0.1.181. A disposable packaged headless run reported `agent_headless=true`, `app_version=0.1.181`, a healthy bridge, 143/143 semantic UI-audit candidates, zero missing accessible names, and reproducible Diagnostics snapshots/dumps. Status remains `IN_PROGRESS` because this quiet packaged proof does not replace the contract-required disposable-VM normal-window `vvwatch` proof.
 - 2026-08-24: Final adversarial review found and closed the remaining yt-dlp launch race by spawning suspended, assigning the app-lifecycle Job Object, and only then resuming. The immediate-descendant abrupt-owner Windows regression passed. Governed v0.1.182 then passed all six pack warmups, optimized EXE/NSIS builds, 287/287 contracts, and a disposable packaged headless proof reporting `agent_headless=true`, `app_version=0.1.182`, a healthy bridge, 123/123 semantic candidates, zero missing accessible names, structural scroll action, snapshots, and dumps. Status remains `IN_PROGRESS` pending disposable-VM normal-window `vvwatch` proof.
+
+</topic>
+
+<topic id="status-reconciliation-2026-09-30" status="needs-validation" wp="WP-0311" updated_at="2026-09-30">
+
+## Status reconciliation — 2026-09-30
+
+Implemented and packaged; remaining contract-required disposable-VM normal-window vvwatch proof. Headless results cannot replace it. Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
 
 </topic>

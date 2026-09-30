@@ -1,0 +1,37 @@
+{
+  "file_id": "WP-0326-v1",
+  "file_kind": "work_packet",
+  "updated_at": "2026-09-30",
+  "id": "WP-0326",
+  "version": 1,
+  "title": "Stale work-packet status reconciliation",
+  "status": "DONE",
+  "operator_request": "fix the status; most below 0300 may be stale and forgotten",
+  "board": "../TASK_BOARD.md",
+  "scope": [
+    "Reconcile all initially open WP statuses, prioritizing every packet below0300",
+    "Synchronize board and packet status; preserve historical notes and all unfinished requirements",
+    "Distinguish missing implementation, missing proof, genuine dependencies and review",
+    "Correct obsolete current instructions without claiming underlying runtime proof"
+  ],
+  "constraints": [
+    "No product-code, build, test-suite, process, user-data or release-identity changes",
+    "No DONE promotion without PROOF_STANDARD acceptance",
+    "No partial work demotion to unstarted BACKLOG",
+    "No supersession without full requirement preservation"
+  ],
+  "acceptance": [
+    "Every initially open row has an evidence-based decision",
+    "Board and packet headers match for all reconciled rows",
+    "Historical board notes and packet requirements preserved",
+    "Proof summary and machine-readable receipt exist"
+  ],
+  "verification": [
+    "Compare initial/final row sets and status/header agreement",
+    "Verify notes appended without replacing historical notes",
+    "Inspect governance diff and whitespace",
+    "Confirm product file hashes unchanged during reconciliation"
+  ],
+  "proof_bundle": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0326/20260930_status_reconciliation",
+  "validation": "All 64 canonical board/packet statuses agree; protected hashes unchanged; governance diff --check exit0"
+}

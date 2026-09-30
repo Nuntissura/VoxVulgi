@@ -136,3 +136,7 @@ justifies bundling a **dialog/music/effects 3-stem** model rather than only a 2-
   L13830). Moved 3-stem adoption to WP-0295 so this packet no longer depends on an unselected model
   or a test clip that does not exist. Added the bed level meter (G20) and the control-relocation
   requirement.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: BACKLOG. Packet records a reviewed implementation plan; three-stem adoption is explicitly owned by WP-0295. Remaining: Automatic mix/timing settings plumbing, ambience controls, bed source/level truth, segment preview, Mix-stage relocation and listening/app-boundary proof. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

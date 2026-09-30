@@ -76,3 +76,7 @@ Out of scope:
 ## Notes
 
 - 2026-05-18: WP created as Tier-2 user-friendliness hardening. Depends on WP-0232 + WP-0234 for the underlying primitives.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: BACKLOG. No complete per-pack repair execution or proof bundle is recorded; existing repair primitives do not prove all packet criteria. Remaining: Repair buttons in Diagnostics and first-run flow, healthy/corrupt-pack outcomes, structured results/trace, neighbor-pack isolation and packaged proof. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

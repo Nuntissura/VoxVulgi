@@ -2,7 +2,7 @@
 
 ## Status
 
-REOPENED (2026-08-21; further investigation, remediation, and proof-gap closure deferred to a new operator session)
+BLOCKED
 
 ## Owner
 
@@ -75,3 +75,7 @@ Out of scope: Instagram Stories/Reels-specific pipelines beyond profile/post med
 - Close the gaps between the implemented Instagram surfaces and the packet's exact real-provider acceptance criteria, including reliable single/profile execution, recurring behavior, authentication recovery, and proof against the operator's real workflow.
 - Reconcile this packet, WP-0303, the taskboard, and their proof bundles from current product/runtime evidence; unit tests, contract tests, and build success do not replace exact Instagram runtime proof.
 - Continue this work in a new operator session. No product-code remediation was authorized or performed during this reopening.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: BLOCKED. Normalize REOPENED to an actionable status. Opened WP-0303/summary.md showing exact August Posts/single/refresh/restart success; WP-0319 records current session feedback_required job 8f48c9d0-79c7-4106-83d0-d9086b9bbc69. Remaining: Instagram must accept configured session/request. Reconcile original passive cron/startup/global-cookie precedence/Test/auth guard/UI criteria against WP-0303 and prove any uncovered criteria; old reopening is not evidence all work remains unimplemented. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

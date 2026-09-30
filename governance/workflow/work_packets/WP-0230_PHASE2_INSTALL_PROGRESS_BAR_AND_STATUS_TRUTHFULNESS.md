@@ -2,7 +2,7 @@
 
 ## Status
 
-BLOCKED
+NEEDS_VALIDATION
 
 ## Owner
 
@@ -307,3 +307,9 @@ const runningIconStyle: React.CSSProperties = {
 ## Status Updates
 
 - 2026-05-18: Created from operator complaint about the misleading "interrupted" badge and the absence of any progress visualization. Backlog; ready for pickup by a no-context model using the Implementation Plan above. Pure frontend change — should be a quick build with no Rust recompile.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: NEEDS_VALIDATION
+- Base progress/headline/elapsed-time slice implemented and tested. Remaining base gate is real-install visual evidence under WP-0239. The explicitly carved-out byte/speed/ETA scope WP-0230b has no packet/board row and remains preserved as unresolved carried work in this packet; this reconciliation does not declare that extension delivered.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

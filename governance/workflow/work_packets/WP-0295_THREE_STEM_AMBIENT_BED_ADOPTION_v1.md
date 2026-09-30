@@ -69,3 +69,9 @@ recover ambience the separator already discarded.
 ## Status updates
 - 2026-08-05: Created by splitting WP-0294 on review finding that model adoption and mixer controls
   are different risk classes and must not share an acceptance gate.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: BLOCKED
+- Three-stem adoption waits on WP-0288 separation winner and an ambience-heavy clip; these are genuine unmet inputs, not old installation notes.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

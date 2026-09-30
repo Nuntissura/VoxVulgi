@@ -1450,7 +1450,7 @@ fn verify_youtube_po_provider_node_modules_single_flight_inner(
         if provider_node_modules_process_attestation(server_dir).is_some() {
             // The producer owns the canonical progress receipt. A waiter consumes the same
             // successful terminal without publishing a synthetic second scan.
-            return Ok(youtube_po_provider_install_status(paths));
+            return Ok(youtube_po_provider_install_status_fresh(paths));
         }
         if let Some((terminal_generation, error)) = provider_verification_terminal_errors()
             .lock()
@@ -2065,7 +2065,7 @@ fn verify_youtube_po_provider_node_modules_inner(
     // Rewalking that child tree would double the dominant startup I/O. A successful match to the
     // pinned complete-tree digest therefore publishes its pinned child digest directly.
     attest_provider_node_modules_tree(&server_dir, expected)?;
-    Ok(youtube_po_provider_install_status(paths))
+    Ok(youtube_po_provider_install_status_fresh(paths))
 }
 
 fn provider_plugin_tree_sha256_hex(
@@ -2579,20 +2579,182 @@ fn youtube_po_plugin_entrypoint(paths: &AppPaths) -> Option<PathBuf> {
         })
 }
 
-pub fn youtube_po_provider_install_status(paths: &AppPaths) -> YoutubePoProviderInstallStatus {
+/// Full-byte identity of the provider files that status polling hashes (WP-0324).
+#[derive(Debug, Clone)]
+struct ProviderFileIdentity {
+    node_version: Option<String>,
+    npm_version: Option<String>,
+    node_exe_sha256_hex: Option<String>,
+    npm_cmd_sha256_hex: Option<String>,
+    plugin_tree_sha256_hex: Option<String>,
+    server_entrypoint_sha256_hex: Option<String>,
+    derived_lock_sha256_hex: Option<String>,
+}
+
+/// WP-0324: the job runner asks for the provider status once per queued YouTube candidate, and
+/// the Jobs page/gate snapshot poll it too. Each uncached call hashed node.exe (~88 MB), npm.cmd,
+/// the plugin tree, the server entrypoint and the lock file, and launched `node --version` and
+/// `npm --version`, which kept the process reading tens of MB/s. Polling now reuses the identity
+/// while every hashed input keeps its size and mtime, and re-hashes full bytes at least this
+/// often so a same-size replacement with a restored mtime is still caught within a bounded window.
+/// The execution gate (`ensure_youtube_po_provider`, `youtube_po_provider_execution_status`)
+/// always re-hashes.
+const PROVIDER_FILE_IDENTITY_REVERIFY_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(10 * 60);
+
+type ProviderFileStamp = (PathBuf, Option<(u64, std::time::SystemTime)>);
+
+type ProviderFileIdentityCache = std::sync::Mutex<
+    std::collections::HashMap<
+        PathBuf,
+        (Vec<ProviderFileStamp>, std::time::Instant, ProviderFileIdentity),
+    >,
+>;
+
+fn provider_file_identity_cache() -> &'static ProviderFileIdentityCache {
+    static CACHE: std::sync::OnceLock<ProviderFileIdentityCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+/// Serializes recomputation so concurrent pollers do not hash the same files in parallel.
+fn provider_file_identity_flight() -> &'static std::sync::Mutex<()> {
+    static FLIGHT: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    FLIGHT.get_or_init(Default::default)
+}
+
+fn provider_file_stamp(path: PathBuf) -> ProviderFileStamp {
+    let stamp = std::fs::symlink_metadata(&path)
+        .ok()
+        .and_then(|metadata| Some((metadata.len(), metadata.modified().ok()?)));
+    (path, stamp)
+}
+
+fn provider_file_identity_stamps(paths: &AppPaths) -> Vec<ProviderFileStamp> {
+    let mut stamps = vec![
+        provider_file_stamp(paths.node_exe()),
+        provider_file_stamp(paths.node_npm_cmd()),
+        provider_file_stamp(paths.youtube_po_provider_entrypoint()),
+        provider_file_stamp(
+            paths
+                .youtube_po_provider_server_dir()
+                .join("package-lock.json"),
+        ),
+    ];
+    let mut stack = vec![paths.youtube_po_provider_plugin_dir()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            stamps.push((dir, None));
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match std::fs::symlink_metadata(&path) {
+                Ok(metadata) if metadata.is_dir() => stack.push(path),
+                _ => stamps.push(provider_file_stamp(path)),
+            }
+        }
+    }
+    stamps.sort();
+    stamps
+}
+
+fn compute_provider_file_identity(paths: &AppPaths) -> ProviderFileIdentity {
     let pin = &pinned_dependency_manifest::manifest().youtube_po_provider;
-    let node_version = if paths.node_exe().exists() {
-        tool_version_first_line_with_arg(&paths.node_exe(), "--version")
+    ProviderFileIdentity {
+        node_version: if paths.node_exe().exists() {
+            tool_version_first_line_with_arg(&paths.node_exe(), "--version")
+        } else {
+            None
+        },
+        npm_version: if paths.node_npm_cmd().exists() {
+            tool_version_first_line_with_arg(&paths.node_npm_cmd(), "--version")
+        } else {
+            None
+        },
+        node_exe_sha256_hex: file_sha256_hex(&paths.node_exe()),
+        npm_cmd_sha256_hex: file_sha256_hex(&paths.node_npm_cmd()),
+        plugin_tree_sha256_hex: provider_plugin_tree_sha256_hex(
+            &paths.youtube_po_provider_plugin_dir(),
+            &pin.plugin_files_sha256,
+        ),
+        server_entrypoint_sha256_hex: file_sha256_hex(&paths.youtube_po_provider_entrypoint()),
+        derived_lock_sha256_hex: file_sha256_hex(
+            &paths
+                .youtube_po_provider_server_dir()
+                .join("package-lock.json"),
+        ),
+    }
+}
+
+fn cached_provider_file_identity(
+    key: &Path,
+    stamps: &[ProviderFileStamp],
+) -> Option<ProviderFileIdentity> {
+    provider_file_identity_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(key)
+        .filter(|(cached_stamps, verified_at, _)| {
+            cached_stamps.as_slice() == stamps
+                && verified_at.elapsed() < PROVIDER_FILE_IDENTITY_REVERIFY_INTERVAL
+        })
+        .map(|(_, _, identity)| identity.clone())
+}
+
+fn provider_file_identity(paths: &AppPaths, fresh: bool) -> ProviderFileIdentity {
+    let key = paths.youtube_po_provider_dir();
+    let stamps = provider_file_identity_stamps(paths);
+    if !fresh {
+        if let Some(identity) = cached_provider_file_identity(&key, &stamps) {
+            return identity;
+        }
+    }
+    let _flight = provider_file_identity_flight()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !fresh {
+        // Another poller may have finished the same recomputation while this one waited.
+        if let Some(identity) = cached_provider_file_identity(&key, &stamps) {
+            return identity;
+        }
+    }
+    let identity = compute_provider_file_identity(paths);
+    let mut cache = provider_file_identity_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    // Only cache a result whose inputs did not change while they were being hashed.
+    if provider_file_identity_stamps(paths) == stamps {
+        cache.insert(key, (stamps, std::time::Instant::now(), identity.clone()));
     } else {
-        None
-    };
-    let npm_version = if paths.node_npm_cmd().exists() {
-        tool_version_first_line_with_arg(&paths.node_npm_cmd(), "--version")
-    } else {
-        None
-    };
-    let node_exe_sha256_hex = file_sha256_hex(&paths.node_exe());
-    let npm_cmd_sha256_hex = file_sha256_hex(&paths.node_npm_cmd());
+        cache.remove(&key);
+    }
+    identity
+}
+
+/// Polling status: reuses the bounded file identity (WP-0324).
+pub fn youtube_po_provider_install_status(paths: &AppPaths) -> YoutubePoProviderInstallStatus {
+    youtube_po_provider_install_status_with(paths, provider_file_identity(paths, false))
+}
+
+/// Execution-gate status: always re-hashes the provider files from full bytes.
+fn youtube_po_provider_install_status_fresh(paths: &AppPaths) -> YoutubePoProviderInstallStatus {
+    youtube_po_provider_install_status_with(paths, provider_file_identity(paths, true))
+}
+
+fn youtube_po_provider_install_status_with(
+    paths: &AppPaths,
+    files: ProviderFileIdentity,
+) -> YoutubePoProviderInstallStatus {
+    let pin = &pinned_dependency_manifest::manifest().youtube_po_provider;
+    let ProviderFileIdentity {
+        node_version,
+        npm_version,
+        node_exe_sha256_hex,
+        npm_cmd_sha256_hex,
+        plugin_tree_sha256_hex,
+        server_entrypoint_sha256_hex,
+        derived_lock_sha256_hex,
+    } = files;
     let plugin_marker = paths
         .youtube_po_provider_plugin_dir()
         .join(".plugin_archive_sha256");
@@ -2601,16 +2763,6 @@ pub fn youtube_po_provider_install_status(paths: &AppPaths) -> YoutubePoProvider
             .ok()
             .map(|value| value.trim().to_ascii_uppercase())
     });
-    let plugin_tree_sha256_hex = provider_plugin_tree_sha256_hex(
-        &paths.youtube_po_provider_plugin_dir(),
-        &pin.plugin_files_sha256,
-    );
-    let server_entrypoint_sha256_hex = file_sha256_hex(&paths.youtube_po_provider_entrypoint());
-    let derived_lock_sha256_hex = file_sha256_hex(
-        &paths
-            .youtube_po_provider_server_dir()
-            .join("package-lock.json"),
-    );
     // The JSON receipt is an audit/history artifact only. It is deliberately not an executable
     // trust root: a local file can be copied, stale, or forged. Readiness requires a full-byte
     // verification completed by this process and recorded in the in-memory attestation map.
@@ -4602,7 +4754,7 @@ fn authenticate_committed_provider_install(
     let server_dir = paths.youtube_po_provider_server_dir();
     let actual = authenticate_published_provider_payload(paths)?;
     attest_provider_node_modules_tree(&server_dir, &actual)?;
-    let status = youtube_po_provider_install_status(paths);
+    let status = youtube_po_provider_install_status_fresh(paths);
     if status.installed {
         Ok(())
     } else {
@@ -5275,7 +5427,7 @@ pub fn install_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProvider
                 &paths.youtube_po_provider_server_dir(),
                 &final_tree,
             )?;
-            let status = youtube_po_provider_install_status(paths);
+            let status = youtube_po_provider_install_status_fresh(paths);
             if status.installed {
                 verify_published_directory_lineage(
                     &paths.node_runtime_dir(),
@@ -5322,7 +5474,7 @@ pub fn install_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProvider
         }
         return Err(error);
     }
-    let status = youtube_po_provider_install_status(paths);
+    let status = youtube_po_provider_install_status_fresh(paths);
     let _ = std::fs::remove_file(provider_attempt_marker(&final_node));
     let _ = std::fs::remove_file(provider_attempt_marker(&final_provider));
     let _ = std::fs::remove_file(provider_install_attempt_receipt_path(paths));
@@ -5558,7 +5710,7 @@ pub fn youtube_po_provider_execution_status(paths: &AppPaths) -> YoutubePoProvid
     let _guard = youtube_po_provider_lifecycle_lock()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    youtube_po_provider_install_status(paths)
+    youtube_po_provider_install_status_fresh(paths)
 }
 
 pub fn youtube_po_provider_runtime_status(paths: &AppPaths) -> YoutubePoProviderRuntimeStatus {
@@ -5646,7 +5798,7 @@ pub fn ensure_youtube_po_provider(paths: &AppPaths) -> Result<YoutubePoProviderR
             .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
         return Err(error);
     }
-    let installed = youtube_po_provider_install_status(paths);
+    let installed = youtube_po_provider_install_status_fresh(paths);
     if !installed.installed {
         *youtube_po_provider_slot()
             .lock()
@@ -13857,6 +14009,78 @@ mod tests {
             "the persisted receipt is history and does not self-authenticate later bytes"
         );
         assert!(authenticate_provider_node_modules_tree(&node_modules, &trusted).is_err());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn wp0324_provider_file_identity_reuses_unchanged_stamps_and_rehashes_on_change_or_fresh() {
+        let _guard = PROVIDER_INTEGRITY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let base = std::env::temp_dir().join(format!(
+            "voxvulgi_wp0324_provider_identity_{}_{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let paths = AppPaths::new(base.clone());
+        let entrypoint = paths.youtube_po_provider_entrypoint();
+        std::fs::create_dir_all(entrypoint.parent().unwrap()).unwrap();
+        std::fs::write(&entrypoint, b"console.log('a');").unwrap();
+        let plugin_file = paths
+            .youtube_po_provider_plugin_dir()
+            .join("yt_dlp_plugins")
+            .join("wp0324.py");
+        std::fs::create_dir_all(plugin_file.parent().unwrap()).unwrap();
+        std::fs::write(&plugin_file, b"a = 1\n").unwrap();
+        let key = paths.youtube_po_provider_dir();
+        let verified_at = || {
+            provider_file_identity_cache()
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get(&key)
+                .map(|(_, at, _)| *at)
+        };
+
+        let first = provider_file_identity(&paths, false);
+        let first_at = verified_at().expect("polling result is cached");
+        let second = provider_file_identity(&paths, false);
+        assert_eq!(
+            verified_at(),
+            Some(first_at),
+            "unchanged stamps must not re-hash"
+        );
+        assert_eq!(
+            first.server_entrypoint_sha256_hex,
+            second.server_entrypoint_sha256_hex
+        );
+        assert!(first.server_entrypoint_sha256_hex.is_some());
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&entrypoint, b"console.log('changed');").unwrap();
+        let third = provider_file_identity(&paths, false);
+        let third_at = verified_at().expect("re-cached after change");
+        assert!(third_at > first_at, "a changed hashed file must re-hash");
+        assert_ne!(
+            third.server_entrypoint_sha256_hex,
+            first.server_entrypoint_sha256_hex
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(&plugin_file, b"a = 22\n").unwrap();
+        let _ = provider_file_identity(&paths, false);
+        let fourth_at = verified_at().expect("re-cached after plugin change");
+        assert!(fourth_at > third_at, "a changed plugin file must re-hash");
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let _ = provider_file_identity(&paths, true);
+        assert!(
+            verified_at().expect("fresh result cached") > fourth_at,
+            "the execution-gate variant must always re-hash"
+        );
+        provider_file_identity_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&key);
         let _ = std::fs::remove_dir_all(base);
     }
 

@@ -46,3 +46,9 @@ Out of scope:
 - 2026-03-12: First runtime-hardening slice implemented: YouTube yt-dlp runs now prefer conservative documented player clients, queue failures now append clearer locked-cookie / YouTube 403 / Instagram extractor hints, and the multi-executable failure summary now suppresses irrelevant `python3` Microsoft Store alias noise and duplicate fallback errors. Full installer-state auth and Instagram recovery remain open.
 - 2026-03-13: Research-backed runtime recovery slice implemented: VoxVulgi now treats a supported JavaScript runtime as part of the yt-dlp toolchain, adds pinned bundled Deno install/status plumbing plus Diagnostics visibility, includes Deno in offline bundle prep for installer-state runs, and only forces fallback YouTube `player_client` overrides when no JS runtime is available. Direct probe evidence showed the previous forced-client strategy still failed even with Deno, while `yt-dlp + Deno + documented defaults` succeeded on a public YouTube simulate run. Instagram/session closeout remains open.
 - 2026-04-23: YouTube downloader refresh slice started from recent failed-job evidence. Bundled yt-dlp pin moved from `2026.03.03` to `2026.03.17`, and offline-bundle prep now refreshes yt-dlp when the bundled copy is present but below the pinned version.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: IN_PROGRESS
+- Partial historical auth/runtime work, not active March dependency refresh. WP-0191 investigation is DONE; WP-0299 owns current YouTube runtime and WP-0303/WP-0319 own later Instagram recovery. Explicit-session precedence and JSON/header/Netscape/file input cases plus installer-state authenticated proof remain here until a complete successor mapping is recorded. No requirement discarded.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

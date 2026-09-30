@@ -2,7 +2,7 @@
 
 ## Status
 
-BLOCKED
+NEEDS_VALIDATION
 
 ## Owner
 
@@ -97,3 +97,9 @@ Out of scope:
 ## Notes
 
 - 2026-05-29: WP created retroactively at operator request ("why don't you just take the next free slot?") to replace the placeholder `WP-9999` used during the live fix. Root cause diagnosed from the live process tree + job DB, not from code reading alone (a code-only first pass mis-attributed the hang to the TTS step, which had in fact succeeded). Live recovery: the deadlocked Python subtree was killed (`taskkill /T`), which unblocked the old binary's `cmd.output()` and flipped the job to `failed` at 21:01:34 — independently confirming the worker thread was blocked precisely at that call. Fix shipped in desktop build 0.1.54.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: NEEDS_VALIDATION
+- Spleeter nonmultiprocess and controlled child timeout/cancel/watchdog implementation recorded; later WP-0288 records successful separation. Historical 0.1.54 install prerequisite is obsolete. Remaining is exact installed clip plus timeout, cancellation and watchdog boundary proof; separation success alone is insufficient.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

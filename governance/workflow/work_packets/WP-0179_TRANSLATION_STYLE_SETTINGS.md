@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0179
 - Owner: Codex
-- Status: REVIEW
+- Status: NEEDS_VALIDATION
 - Created: 2026-04-08
 - Target milestone: Translation Quality
 
@@ -43,3 +43,7 @@ Out of scope:
 - Product code implemented: per-item atomic persistence, Neutral/Formal/Informal/Custom UI, custom instruction entry, Preserve/Translate/Drop honorific control, queue-time snapshots in direct and automatic translation producers, execution fallback for legacy queued jobs, bounded prompt composition, deterministic punctuation behavior, and safe hyphenated-honorific removal.
 - Verification passed: `npm run build`; `cargo check --locked -j 1 --manifest-path product/desktop/src-tauri/Cargo.toml`; targeted engine translation tests (`10 passed`, including per-item persistence, path traversal, control-character rejection, prompt bounding, punctuation differences, and honorific removal).
 - Remaining before `DONE`: governed desktop build plus headless packaged UI inspection under `PROOF_STANDARD.md`; an audio-backed translation comparison to confirm the selected prompt changes the installed Whisper model's output beyond deterministic cleanup.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: NEEDS_VALIDATION. 2026-08-14 implementation and focused checks are complete; the packet explicitly records remaining packaged/audio proof. Remaining: Governed packaged UI inspection and audio-backed translation comparison proving style affects installed Whisper output. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

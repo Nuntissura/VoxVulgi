@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0203
 - Owner: Codex
-- Status: REVIEW
+- Status: NEEDS_VALIDATION
 - Created: 2026-04-24
 - Target milestone: Localization operator reliability
 
@@ -51,3 +51,7 @@ Out of scope:
 - 2026-04-25: Moved to REVIEW. Same-path active Localization imports now reuse the existing active job; existing library media reselects the workspace item with completed reuse rows; import cancellation propagates to same-batch children. Queen sample smoke reused item `ab16785e-0fc4-4eba-9363-db81727a31db` with 0 active duplicate imports. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0203/2026-04-25_0315_wp0202_0204/summary.md`.
 - 2026-08-15: Independent adversarial review found two check-then-write races: concurrent same-path intake could pass separate active-job reads, and cancellation could land after the final parent check but before child insertion. Current SQLite transaction/isolation guidance was rechecked at `https://sqlite.org/lang_transaction.html` and `https://www.sqlite.org/isolation.html`: successful `BEGIN IMMEDIATE` serializes writers and prevents a later write-upgrade race. Selected remediation is a short immediate transaction that performs the canonical recheck and job insert on the same connection. Rejected alternatives: a process-local mutex does not protect another process, and a new expression/partial unique index would impose a live schema migration while still requiring explicit reuse handling. Required counterfactuals: simultaneous same-path enqueue returns one active job ID, and a canceled import cannot insert a late batch child.
 - 2026-08-15: Both review findings were remediated. The active same-path recheck and insert now share one immediate transaction; downstream child insertion atomically proves the parent remains active and derives/repairs the parent's batch on that same transaction. Independent counterfactuals pass for simultaneous same-path enqueue, child-before-cancel propagation, and cancel-before-child suppression. Status remains `REVIEW` pending the combined current-state governed desktop/app-boundary build.
+
+## Status reconciliation (2026-09-30)
+
+- 2026-09-30 status reconciliation: NEEDS_VALIDATION. Opened April Queen proof; 2026-08-15 packet records both enqueue/cancel race fixes and passing independent counterfactuals. Remaining: Combined final-state governed packaged import/reuse/cancellation/progress UI proof. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.

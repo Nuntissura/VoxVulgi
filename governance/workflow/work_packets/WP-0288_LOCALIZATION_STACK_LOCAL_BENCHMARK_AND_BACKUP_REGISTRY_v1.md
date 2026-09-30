@@ -85,3 +85,9 @@
     the backup registry artifact, and the operator listening verdict.
   - **Blocked input**: the corpus spec requires >= 2 KO and >= 2 JA clips at 3-10 min; only the
     Haerin (7.2 s) and Miyeon (174.7 s) clips exist. Operator supply or selection needed.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: BLOCKED
+- Remaining corpus >=2 KO and >=2 JA clips, comparisons, current packaging/backup proof and operator listening verdict are explicit external inputs/gates. Successful one-stage evidence does not close the benchmark.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

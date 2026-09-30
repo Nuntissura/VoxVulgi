@@ -2,7 +2,7 @@
 
 ## Status
 
-IN_PROGRESS (engine scope complete + tested + built in desktop 0.1.73; pending operator runtime verification)
+NEEDS_VALIDATION
 
 ## Owner
 
@@ -86,3 +86,9 @@ Out of scope (→ WP-0256): Jobs/Queue readable collapsible playlist LIST rows (
 - 2026-06-15: WP authored. Engine-first slice; UI + legacy purge tracked as WP-0255. Build gated until engine slice + tests are green and operator-confirmed.
 - 2026-06-15 (impl): 2a/2b/2c DONE + tested. `db.rs` v17 additive `job.lane` column + backfill + `idx_job_lane_status_created`. `jobs.rs` `JobLane` enum + `for_type` map, lane stamped at enqueue (subscription-child downloads → Recurring via `enqueue_with_type_item_batch_and_lane`), `runner_loop` rewritten to per-lane scheduling with DB-derived running counts (no in-memory atomics; survives restart), `get_lane_limit`/`lane_limit_conn` per-lane settings (defaults Single 3 / Recurring 1 / Localization 1; legacy global `jobs_max_concurrency` retired from scheduling). 3 new unit tests (mapping, stamping incl. recurring override, lane isolation). Then 2e **resume-on-restart DONE**: `requeue_orphaned_running_jobs` now re-queues interrupted single+recurring (download) jobs instead of failing them (yt-dlp archive makes resume idempotent); localization jobs still fail-on-interrupt; old fail-expecting test updated to assert resume + new localization-fails test added. `cargo test -p voxvulgi_engine` = **221 passed, 0 failed**.
 - 2026-06-16 (impl cont.): 2e Stop/Update-all + 2d startup auto-sync DONE. `jobs.rs` recurring-lane pause (`set_recurring_paused`/`is_recurring_paused`, meta `jobs_recurring_paused`, runner skips Recurring when paused, cleared at `start_runner` so restarts resume). `subscriptions.rs` `queue_all_active_youtube_subscriptions_now` (force, ignores due gate, keeps backoff). `lib.rs` Tauri commands `youtube_subscriptions_update_all` (clear stop + force-queue), `youtube_subscriptions_stop_recurring` (set stop), `youtube_subscriptions_recurring_paused` (status) — registered. `lib.rs` setup() startup auto-sync thread (deferred 20s, due-only, recurring lane, gated by safe-mode + `config/subscription_auto_sync.txt`, light to avoid WP-0228 regression). New `recurring_pause_round_trips` test. **`cargo test -p voxvulgi_engine` = 222 passed, 0 failed; desktop `cargo check` green.** ENGINE SCOPE COMPLETE. Building 0.1.73 (one build per operator). UI buttons for Stop/Update-all + per-lane Options control = WP-0255; Jobs list + titles = WP-0256. Operator runtime verification of lane parallelism + resume + auto-sync still required before DONE.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: NEEDS_VALIDATION
+- Engine scheduling/resume/startup auto-sync complete, tested and built per packet. Remaining is actual lane parallelism, conservative recurring behavior, persisted interrupted-work resume and startup auto-sync proof. WP-0320 later lane/pacing evidence may be reused only where it covers these exact criteria.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.

@@ -2,7 +2,7 @@
 
 ## Status
 
-BLOCKED
+NEEDS_VALIDATION
 
 ## Owner
 
@@ -106,3 +106,9 @@ Out of scope:
 ## Notes
 
 - 2026-05-22: WP created in response to operator's "make my app work" goal and live freeze evidence in trace `28232594` bytes file at `%APPDATA%\com.voxvulgi.voxvulgi\diagnostics\traces\diagnostics_trace.jsonl`. The original install bug (WP-0231) is verifiably fixed (`tts_neural_local_v1.json: completed`, `transformers-5.8.1`, `huggingface_hub-1.5.0`, `kokoro-0.9.4`, `.warmup_ok` probe present). This WP attacks the next-most-blocking symptom: Jobs/Queue freeze and install-command observability.
+
+## Status reconciliation — 2026-09-30
+
+- Current status: NEEDS_VALIDATION
+- Batched Jobs/Library commands and async install tracing implemented and recorded tested. Installing historical 0.1.50 is not a current prerequisite; remaining is current installed batching/command trace proof against the packet acceptance.
+- Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
