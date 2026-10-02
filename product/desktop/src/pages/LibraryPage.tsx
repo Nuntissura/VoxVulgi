@@ -27,7 +27,7 @@ import {
 } from "../lib/sharedDownloadDir";
 import { fileName, joinPath, parentPath } from "../lib/pathUtils";
 // WP-0264/WP-0322: shared failure-state classifier (subscription panel + Jobs use the same rules).
-import { classifyFailure, type FailureState } from "../lib/failureStates";
+import { classifyFailure, historyReadRetryDelay, type FailureState } from "../lib/failureStates";
 import { FailureExplainer, type FailureActionHandlers } from "../components/FailureExplainer";
 import { youtubeGateText, type YoutubeGateSnapshot } from "../lib/youtubeGateText";
 import { usePollingLoop } from "../lib/activity";
@@ -1087,6 +1087,7 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
   const previousYoutubeSingleActiveTotal = useRef<number | null>(null);
   const [, setYoutubeLineageBackfillBusy] = useState(false);
   const [youtubeLineageBackfillError, setYoutubeLineageBackfillError] = useState<string | null>(null);
+  const [youtubeLineageReadFailures, setYoutubeLineageReadFailures] = useState(0);
   // WP-0320: shared YouTube start-gate snapshot for the Video Archiver activity strip.
   const [youtubeGate, setYoutubeGate] = useState<YoutubeGateSnapshot | null>(null);
   const [youtubeGateBusy, setYoutubeGateBusy] = useState(false);
@@ -2856,10 +2857,11 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
       videoArchiverTab === "youtube_single" &&
       !showMediaLibrary &&
       !showInstagramArchive;
+    const retryDelay = historyReadRetryDelay(youtubeLineageBackfillError, youtubeLineageReadFailures);
     if (
       !historyVisible ||
       !backfill?.has_more ||
-      youtubeLineageBackfillError
+      (youtubeLineageBackfillError && retryDelay === null)
     ) {
       return;
     }
@@ -2879,7 +2881,9 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
           direction: youtubeSingleHistoryDirection,
         });
         if (canceled || isSuperseded()) return;
+        setError((previous) => previous === youtubeLineageBackfillError ? null : previous);
         setYoutubeLineageBackfillError(null);
+        setYoutubeLineageReadFailures(0);
         setYoutubeSingleHistoryPage(page);
         setItems(page.items);
         setItemsOffset(page.items.length);
@@ -2888,12 +2892,13 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
         if (!canceled && !isSuperseded()) {
           const message = `Single-video history classification paused: ${String(e)}`;
           setYoutubeLineageBackfillError(message);
+          setYoutubeLineageReadFailures((failures) => failures + 1);
           setError(message);
         }
       } finally {
         if (!canceled && !isSuperseded()) setYoutubeLineageBackfillBusy(false);
       }
-    }, 1500);
+    }, retryDelay ?? 1500);
 
     return () => {
       canceled = true;
@@ -2908,6 +2913,7 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
     videoArchiverTab,
     visible,
     youtubeLineageBackfillError,
+    youtubeLineageReadFailures,
     youtubeSingleBackfillQueryKey,
     youtubeSingleHistoryAppliedSearch,
     youtubeSingleHistoryDirection,
@@ -5231,7 +5237,11 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
                 <button
                   type="button"
                   style={{ marginLeft: 8 }}
-                  onClick={() => setYoutubeLineageBackfillError(null)}
+                  onClick={() => {
+                    setYoutubeLineageReadFailures(0);
+                    setError((previous) => previous === youtubeLineageBackfillError ? null : previous);
+                    setYoutubeLineageBackfillError(null);
+                  }}
                 >
                   Retry classification
                 </button>

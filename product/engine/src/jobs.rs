@@ -5344,7 +5344,9 @@ pub fn operator_activity_page(paths: &AppPaths, source: &str, view: &str, offset
     let conn = db::open_readonly(paths)?;
     let tx = conn.unchecked_transaction()?;
     let total: i64 = tx.query_row(&format!("SELECT COUNT(*) FROM job WHERE {tracks} AND {statuses}"), [], |r| r.get(0))?;
-    let mut stmt = tx.prepare(&format!("SELECT id,item_id,batch_id,type,status,progress,error,created_at_ms,started_at_ms,finished_at_ms,logs_path,params_json,target_title,retry_of_job_id,retry_replacement_job_id,track,attempt_no FROM job WHERE {tracks} AND {statuses} ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,created_at_ms DESC,id DESC LIMIT ?1 OFFSET ?2"))?;
+    // Select the bounded page before loading large params_json payloads. Sorting full rows
+    // reads overflow pages for jobs that never appear in the result and occupies read slots.
+    let mut stmt = tx.prepare(&format!("SELECT j.id,j.item_id,j.batch_id,j.type,j.status,j.progress,j.error,j.created_at_ms,j.started_at_ms,j.finished_at_ms,j.logs_path,j.params_json,j.target_title,j.retry_of_job_id,j.retry_replacement_job_id,j.track,j.attempt_no FROM (SELECT rowid FROM job WHERE {tracks} AND {statuses} ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,created_at_ms DESC,id DESC LIMIT ?1 OFFSET ?2) AS page JOIN job AS j ON j.rowid=page.rowid ORDER BY CASE j.status WHEN 'running' THEN 0 ELSE 1 END,j.created_at_ms DESC,j.id DESC"))?;
     let mut rows = stmt.query_map(params![limit as i64, offset as i64], job_row_from_query_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
     hydrate_job_target_titles(&tx, &mut rows)?;
     for row in &mut rows {
@@ -34740,6 +34742,28 @@ INSERT INTO library_item (
         assert_eq!(operator_activity_page(&paths,"youtube","attention",0,20).unwrap()["total"],1);
         assert!(operator_activity_page(&paths,"unknown","now",0,20).is_err());
         assert!(operator_activity_page(&paths,"all","unknown",0,20).is_err());
+    }
+
+    #[test]
+    fn operator_activity_page_does_not_read_unselected_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).unwrap();
+        let conn = db::open(&paths).unwrap();
+        let payload = format!("{{\"padding\":\"{}\"}}", "x".repeat(1024 * 1024));
+        for index in 0..32 {
+            conn.execute("INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path,track,target_title) VALUES(?1,'download_direct_url','queued',0,?2,?3,'','youtube_single','Known title')",
+                params![format!("payload-{index:02}"), payload, index]).unwrap();
+        }
+        drop(conn);
+        let database = db::AppDatabase::for_paths(&paths).unwrap();
+        let page = operator_activity_page(&paths, "youtube", "now", 0, 1).unwrap();
+        assert_eq!(page["total"], 32);
+        assert_eq!(page["jobs"][0]["job"]["id"], "payload-31");
+        let snapshot = database.snapshot();
+        let receipt = snapshot.recent_receipts.last().unwrap();
+        assert!(receipt.file_bytes_read.unwrap() < 3 * 1024 * 1024,
+            "one-row page must not sort/read all 32 MiB payloads: {:?}", receipt.file_bytes_read);
     }
 
     #[test]

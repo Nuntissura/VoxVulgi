@@ -333,6 +333,12 @@ export function classifyFailure(
 
 // Human-readable "last failed <relative>" / "next automatic try <HH:MM>" helpers,
 // shared by every failure surface so wording matches exactly.
+// A busy history projection is temporary; retry without an unbounded polling loop.
+export function historyReadRetryDelay(error: string | null, failures: number): number | null {
+  if (!error || classifyFailure(error)?.kind !== "app_busy") return null;
+  return [2000, 5000, 10000, 20000][failures - 1] ?? null;
+}
+
 export function formatLastFailed(lastErrorAtMs: number | null | undefined): string | null {
   if (!lastErrorAtMs) return null;
   const deltaMs = Date.now() - lastErrorAtMs;

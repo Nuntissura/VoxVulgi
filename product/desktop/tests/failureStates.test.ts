@@ -3,7 +3,17 @@
 // (app_busy before any timeout/network rule) is asserted explicitly.
 import test from "node:test";
 import assert from "node:assert/strict";
-import { classifyFailure, type FailureKind } from "../src/lib/failureStates.ts";
+import { classifyFailure, historyReadRetryDelay, type FailureKind } from "../src/lib/failureStates.ts";
+
+test("history reads recover from transient admission failures with a finite retry budget", () => {
+  const error = "Single-video history classification paused: database runtime error: read_admission_timeout";
+  assert.deepEqual([1, 2, 3, 4, 5].map((failures) => historyReadRetryDelay(error, failures)),
+    [2000, 5000, 10000, 20000, null]);
+  assert.equal(historyReadRetryDelay("database is locked", 1), 2000);
+  assert.equal(historyReadRetryDelay("no such table: library_item", 1), null);
+  assert.equal(historyReadRetryDelay(null, 1), null);
+  assert.equal(historyReadRetryDelay(error, 0), null);
+});
 
 const FIXTURES: Array<{ message: string; kind: FailureKind }> = [
   // 58 subs mislabeled "Network problem" before WP-0322 — must be app_busy.

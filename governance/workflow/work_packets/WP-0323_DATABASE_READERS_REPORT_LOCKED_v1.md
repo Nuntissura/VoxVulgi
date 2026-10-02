@@ -1,7 +1,7 @@
 ---
 file_id: WP-0323
 file_kind: work_packet
-updated_at: 2026-09-30
+updated_at: 2026-10-02
 ---
 
 # Work Packet: WP-0323 — Readers intermittently fail with "database is locked"
@@ -46,6 +46,13 @@ Operator direction 2026-09-24: VoxVulgi cargo builds slow down the higher-priori
 
 ## Status updates
 
+### Remediation scope — 2026-10-02
+
+- Installed 0.1.205 still reports read admission timeouts. Live startup receipts show all four read slots occupied; preserve H2-H4 and the original live acceptance requirements.
+- Measured canonical read-only activity query: current payload-before-pagination query 6386 ms; ID-first page query 28 ms; all 20 returned rows identical. Query plans show the existing track/status index and a temporary sort; fetch full payloads only after the bounded ID page is selected. Preserve source/status predicates, total, running-first order, ties, offset and limit. No schema or user-data changes.
+- The history refresh effect stops permanently on any error, including temporary database contention. Reuse the existing app_busy classifier for four bounded delayed retries, cancel stale requests, clear only the recovered error, and preserve manual retry for exhaustion/permanent failures.
+- Proof: focused query regression and retry policy tests; current database row reconciliation; retained-version core build and isolated headless navigation/snapshot. Full WP closure still requires the original 30-minute live check.
+
 - 2026-09-24: Created at operator direction. H1 tested and not reproduced; no code change made. Operator will record findings from daily use for the next session.
 
 ## Status reconciliation — 2026-09-30
@@ -53,3 +60,9 @@ Operator direction 2026-09-24: VoxVulgi cargo builds slow down the higher-priori
 - Current status: IN_PROGRESS
 - Unresolved database-reader investigation, not a completed fix awaiting validation. H1 not reproduced; no remedial code exists for the quoted read_admission_timeout. Next work is exact active-reader/admission reproduction and evidence-led remediation; preserve H2-H4.
 - Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
+
+### 2026-10-02 focused proof
+
+- Frontend failure/recovery and projection freshness checks: 41 passed. Engine operator_activity checks: 2 passed, including one-row read budget under 3 MiB with 32 MiB of stored payloads.
+- A second canonical read-only probe encountered SQLite database is locked; its additional row reconciliation did not pass. Do not infer that all read locks or admission failures are eliminated.
+- Current implementation preserves four-slot bounded admission and all historical requirements. Core rebuild and isolated app-boundary proof follow; installed-app 30-minute acceptance remains outstanding.
