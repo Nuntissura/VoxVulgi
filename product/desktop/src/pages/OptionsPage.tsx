@@ -1,3 +1,5 @@
+import "./OptionsStorage.css";
+import { formatStorageFreeSpace } from "../lib/optionsStorage";
 import { AgentManual } from "../components/AgentManual";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -640,6 +642,11 @@ const FEATURE_ROOTS: Array<{ key: FeatureRootKey; title: string; description: st
     key: "instagram",
     title: "Instagram Archiver",
     description: "Where saved Instagram posts and Instagram subscriptions go.",
+  },
+  {
+    key: "tiktok",
+    title: "TikTok Archiver",
+    description: "Where saved TikTok videos and profile archives go.",
   },
   {
     key: "images",
@@ -3379,6 +3386,10 @@ export function OptionsPage() {
           <div className="v options-path-value">{status?.current_dir || "-"}</div>
         </div>
         <div className="kv">
+          <div className="k">Free space</div>
+          <div className="v">{formatStorageFreeSpace(status?.free_space_bytes, dirLoading, dirError)}</div>
+        </div>
+        <div className="kv">
           <div
             className="k"
             title="Custom uses a folder selected for this module. Uses main folder inherits the shared storage root."
@@ -5177,6 +5188,10 @@ export function OptionsPage() {
           <div className="v">{effectiveRoot || "-"}</div>
         </div>
         <div className="kv">
+          <div className="k">Free space</div>
+          <div className="v" data-testid="options-shared-root-free-space">{formatStorageFreeSpace(downloadDir?.free_space_bytes, dirLoading, dirError)}</div>
+        </div>
+        <div className="kv">
           <div className="k">Standard folder</div>
           <div className="v">{defaultRoot || "-"}</div>
         </div>
@@ -5221,6 +5236,32 @@ export function OptionsPage() {
           </button>
         </div>
       </section>
+      ) : null}
+
+      {activeModule === "general" ? (
+        <section className="options-setting-section" aria-labelledby="options-feature-roots-heading">
+          <h2 id="options-feature-roots-heading">Feature folders</h2>
+          <p>Each feature uses its folder below. Custom folders stay separate from the main folder.</p>
+          <div className="options-feature-roots-wrap">
+            <table className="options-feature-roots" data-testid="options-feature-roots-table">
+              <thead><tr><th scope="col">Feature</th><th scope="col">Effective path</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead>
+              <tbody>{FEATURE_ROOTS.map((feature) => {
+                const status = featureRootStatus(downloadDir, feature.key);
+                return <tr key={feature.key} data-testid={`options-feature-root-${feature.key}`}>
+                  <th scope="row">{feature.title}</th>
+                  <td className="options-path-value">{status?.current_dir || "Unknown"}<div className="options-root-free-space">Free space: {formatStorageFreeSpace(status?.free_space_bytes, dirLoading, dirError)}</div></td>
+                  <td>{!status ? (dirLoading ? "Checking…" : "Unknown") : `${status.exists ? "Ready" : "Missing"} (${status.override_dir ? "custom" : "uses main folder"})`}</td>
+                  <td><div className="options-root-actions">
+                    <button type="button" aria-label={`Change ${feature.title} folder`} disabled={dirLoading || Boolean(dirError) || !downloadDir} onClick={() => chooseFeatureRoot(feature.key, feature.title).catch(() => undefined)}>Change folder</button>
+                    <button type="button" aria-label={`Use main folder for ${feature.title}`} data-agent-action-id={`options.storage.${feature.key}.use-main`} data-agent-effect-class="reversible_state_change" disabled={dirLoading || Boolean(dirError) || !downloadDir || !status?.override_dir} onClick={() => useDefaultFeatureDownloadDir(feature.key).catch(() => undefined)}>Use main folder</button>
+                    <button type="button" aria-label={`Open ${feature.title} folder`} disabled={dirLoading || !status?.current_dir} onClick={() => status?.current_dir && openPathBestEffort(status.current_dir).catch(() => undefined)}>Open folder</button>
+                  </div></td>
+                </tr>;
+              })}</tbody>
+            </table>
+          </div>
+          {dirError ? <p role="alert">{dirError}</p> : null}
+        </section>
       ) : null}
 
       {activeModule === "localization" ? renderFeatureRootSetting("localization") : null}

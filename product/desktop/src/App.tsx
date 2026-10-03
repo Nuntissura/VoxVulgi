@@ -278,6 +278,7 @@ type StartupStatus = {
     | "running"
     | "ready"
     | "skipped_safe_mode"
+    | "skipped_headless"
     | "error";
   offline_bundle_started_at_ms: number | null;
   offline_bundle_finished_at_ms: number | null;

@@ -3389,11 +3389,13 @@ impl StartupTracker {
         if phase_id == "offline_bundle"
             && matches!(
                 self.offline_bundle_state.as_str(),
-                "ready" | "error" | "skipped_safe_mode"
+                "ready" | "error" | "skipped_safe_mode" | "skipped_headless"
             )
         {
             return;
         }
+        let skipped_headless = state == "skipped_headless";
+        let state = if skipped_headless { "skipped" } else { state };
         let now = now_epoch_ms_i64();
         self.revision = self.revision.saturating_add(1);
         self.updated_at_ms = now;
@@ -3411,7 +3413,9 @@ impl StartupTracker {
         }
 
         if phase_id == "offline_bundle" {
-            self.offline_bundle_state = if state == "skipped" {
+            self.offline_bundle_state = if skipped_headless {
+                "skipped_headless".to_string()
+            } else if state == "skipped" {
                 "skipped_safe_mode".to_string()
             } else {
                 state.to_string()
@@ -3639,6 +3643,7 @@ struct DownloadDirStatus {
     default_dir: String,
     exists: bool,
     using_default: bool,
+    free_space_bytes: Option<u64>,
     feature_roots: Vec<FeatureStorageRootStatus>,
 }
 
@@ -3650,6 +3655,7 @@ struct FeatureStorageRootStatus {
     default_dir: String,
     override_dir: Option<String>,
     exists: bool,
+    free_space_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -8470,6 +8476,20 @@ mod tests {
     }
 
     #[test]
+    fn startup_offline_skip_reason_distinguishes_headless_from_safe_mode() {
+        for (input, expected) in [("skipped_headless", "skipped_headless"), ("skipped", "skipped_safe_mode")] {
+            let mut tracker = StartupTracker::new();
+            tracker.set_phase_state("offline_bundle", input, None);
+            assert_eq!(tracker.offline_bundle_state, expected);
+            let phase = tracker.phases.iter().find(|phase| phase.id == "offline_bundle").unwrap();
+            assert_eq!(phase.state, "skipped");
+            assert!(phase.finished_at_ms.is_some());
+            tracker.set_phase_state("offline_bundle", "running", None);
+            assert_eq!(tracker.offline_bundle_state, expected, "terminal skip must retain its startup reason");
+        }
+    }
+
+    #[test]
     fn headless_audit_disables_runtime_background_work() {
         assert!(runtime_background_work_enabled(false, false));
         assert!(!runtime_background_work_enabled(true, false));
@@ -8714,6 +8734,20 @@ mod tests {
                 "database-ready gate must precede {marker}"
             );
         }
+    }
+
+    #[test]
+    fn build_download_dir_status_serializes_unknown_capacity_for_missing_roots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        paths.set_download_dir_override(&dir.path().join("missing-storage")).expect("set root");
+        let status = build_download_dir_status(&paths).expect("status");
+        assert_eq!(status.free_space_bytes, None);
+        assert!(status.feature_roots.iter().all(|root| root.free_space_bytes.is_none()));
+        let value = serde_json::to_value(status).expect("serialize");
+        assert!(value["free_space_bytes"].is_null());
+        assert!(value["feature_roots"].as_array().unwrap().iter()
+            .all(|root| root.get("free_space_bytes").is_some_and(serde_json::Value::is_null)));
     }
 
     #[test]
@@ -9132,7 +9166,7 @@ fn build_download_dir_status(paths: &AppPaths) -> Result<DownloadDirStatus, Stri
     let exists = current_dir.exists() && current_dir.is_dir();
     let feature_roots_config =
         config::load_feature_storage_roots_config(paths).map_err(|e| e.to_string())?;
-    let feature_roots = [
+    let mut feature_roots = [
         ("video", feature_roots_config.video_root.clone()),
         ("instagram", feature_roots_config.instagram_root.clone()),
         ("tiktok", feature_roots_config.tiktok_root.clone()),
@@ -9159,15 +9193,24 @@ fn build_download_dir_status(paths: &AppPaths) -> Result<DownloadDirStatus, Stri
             default_dir: default_feature_dir.to_string_lossy().to_string(),
             override_dir: override_value,
             exists: current_feature_dir.exists() && current_feature_dir.is_dir(),
+            free_space_bytes: None,
         })
     })
     .collect::<Result<Vec<_>, String>>()?;
 
+    let roots = std::iter::once(current_dir.clone())
+        .chain(feature_roots.iter().map(|root| std::path::PathBuf::from(&root.current_dir)))
+        .collect::<Vec<_>>();
+    let available = voxvulgi_engine::paths::free_space_available_bounded(&roots, Duration::from_millis(300));
+    for (root, free_space_bytes) in feature_roots.iter_mut().zip(available.iter().skip(1)) {
+        root.free_space_bytes = *free_space_bytes;
+    }
     Ok(DownloadDirStatus {
         current_dir: current_dir.to_string_lossy().to_string(),
         default_dir: default_dir.to_string_lossy().to_string(),
         exists,
         using_default: override_dir.is_none(),
+        free_space_bytes: available.first().copied().flatten(),
         feature_roots,
     })
 }
@@ -12230,145 +12273,168 @@ fn safe_mode_set(state: State<'_, AppState>, enabled: bool) -> Result<SafeModeSt
 }
 
 #[tauri::command]
-fn downloads_dir_status(state: State<'_, AppState>) -> Result<DownloadDirStatus, String> {
-    build_download_dir_status(&state.paths)
+async fn downloads_dir_status(state: State<'_, AppState>) -> Result<DownloadDirStatus, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        build_download_dir_status(&paths)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn downloads_dir_set(
+async fn downloads_dir_set(
     state: State<'_, AppState>,
     path: String,
     create_if_missing: bool,
 ) -> Result<DownloadDirStatus, String> {
-    let mut dir = std::path::PathBuf::from(path.trim());
-    if dir.as_os_str().is_empty() {
-        return Err("folder path is empty".to_string());
-    }
-    if !dir.is_absolute() {
-        dir = std::env::current_dir()
-            .map_err(|e| e.to_string())?
-            .join(dir);
-    }
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dir = std::path::PathBuf::from(path.trim());
+        if dir.as_os_str().is_empty() {
+            return Err("folder path is empty".to_string());
+        }
+        if !dir.is_absolute() {
+            dir = std::env::current_dir()
+                .map_err(|e| e.to_string())?
+                .join(dir);
+        }
 
-    if create_if_missing {
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    }
-    if !dir.exists() {
-        return Err(format!("folder does not exist: {}", dir.to_string_lossy()));
-    }
-    if !dir.is_dir() {
-        return Err(format!("path is not a folder: {}", dir.to_string_lossy()));
-    }
+        if create_if_missing {
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        }
+        if !dir.exists() {
+            return Err(format!("folder does not exist: {}", dir.to_string_lossy()));
+        }
+        if !dir.is_dir() {
+            return Err(format!("path is not a folder: {}", dir.to_string_lossy()));
+        }
 
-    let normalized = dir.canonicalize().unwrap_or(dir);
-    ensure_media_output_layout(&normalized)?;
-    state
-        .paths
-        .set_download_dir_override(&normalized)
-        .map_err(|e| e.to_string())?;
-    build_download_dir_status(&state.paths)
+        let normalized = dir.canonicalize().unwrap_or(dir);
+        ensure_media_output_layout(&normalized)?;
+        paths
+            .set_download_dir_override(&normalized)
+            .map_err(|e| e.to_string())?;
+        build_download_dir_status(&paths)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn downloads_dir_use_default(
+async fn downloads_dir_use_default(
     state: State<'_, AppState>,
     create_if_missing: bool,
 ) -> Result<DownloadDirStatus, String> {
-    let default_dir = state.paths.default_download_dir();
-    if create_if_missing {
-        std::fs::create_dir_all(&default_dir).map_err(|e| e.to_string())?;
-    }
-    if !default_dir.exists() {
-        return Err(format!(
-            "default folder does not exist: {}",
-            default_dir.to_string_lossy()
-        ));
-    }
-    if !default_dir.is_dir() {
-        return Err(format!(
-            "default path is not a folder: {}",
-            default_dir.to_string_lossy()
-        ));
-    }
-    ensure_media_output_layout(&default_dir)?;
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let default_dir = paths.default_download_dir();
+        if create_if_missing {
+            std::fs::create_dir_all(&default_dir).map_err(|e| e.to_string())?;
+        }
+        if !default_dir.exists() {
+            return Err(format!(
+                "default folder does not exist: {}",
+                default_dir.to_string_lossy()
+            ));
+        }
+        if !default_dir.is_dir() {
+            return Err(format!(
+                "default path is not a folder: {}",
+                default_dir.to_string_lossy()
+            ));
+        }
+        ensure_media_output_layout(&default_dir)?;
 
-    state
-        .paths
-        .clear_download_dir_override()
-        .map_err(|e| e.to_string())?;
-    build_download_dir_status(&state.paths)
+        paths
+            .clear_download_dir_override()
+            .map_err(|e| e.to_string())?;
+        build_download_dir_status(&paths)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn downloads_feature_root_set(
+async fn downloads_feature_root_set(
     state: State<'_, AppState>,
     feature: String,
     path: String,
     create_if_missing: bool,
 ) -> Result<DownloadDirStatus, String> {
-    let feature = feature.trim().to_string();
-    if feature.is_empty() {
-        return Err("feature is empty".to_string());
-    }
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let feature = feature.trim().to_string();
+        if feature.is_empty() {
+            return Err("feature is empty".to_string());
+        }
 
-    let mut dir = std::path::PathBuf::from(path.trim());
-    if dir.as_os_str().is_empty() {
-        return Err("folder path is empty".to_string());
-    }
-    if !dir.is_absolute() {
-        dir = std::env::current_dir()
-            .map_err(|e| e.to_string())?
-            .join(dir);
-    }
+        let mut dir = std::path::PathBuf::from(path.trim());
+        if dir.as_os_str().is_empty() {
+            return Err("folder path is empty".to_string());
+        }
+        if !dir.is_absolute() {
+            dir = std::env::current_dir()
+                .map_err(|e| e.to_string())?
+                .join(dir);
+        }
 
-    if create_if_missing {
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    }
-    if !dir.exists() {
-        return Err(format!("folder does not exist: {}", dir.to_string_lossy()));
-    }
-    if !dir.is_dir() {
-        return Err(format!("path is not a folder: {}", dir.to_string_lossy()));
-    }
+        if create_if_missing {
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        }
+        if !dir.exists() {
+            return Err(format!("folder does not exist: {}", dir.to_string_lossy()));
+        }
+        if !dir.is_dir() {
+            return Err(format!("path is not a folder: {}", dir.to_string_lossy()));
+        }
 
-    let normalized = dir.canonicalize().unwrap_or(dir);
-    let normalized = normalized.to_string_lossy().to_string();
-    config::update_feature_storage_roots_config(&state.paths, |roots| {
-        set_feature_root_override(roots, &feature, Some(normalized.clone()))
-            .map_err(voxvulgi_engine::EngineError::InstallFailed)
+        let normalized = dir.canonicalize().unwrap_or(dir);
+        let normalized = normalized.to_string_lossy().to_string();
+        config::update_feature_storage_roots_config(&paths, |roots| {
+            set_feature_root_override(roots, &feature, Some(normalized.clone()))
+                .map_err(voxvulgi_engine::EngineError::InstallFailed)
+        })
+        .map_err(|e| e.to_string())?;
+        build_download_dir_status(&paths)
     })
-    .map_err(|e| e.to_string())?;
-    build_download_dir_status(&state.paths)
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
-fn downloads_feature_root_use_default(
+async fn downloads_feature_root_use_default(
     state: State<'_, AppState>,
     feature: String,
     create_if_missing: bool,
 ) -> Result<DownloadDirStatus, String> {
-    let feature = feature.trim().to_string();
-    if feature.is_empty() {
-        return Err("feature is empty".to_string());
-    }
-    config::update_feature_storage_roots_config(&state.paths, |roots| {
-        set_feature_root_override(roots, &feature, None)
-            .map_err(voxvulgi_engine::EngineError::InstallFailed)
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let feature = feature.trim().to_string();
+        if feature.is_empty() {
+            return Err("feature is empty".to_string());
+        }
+        config::update_feature_storage_roots_config(&paths, |roots| {
+            set_feature_root_override(roots, &feature, None)
+                .map_err(voxvulgi_engine::EngineError::InstallFailed)
+        })
+        .map_err(|e| e.to_string())?;
+
+        if create_if_missing {
+            let status = build_download_dir_status(&paths)?;
+            let target = status
+                .feature_roots
+                .into_iter()
+                .find(|root| root.key == feature)
+                .ok_or_else(|| format!("unknown storage feature: {feature}"))?;
+            let dir = std::path::PathBuf::from(target.current_dir);
+            std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        }
+
+        build_download_dir_status(&paths)
     })
-    .map_err(|e| e.to_string())?;
-
-    if create_if_missing {
-        let status = build_download_dir_status(&state.paths)?;
-        let target = status
-            .feature_roots
-            .into_iter()
-            .find(|root| root.key == feature)
-            .ok_or_else(|| format!("unknown storage feature: {feature}"))?;
-        let dir = std::path::PathBuf::from(target.current_dir);
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    }
-
-    build_download_dir_status(&state.paths)
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -18449,7 +18515,9 @@ pub fn run() {
                     None,
                     None,
                 );
-                set_startup_phase(&startup, &paths, "offline_bundle", "skipped", None);
+                // Headless inspection suppresses hydration independently of Safe Mode.
+                let skip_state = if cli_agent_headless { "skipped_headless" } else { "skipped" };
+                set_startup_phase(&startup, &paths, "offline_bundle", skip_state, None);
             } else if let Ok(resource_dir) = app.path().resource_dir() {
                 set_startup_hydration_progress(
                     &startup,

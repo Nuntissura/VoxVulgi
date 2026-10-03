@@ -17,9 +17,14 @@ pub enum BoundedPathKind {
     Unreachable,
 }
 
+enum BoundedPathProbeOperation {
+    Kind(mpsc::SyncSender<BoundedPathKind>),
+    FreeSpace(mpsc::SyncSender<Option<u64>>),
+}
+
 struct BoundedPathProbeRequest {
     path: PathBuf,
-    reply: mpsc::SyncSender<BoundedPathKind>,
+    operation: BoundedPathProbeOperation,
     #[cfg(test)]
     artificial_delay: Option<Duration>,
 }
@@ -55,16 +60,23 @@ fn bounded_path_probe_pool() -> &'static mpsc::SyncSender<BoundedPathProbeReques
                         if let Some(delay) = request.artificial_delay {
                             std::thread::sleep(delay);
                         }
-                        let kind = match std::fs::metadata(&request.path) {
-                            Ok(metadata) if metadata.is_dir() => BoundedPathKind::Directory,
-                            Ok(metadata) if metadata.is_file() => BoundedPathKind::File,
-                            Ok(_) => BoundedPathKind::Missing,
-                            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                                BoundedPathKind::Missing
+                        match request.operation {
+                            BoundedPathProbeOperation::Kind(reply) => {
+                                let kind = match std::fs::metadata(&request.path) {
+                                    Ok(metadata) if metadata.is_dir() => BoundedPathKind::Directory,
+                                    Ok(metadata) if metadata.is_file() => BoundedPathKind::File,
+                                    Ok(_) => BoundedPathKind::Missing,
+                                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                                        BoundedPathKind::Missing
+                                    }
+                                    Err(_) => BoundedPathKind::Unreachable,
+                                };
+                                let _ = reply.try_send(kind);
                             }
-                            Err(_) => BoundedPathKind::Unreachable,
-                        };
-                        let _ = request.reply.try_send(kind);
+                            BoundedPathProbeOperation::FreeSpace(reply) => {
+                                let _ = reply.try_send(free_space_available_native(&request.path));
+                            }
+                        }
                     }
                 })
                 .expect("bounded path probe worker must start");
@@ -81,7 +93,7 @@ fn probe_path_bounded_internal(
     let (reply, receiver) = mpsc::sync_channel(1);
     let request = BoundedPathProbeRequest {
         path: path.to_path_buf(),
-        reply,
+        operation: BoundedPathProbeOperation::Kind(reply),
         #[cfg(test)]
         artificial_delay,
     };
@@ -100,6 +112,59 @@ pub fn probe_path_bounded(path: &Path, timeout: Duration) -> BoundedPathKind {
         #[cfg(test)]
         None,
     )
+}
+
+/// Quota-aware bytes available to this caller; errors and unsupported platforms are unknown.
+#[cfg(windows)]
+fn free_space_available_native(path: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let mut wide = path.as_os_str().encode_wide().collect::<Vec<_>>();
+    if wide.is_empty() || wide.contains(&0) {
+        return None;
+    }
+    // UNC directory names require a trailing separator; this also works for local directories.
+    if !matches!(wide.last(), Some(92 | 47)) {
+        wide.push(92);
+    }
+    wide.push(0);
+    let mut available = 0u64;
+    let success = unsafe {
+        GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut())
+    };
+    (success != 0).then_some(available)
+}
+
+#[cfg(not(windows))]
+fn free_space_available_native(_path: &Path) -> Option<u64> {
+    None
+}
+
+/// All roots share one deadline and the existing fixed worker/queue limits.
+pub fn free_space_available_bounded(paths: &[PathBuf], timeout: Duration) -> Vec<Option<u64>> {
+    free_space_available_bounded_internal(paths, timeout, #[cfg(test)] None)
+}
+
+fn free_space_available_bounded_internal(
+    paths: &[PathBuf],
+    timeout: Duration,
+    #[cfg(test)] artificial_delay: Option<Duration>,
+) -> Vec<Option<u64>> {
+    let deadline = std::time::Instant::now() + timeout;
+    let receivers = paths.iter().map(|path| {
+        let (reply, receiver) = mpsc::sync_channel(1);
+        let request = BoundedPathProbeRequest {
+            path: path.clone(),
+            operation: BoundedPathProbeOperation::FreeSpace(reply),
+            #[cfg(test)] artificial_delay,
+        };
+        bounded_path_probe_pool().try_send(request).ok().map(|_| receiver)
+    }).collect::<Vec<_>>();
+    receivers.into_iter().map(|receiver| {
+        receiver.and_then(|receiver| receiver.recv_timeout(
+            deadline.saturating_duration_since(std::time::Instant::now())
+        ).ok().flatten())
+    }).collect()
 }
 
 pub const MANAGED_RUNTIME_SCHEMA_VERSION: u32 = 1;
@@ -1492,6 +1557,32 @@ mod bounded_probe_tests {
     use std::sync::atomic::Ordering;
     use std::time::Instant;
     static PROBE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn free_space_batch_timeout_shares_deadline_and_fixed_probe_pool() {
+        let _serial = PROBE_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = vec![dir.path().to_path_buf(); 8];
+        let started = Instant::now();
+        assert_eq!(free_space_available_bounded_internal(
+            &paths, Duration::from_millis(20), Some(Duration::from_millis(100))
+        ), vec![None; 8]);
+        assert!(started.elapsed() < Duration::from_millis(100), "batch must not wait one timeout per root");
+        assert_eq!(BOUNDED_PATH_PROBE_THREADS_STARTED.load(Ordering::SeqCst), BOUNDED_PATH_PROBE_WORKERS);
+        std::thread::sleep(Duration::from_millis(300));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn free_space_native_reports_local_available_bytes_and_unknown_missing_directory() {
+        let _serial = PROBE_TEST_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = vec![dir.path().to_path_buf(), dir.path().join("missing")];
+        let result = free_space_available_bounded(&paths, Duration::from_secs(1));
+        assert!(result[0].is_some(), "native local volume probe must provide available bytes");
+        assert_eq!(result[1], None, "missing directory must remain unknown, not inherit ancestor capacity");
+        assert_eq!(free_space_available_native(Path::new("invalid\0path")), None);
+    }
 
     #[test]
     fn stalled_path_probes_are_latency_bounded_and_never_grow_the_worker_pool() {

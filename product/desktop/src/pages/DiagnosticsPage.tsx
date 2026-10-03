@@ -633,6 +633,7 @@ type StartupStatus = {
     | "running"
     | "ready"
     | "skipped_safe_mode"
+    | "skipped_headless"
     | "error";
   offline_bundle_started_at_ms: number | null;
   offline_bundle_finished_at_ms: number | null;
@@ -1868,8 +1869,10 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         state:
           startup?.offline_bundle_state === "ready"
             ? "included resources installed into app data"
-            : startup?.offline_bundle_state === "skipped_safe_mode"
-              ? "skipped because Safe Mode is enabled"
+            : startup?.offline_bundle_state === "skipped_headless"
+              ? "skipped for headless inspection"
+              : startup?.offline_bundle_state === "skipped_safe_mode"
+                ? "skipped because Safe Mode was enabled at startup"
               : startup?.offline_bundle_state === "error"
                 ? "setup failed"
                 : startup?.offline_bundle_state ?? "not started",

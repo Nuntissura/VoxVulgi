@@ -5,6 +5,7 @@ export type DownloadDirStatus = {
   current_dir: string;
   default_dir: string;
   exists: boolean;
+  free_space_bytes?: number | null;
   using_default: boolean;
   feature_roots: FeatureRootStatus[];
 };
@@ -18,6 +19,7 @@ export type FeatureRootStatus = {
   default_dir: string;
   override_dir: string | null;
   exists: boolean;
+  free_space_bytes?: number | null;
 };
 
 type DownloadDirSnapshot = {

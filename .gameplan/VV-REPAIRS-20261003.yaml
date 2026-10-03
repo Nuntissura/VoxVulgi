@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: batch
 assignment: VV-REPAIRS-20261003
 parent: null
-generation: 11
+generation: 14
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -35,3 +35,6 @@ steps:
 - {id: GP-019, role: any, at: before_round, do: verify fixture extracts qualification function without indentation, check: {type: file, path: offline-installer-runtime/tests/runtimeProbeDeadline.test.ts, contains: indexOf("function Test-PythonRuntime(")}, source: 'failure: fixture indentation assumption extracted empty function', state: active}
 - {id: GP-020, role: any, at: before_round, do: require review findings closed and agent source frozen before build, check: {type: confirm}, source: Owned candidate build interrupted after late shell fidelity finding, state: active}
 - {id: GP-021, role: any, at: before_round, do: require inherited pipes explicit in descendant fixture, check: {type: file, path: offline-installer-runtime/tests/runtimeProbeDeadline.test.ts, contains: 'stdout=sys.stdout,stderr=sys.stderr'}, source: 'failure: Windows subprocess default handles did not preserve redirected pipes', state: active}
+- {id: GP-022, role: any, at: before_round, do: verify installer guard targets installed executable path, check: {type: confirm}, source: 'failure: isolated agent desktop process falsely blocked core update', state: active}
+- {id: GP-023, role: any, at: before_round, do: verify isolated headless process alive before each bridge action, check: {type: confirm}, source: 'infra: isolated PID186868 exited with stale bridge sidecars', state: active}
+- {id: GP-024, role: any, at: before_round, do: require production migration uses background safe-mode launch, check: {type: confirm}, source: 'failure: current headless mode refuses production root', state: active}

@@ -20,7 +20,7 @@ In scope:
   - Each row has a "Change" button for the override.
 - Keep the base storage root card as the primary configuration point.
 - Improve YouTube auth UI:
-  - Add radio buttons: "No authentication" / "Use browser profile cookies" / "Paste exported cookies"
+  - Use the operator-approved current YouTube sign-in wizard: explicit browser choice, three-step sign-in/verification guidance, and advanced manual cookie fallback (WP-0266/WP-0267; replacement approved 2026-10-03).
   - Add placeholder text explaining cookie format
   - Add brief help text or link explaining how to export cookies from a browser
 - Show free disk space next to the effective storage path.
@@ -31,7 +31,7 @@ Out of scope:
 
 ## Acceptance criteria
 - Feature roots are shown in a single table instead of 4 separate cards.
-- YouTube auth has radio-button selection with help text.
+- YouTube auth uses the current WP-0266/WP-0267 browser-choice and three-step sign-in wizard with help/recovery guidance and advanced manual cookie fallback, formally replacing the original three radio buttons under the operator decision of 2026-10-03.
 - Free disk space is visible next to storage paths.
 - `npm run build` passes.
 
@@ -42,3 +42,11 @@ Out of scope:
 ## Status reconciliation (2026-09-30)
 
 - 2026-09-30 status reconciliation: NEEDS_VALIDATION. WP-0301 explicitly preserves Options consolidation and has packaged proof, but no WP-0169 proof bundle or complete original-criterion mapping exists. Remaining: Reconcile original feature-root table, authentication guidance/selection, free-disk-space display and override persistence against current Options; record exact missing behavior or qualifying successor proof. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.
+
+## Operator-authorized authentication replacement (2026-10-03)
+
+- Exact operator decision: "Use the current wizard as the formal replacement".
+- This decision replaces only WP-0169's original authentication radio controls/acceptance with the current approved WP-0266/WP-0267 browser-choice, three-step sign-in/verification/recovery wizard and advanced manual cookie fallback. Root consolidation, free-space display, persistence and build requirements remain unchanged.
+- Preserved original scope: Add radio buttons: "No authentication" / "Use browser profile cookies" / "Paste exported cookies".
+- Preserved original acceptance: YouTube auth has radio-button selection with help text.
+- Original intent is retained: make authentication selection and instructions understandable. Final packaged proof must inspect browser choice, sign-in guidance and manual fallback; the historical radio layout is no longer the current acceptance requirement.
