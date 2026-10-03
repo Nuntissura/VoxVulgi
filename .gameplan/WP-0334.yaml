@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-0334
 parent: null
-generation: 16
+generation: 17
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -39,3 +39,4 @@ steps:
 - {id: GP-023, role: any, at: before_round, do: require selected audio mapping and cardinality stamped before strict MKV publication, check: {type: confirm}, source: 'exact video failed: selected ko audio inherited eng container tag', state: active}
 - {id: GP-024, role: any, at: before_round, do: require owning Python tests construct actual postprocessor with initialized progress hooks, check: {type: confirm}, source: 'REDf395400: object.__new__ skipped yt-dlp progress hook initialization', state: active}
 - {id: GP-025, role: any, at: before_round, do: require native process inventory fail closed on CIM failure or stderr before silent installer, check: {type: confirm}, source: 'HIGH native helper: nonterminating CIM errors could mimic empty process set', state: active}
+- {id: GP-026, role: any, at: before_round, do: require nested Python and SQL proof code saved in script rather than shell-escaped inline code, check: {type: confirm}, source: 'infra: PowerShell nested quotes truncated final invariant Python expression', state: active}

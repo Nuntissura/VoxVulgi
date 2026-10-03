@@ -5,7 +5,7 @@
   "id": "WP-0334",
   "version": 1,
   "title": "Selected single or batch start",
-  "status": "IN_PROGRESS",
+  "status": "DONE",
   "board": "../TASK_BOARD.md",
   "refinement": "WP-0334_SELECTED_SINGLE_OR_BATCH_START_v1_REFINEMENT.md",
   "operator_request": "Prompt Download only this video/single batch or Continue all and place the single/batch at the top of the queue. Download and test https://www.youtube.com/watch?v=3Q61HdKKJeo.",
@@ -17,7 +17,16 @@
     "Absolute Safe Mode barrier; explicit Pause all revokes selected permissions; restart preserves paused-rest intent and interrupted original attempt",
     "Tauri and authenticated actor/operation-ID bridge expose the same product behavior, canonical selection and truthful receipts"
   ],
-  "files": ["product/engine/src/jobs.rs", "product/engine/src/db.rs", "product/desktop/src/pages/LibraryPage.tsx", "product/desktop/src-tauri/src/lib.rs", "product/desktop/src-tauri/src/agent_control.rs", "product/desktop/src/lib/agentManual.ts", "governance/spec/PRODUCT_SPEC.md", "governance/spec/TECHNICAL_DESIGN.md"],
+  "files": [
+    "product/engine/src/jobs.rs",
+    "product/engine/src/db.rs",
+    "product/desktop/src/pages/LibraryPage.tsx",
+    "product/desktop/src-tauri/src/lib.rs",
+    "product/desktop/src-tauri/src/agent_control.rs",
+    "product/desktop/src/lib/agentManual.ts",
+    "governance/spec/PRODUCT_SPEC.md",
+    "governance/spec/TECHNICAL_DESIGN.md"
+  ],
   "acceptance": [
     "Single and multi-link submissions offer the two requested decisions with correct count and rest-paused/resumed wording; Cancel authorizes no execution",
     "Selection is applied before LIMIT and rechecked at atomic claim; only mode never dispatches unrelated queued jobs, including after selected completion/restart",
@@ -28,11 +37,47 @@
     "Owning tests, retained-version core build and quiet packaged semantic UI/command proof include independent canonical mixed-queue reads",
     "Requested exact YouTube case reaches verified MKV video/audio/available subtitles or records its concrete external blocker; no false DONE"
   ],
-  "verification": ["Root coordinates one canonical cargo_cache and one compatible test/build batch", "Engine selection/priority/pause/claim/Safe/restart tests; bridge validation/receipt and frontend decision/manual/semantic tests", "Disposable packaged headless mixed queue: single/batch decisions, receipts, independent SQLite reads, inspected snapshots", "Exact requested video download and ffprobe; WP-0332 retains separate shutdown proof"],
-  "non_goals": ["Offline ISO packaging", "Version bump or changelog edits", "Deleting user media/subscriptions/history", "Native foreground input or arbitrary WebView scripts"],
-  "recorded_findings": [
-    {"id": "WP0334-F01", "severity": "HIGH", "status": "OPEN", "failure": "Policy prefetch captures params but not attempt; concurrent same-ID retry with unchanged params can authorize its changed attempt", "remediation": "Capture attempt and params before policy resolution, compare both atomically before publishing any grants, test changed-attempt refusal"},
-    {"id": "WP0334-F02", "severity": "HIGH", "status": "OPEN", "failure": "An older prefetched scheduler candidate can claim after Continue all publishes selected priority because queue pause is false", "remediation": "Recheck pending selected priority at atomic claim, defer stale unselected candidate without rewriting original ordering, test claim after priority publication"}
+  "verification": [
+    "Root coordinates one canonical cargo_cache and one compatible test/build batch",
+    "Engine selection/priority/pause/claim/Safe/restart tests; bridge validation/receipt and frontend decision/manual/semantic tests",
+    "Disposable packaged headless mixed queue: single/batch decisions, receipts, independent SQLite reads, inspected snapshots",
+    "Exact requested video download and ffprobe; WP-0332 retains separate shutdown proof"
   ],
-  "status_updates": [{"date": "2026-10-03", "state": "IN_PROGRESS", "note": "Primary-source patterns and current code inspected; operator clarified two-choice prompt before implementation. Candidate73ae88d pushed; two independent race findings require remediation before validation."}]
+  "non_goals": [
+    "Offline ISO packaging",
+    "Version bump or changelog edits",
+    "Deleting user media/subscriptions/history",
+    "Native foreground input or arbitrary WebView scripts"
+  ],
+  "recorded_findings": [
+    {
+      "id": "WP0334-F01",
+      "severity": "HIGH",
+      "status": "RESOLVED",
+      "failure": "Policy prefetch captures params but not attempt; concurrent same-ID retry with unchanged params can authorize its changed attempt",
+      "remediation": "Capture attempt and params before policy resolution, compare both atomically before publishing any grants, test changed-attempt refusal",
+      "proof": "engine_selected_dc4aec1.log; independent_selected_review.json"
+    },
+    {
+      "id": "WP0334-F02",
+      "severity": "HIGH",
+      "status": "RESOLVED",
+      "failure": "An older prefetched scheduler candidate can claim after Continue all publishes selected priority because queue pause is false",
+      "remediation": "Recheck pending selected priority at atomic claim, defer stale unselected candidate without rewriting original ordering, test claim after priority publication",
+      "proof": "engine_selected_dc4aec1.log; independent_selected_review.json"
+    }
+  ],
+  "status_updates": [
+    {
+      "date": "2026-10-03",
+      "state": "IN_PROGRESS",
+      "note": "Primary-source patterns and current code inspected; operator clarified two-choice prompt before implementation. Candidate73ae88d pushed; two independent race findings require remediation before validation."
+    },
+    {
+      "date": "2026-10-03",
+      "state": "DONE",
+      "note": "Exact original attempt2 succeeded with verified Korean-audio MKV/subtitles; final retained-version installer/native update and full quiet prompt/canonical queue proof passed. See proof bundle; unrelated packets remain separate."
+    }
+  ],
+  "proof": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0334/20261003/summary.md"
 }
