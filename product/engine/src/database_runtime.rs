@@ -301,6 +301,12 @@ impl RuntimeInner {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .active
             .insert(operation_id, operation);
+        if context.request_id.is_some() {
+            crate::diagnostics::emit_trace_event(&self.paths, "database_request_started", "info", serde_json::json!({
+                "operation_id": operation_id, "request_id": context.request_id,
+                "operation": context.operation, "mode": mode, "enqueued_at_ms": enqueued_at_ms,
+            }));
+        }
         (operation_id, Instant::now())
     }
 
@@ -367,6 +373,24 @@ impl RuntimeInner {
             .admitted_at_ms
             .map(|_| elapsed_ms.saturating_sub(operation.queue_wait_ms.unwrap_or(0)));
         let outcome: String = outcome.into();
+        let request_trace = operation.request_id.as_ref().map(|_| serde_json::json!({
+            "operation_id": operation_id, "request_id": operation.request_id,
+            "operation": operation.operation, "mode": operation.mode,
+            "enqueued_at_ms": operation.enqueued_at_ms, "admitted_at_ms": operation.admitted_at_ms,
+            "finished_at_ms": finished_at_ms, "queue_wait_ms": operation.queue_wait_ms,
+            "execution_ms": execution_ms, "phase_ms": operation.phase_ms, "outcome": outcome,
+        }));
+        let admission_failure = outcome.contains("admission_timeout").then(|| serde_json::json!({
+            "operation_id": operation_id, "operation": operation.operation, "mode": operation.mode,
+            "outcome": outcome, "elapsed_ms": elapsed_ms,
+            "admitted_candidates": registry.active.values().filter(|candidate| candidate.admitted_at_ms.is_some())
+                .take(16).map(|candidate| serde_json::json!({
+                    "operation_id": candidate.operation_id, "operation": candidate.operation,
+                    "mode": candidate.mode, "admitted_at_ms": candidate.admitted_at_ms,
+                    "queue_wait_ms": candidate.queue_wait_ms, "phase_ms": candidate.phase_ms,
+                    "execution_elapsed_ms": candidate.admitted_at_ms.map(|at| finished_at_ms.saturating_sub(at)),
+                })).collect::<Vec<_>>(),
+        }));
         let heavy_read = operation
             .file_bytes_read
             .filter(|bytes| *bytes >= HEAVY_READ_TRACE_BYTES)
@@ -407,6 +431,12 @@ impl RuntimeInner {
             registry.receipts.pop_front();
         }
         drop(registry);
+        if let Some(details) = request_trace {
+            crate::diagnostics::emit_trace_event(&self.paths, "database_request_completed", "info", details);
+        }
+        if let Some(details) = admission_failure {
+            crate::diagnostics::emit_trace_event(&self.paths, "database_admission_failure", "warn", details);
+        }
         if let Some(details) = heavy_read {
             crate::diagnostics::emit_trace_event(
                 &self.paths,
@@ -1087,7 +1117,12 @@ pub struct DatabaseReadContext {
 }
 
 impl DatabaseReadContext {
-    fn mark_outcome(&mut self, outcome: &'static str) {
+    pub fn record_phase(&self, name: &str, duration: Duration) {
+        if let Some(permit) = self.permit.as_ref() {
+            permit.runtime.operation_metadata(permit.operation_id, Some((name, duration)), None, None);
+        }
+    }
+    pub(crate) fn mark_outcome(&mut self, outcome: &'static str) {
         if let Some(permit) = self.permit.as_mut() {
             permit.outcome = outcome;
         }

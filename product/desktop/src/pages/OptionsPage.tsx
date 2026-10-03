@@ -4509,6 +4509,9 @@ export function OptionsPage() {
                 <input
                   id="options-setting-media-cleanup-root"
                   data-testid="options-setting-media-library.cleanup-root"
+                  data-agent-action-id="media-library.cleanup-root"
+                  data-agent-effect-class="reversible_state_change"
+                  data-agent-input-kind="text"
                   value={cleanupRoot}
                   disabled={cleanupBusy || !localPreferenceBaselines["voxvulgi.v1.library.cleanup_root"].available}
                   onChange={(event) => setCleanupRoot(event.currentTarget.value)}
@@ -4527,6 +4530,9 @@ export function OptionsPage() {
                 <input
                   id="options-setting-media-cleanup-quarantine-root"
                   data-testid="options-setting-media-library.cleanup-quarantine-root"
+                  data-agent-action-id="media-library.cleanup-quarantine-root"
+                  data-agent-effect-class="reversible_state_change"
+                  data-agent-input-kind="text"
                   value={cleanupQuarantineRoot}
                   disabled={cleanupBusy || !localPreferenceBaselines["voxvulgi.v1.library.cleanup_quarantine_root"].available}
                   onChange={(event) => setCleanupQuarantineRoot(event.currentTarget.value)}
@@ -4548,6 +4554,8 @@ export function OptionsPage() {
                 type="button"
                 disabled={cleanupBusy}
                 onClick={startCleanupInventory}
+                data-agent-action-id="media-library.cleanup-inventory-start"
+                data-agent-effect-class="reversible_state_change"
               >
                 Start new read-only inventory
               </button>
@@ -4559,6 +4567,8 @@ export function OptionsPage() {
                   !["inventory", "hashing"].includes(cleanupRun.stage)
                 }
                 onClick={continueCleanupRun}
+                data-agent-action-id="media-library.cleanup-inventory-continue"
+                data-agent-effect-class="reversible_state_change"
               >
                 Continue one bounded step
               </button>

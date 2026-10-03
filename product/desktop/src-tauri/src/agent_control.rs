@@ -215,12 +215,27 @@ fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, St
             Ok(json!({"job_id":row.id,"tail":lines,"truncated":start>0,"max_bytes":65536}))
         }
         "jobs.overview" => {
-            let snapshot = jobs::jobs_overview_snapshot(paths, request["view"].as_str(), request["track"].as_str()).map_err(|e|e.to_string())?;
-            let rows = snapshot.jobs.clone().into_iter().map(safe_job).collect::<Vec<_>>();
-            let mut value = serde_json::to_value(snapshot).map_err(|e|e.to_string())?;
-            value["jobs"] = json!(rows);
-            value["scope"] = json!("canonical_counts_with_bounded_previews");
-            Ok(value)
+            let request_id = uuid::Uuid::new_v4().to_string();
+            let started_at_ms = now_epoch_ms_i64();
+            let started = std::time::Instant::now();
+            diagnostics::emit_trace_event(paths, "agent_read_command_started", "info", json!({
+                "request_id": request_id, "command": "jobs.overview", "started_at_ms": started_at_ms,
+            }));
+            let result = (|| {
+                let snapshot = jobs::jobs_overview_snapshot_with_context(paths, request["view"].as_str(), request["track"].as_str(),
+                    Some(db::DatabaseOperationContext::new("agent_bridge", "jobs.overview").with_request_id(&request_id))).map_err(|e|e.to_string())?;
+                let rows = snapshot.jobs.clone().into_iter().map(safe_job).collect::<Vec<_>>();
+                let mut value = serde_json::to_value(snapshot).map_err(|e|e.to_string())?;
+                value["jobs"] = json!(rows);
+                value["scope"] = json!("canonical_counts_with_bounded_previews");
+                Ok::<_, String>(value)
+            })();
+            diagnostics::emit_trace_event(paths, "agent_read_command_completed", "info", json!({
+                "request_id": request_id, "command": "jobs.overview", "started_at_ms": started_at_ms,
+                "elapsed_ms": started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                "outcome": if result.is_ok() { "success" } else { "error" },
+            }));
+            result
         }
         "downloads.presets" => serde_json::to_value(config::load_download_presets_config(paths).map_err(|e|e.to_string())?).map_err(|e|e.to_string()),
         "downloads.pacing" => {

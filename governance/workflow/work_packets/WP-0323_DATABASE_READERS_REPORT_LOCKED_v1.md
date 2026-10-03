@@ -1,7 +1,7 @@
 ---
 file_id: WP-0323
 file_kind: work_packet
-updated_at: 2026-10-02
+updated_at: 2026-10-03
 ---
 
 # Work Packet: WP-0323 — Readers intermittently fail with "database is locked"
@@ -77,3 +77,10 @@ Operator direction 2026-09-24: VoxVulgi cargo builds slow down the higher-priori
 - Independent canonical read-only reconciliation of all 194 active subscription aggregates equals both the minimal canonical projection and the guarded indexed query. Whole-set canonical aggregate took 3644 ms; a single warm canonical scan took43 ms. On the canonical-field projection the indexed per-subscription probe took0.24 ms, and EXPLAIN searches subscription expression plus status and batch instead of all active payloads. Projection timing is not a full live latency claim.
 - Add startup-only schema60 partial expression index for direct jobs, guarding malformed JSON with CASE/json_valid. Event counts/current job use that exact expression/index; writer reservation, status predicates, NULL subscription semantics, batch totals, admission limits and UI behavior remain unchanged. Invalid JSON rows cannot abort index creation. Original lock root-cause and30-minute/export gates remain open; this addresses an observed expensive writer query, not every SQLite lock.
 - Root coordinates focused migration/rollup/snapshot/IO-budget tests and packaged database-first startup proof. Evidence: build_target/tool_artifacts/wp_runs/WP-0323/20261003/subscription_index_probe.json. Full1.28 GB backup was unsuitable under load and stopped at its90-second bound; proof uses read-only canonical reconciliation and a minimal disposable canonical-field projection instead.
+
+### 2026-10-03 production migration and failed live acceptance
+
+- Closed canonical schema59 backup passes quick_check; all table counts match. Supported installed background Safe Mode startup migrated to schema60. Independent complete-row hashes, counts and columns for all14 protected library/subscription/playlist/localization tables are identical before/after. Proof: `WP-0323/20261003/protected_comparison.json`.
+- First Export now action produced316 subscriptions; independent canonical subscription/group comparison passes. Original single job `c3914f05-29b8-4d2c-a1fc-f47f0da39fb8` independently reads succeeded; the inspected Single videos surface shows classification up to date.
+- Normal production background PID238832 observed for1800.001 seconds,59 samples. The acceptance run FAILED: one jobs.overview socket timeout at10 seconds and six actual writer_admission_timeout events in the complete canonical trace. The original monitor searched the incorrect spelling write_admission_timeout, so its empty database_failure_events claim is invalid. No read_admission_timeout/SQLITE_BUSY/database-is-locked was found in the independent complete scan; this does not establish root-cause closure or a clean live gate.
+- A29,336ms provider_metadata batch writer overlaps the jobs read timeout, but correlation does not prove causation. Existing batch atomicity remains required. Add request-bound admission/open/query timing and bounded admitted-candidate attribution before selecting remediation. Original H2-H4 and before/after own-runtime reproduction remain open; WP stays IN_PROGRESS.

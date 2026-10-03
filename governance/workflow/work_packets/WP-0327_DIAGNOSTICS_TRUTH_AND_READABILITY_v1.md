@@ -9,7 +9,7 @@ updated_at: 2026-10-03
 ## Metadata
 - ID: WP-0327
 - Owner: Codex diagnostics_repair
-- Status: IN_PROGRESS
+- Status: DONE
 - Created: 2026-10-03
 - Refinement: WP-0327_DIAGNOSTICS_TRUTH_AND_READABILITY_v1_REFINEMENT.md
 - Board: ../TASK_BOARD.md
@@ -34,3 +34,8 @@ Root bundles node --import tsx --test tests/diagnosticsResults.test.ts with exis
 
 ## Status updates
 - 2026-10-03: Created from inspected live v0.1.205 defects and source evidence; implementation in parallel with database, runtime and quiet-launch remediation. No app processes stopped.
+
+## Final proof reconciliation (2026-10-03)
+
+- DONE: Six acceptance criteria mapped: independent partial/shared-flight and unknown-state tests, truthful terminal/history/readability boundary, final corrected headless reason, final type/build checks. Prior unchanged Diagnostics inputs reused explicitly; no claim of all sections/failure injections.
+- Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0327/20261003_final_9f8a137/summary.md`; final automated/build observation: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0331/20261003/summary.md`.

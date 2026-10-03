@@ -3,7 +3,7 @@
 ## Metadata
 - ID: WP-0169
 - Owner: Codex
-- Status: NEEDS_VALIDATION
+- Status: DONE
 - Created: 2026-04-08
 - Target milestone: UX Polish
 
@@ -50,3 +50,8 @@ Out of scope:
 - Preserved original scope: Add radio buttons: "No authentication" / "Use browser profile cookies" / "Paste exported cookies".
 - Preserved original acceptance: YouTube auth has radio-button selection with help text.
 - Original intent is retained: make authentication selection and instructions understandable. Final packaged proof must inspect browser choice, sign-in guidance and manual fallback; the historical radio layout is no longer the current acceptance requirement.
+
+## Final proof reconciliation (2026-10-03)
+
+- DONE: Final 9f8a137 packaged proof passed: five-root single table, real native capacity independently compared, audited reset persisted across page switch and owned restart, approved current wizard/manual fallback inspected. Root reviewed summary/images; current acceptance complete. Historical radio criterion and dated replacement preserved.
+- Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0169/20261003_final_9f8a137/summary.md`; final automated/build observation: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0331/20261003/summary.md`.

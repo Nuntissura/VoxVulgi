@@ -5542,6 +5542,15 @@ pub fn jobs_overview_snapshot(
     requested_view: Option<&str>,
     requested_track: Option<&str>,
 ) -> Result<JobsOverviewSnapshot> {
+    jobs_overview_snapshot_with_context(paths, requested_view, requested_track, None)
+}
+
+pub fn jobs_overview_snapshot_with_context(
+    paths: &AppPaths,
+    requested_view: Option<&str>,
+    requested_track: Option<&str>,
+    context: Option<db::DatabaseOperationContext>,
+) -> Result<JobsOverviewSnapshot> {
     const RUNNING_PREVIEW_LIMIT: usize = 100;
     const QUEUED_PREVIEW_LIMIT: usize = 200;
     const ATTENTION_PREVIEW_LIMIT: usize = 200;
@@ -5566,191 +5575,202 @@ pub fn jobs_overview_snapshot(
         }
     };
 
-    let conn = db::open_readonly(paths)?;
-    let mut jobs = Vec::with_capacity(
-        RUNNING_PREVIEW_LIMIT
-            + QUEUED_PREVIEW_LIMIT
-            + ATTENTION_PREVIEW_LIMIT
-            + HISTORY_PREVIEW_LIMIT,
-    );
-    let mut seen = HashSet::new();
-
-    let mut append = |rows: Vec<JobRow>| {
-        for row in rows {
-            if seen.insert(row.id.clone()) {
-                jobs.push(row);
-            }
-        }
+    let mut conn = match context {
+        Some(context) => db::AppDatabase::for_paths(paths)?.read_context(context)?,
+        None => db::open_readonly(paths)?,
     };
+    let query_started = std::time::Instant::now();
+    let result = (|| {
+        let mut jobs = Vec::with_capacity(
+            RUNNING_PREVIEW_LIMIT
+                + QUEUED_PREVIEW_LIMIT
+                + ATTENTION_PREVIEW_LIMIT
+                + HISTORY_PREVIEW_LIMIT,
+        );
+        let mut seen = HashSet::new();
 
-    let query_status = |status: JobStatus, limit: usize| -> Result<Vec<JobRow>> {
-        let base_select = r#"
-SELECT
-  id,
-  item_id,
-  batch_id,
-  type,
-  status,
-  progress,
-  error,
-  created_at_ms,
-  started_at_ms,
-  finished_at_ms,
-  logs_path,
-  params_json,
-  target_title,
-  retry_of_job_id,
-  retry_replacement_job_id,
-  track,
-  attempt_no
-FROM job
-"#;
-        let rows = match selected_track.as_deref() {
-            None => {
-                let mut stmt = conn.prepare(&format!(
-                    "{base_select} WHERE status=?1 ORDER BY created_at_ms DESC LIMIT ?2"
-                ))?;
-                let rows = stmt
-                    .query_map(
-                        params![status.as_str(), limit as i64],
-                        job_row_from_query_row,
-                    )?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                rows
-            }
-            Some("unclassified") => {
-                let mut stmt = conn.prepare(&format!(
-                    "{base_select} WHERE status=?1 AND (track IS NULL OR track='' OR track NOT IN ('youtube_single','youtube_recurring','instagram','other_video','image_archive','localization')) ORDER BY created_at_ms DESC LIMIT ?2"
-                ))?;
-                let rows = stmt
-                    .query_map(
-                        params![status.as_str(), limit as i64],
-                        job_row_from_query_row,
-                    )?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                rows
-            }
-            Some(track) => {
-                let mut stmt = conn.prepare(&format!(
-                    "{base_select} WHERE track=?1 AND status=?2 ORDER BY created_at_ms DESC LIMIT ?3"
-                ))?;
-                let rows = stmt
-                    .query_map(
-                        params![track, status.as_str(), limit as i64],
-                        job_row_from_query_row,
-                    )?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                rows
+        let mut append = |rows: Vec<JobRow>| {
+            for row in rows {
+                if seen.insert(row.id.clone()) {
+                    jobs.push(row);
+                }
             }
         };
-        Ok(rows)
-    };
 
-    match preview_view {
-        "attention" => append(query_status(JobStatus::Failed, ATTENTION_PREVIEW_LIMIT)?),
-        "history" => {
-            append(query_status(JobStatus::Succeeded, HISTORY_PREVIEW_LIMIT)?);
-            append(query_status(JobStatus::Failed, HISTORY_PREVIEW_LIMIT)?);
-            append(query_status(JobStatus::Canceled, HISTORY_PREVIEW_LIMIT)?);
+        let query_status = |status: JobStatus, limit: usize| -> Result<Vec<JobRow>> {
+            let base_select = r#"
+    SELECT
+      id,
+      item_id,
+      batch_id,
+      type,
+      status,
+      progress,
+      error,
+      created_at_ms,
+      started_at_ms,
+      finished_at_ms,
+      logs_path,
+      params_json,
+      target_title,
+      retry_of_job_id,
+      retry_replacement_job_id,
+      track,
+      attempt_no
+    FROM job
+    "#;
+            let rows = match selected_track.as_deref() {
+                None => {
+                    let mut stmt = conn.prepare(&format!(
+                        "{base_select} WHERE status=?1 ORDER BY created_at_ms DESC LIMIT ?2"
+                    ))?;
+                    let rows = stmt
+                        .query_map(
+                            params![status.as_str(), limit as i64],
+                            job_row_from_query_row,
+                        )?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    rows
+                }
+                Some("unclassified") => {
+                    let mut stmt = conn.prepare(&format!(
+                        "{base_select} WHERE status=?1 AND (track IS NULL OR track='' OR track NOT IN ('youtube_single','youtube_recurring','instagram','other_video','image_archive','localization')) ORDER BY created_at_ms DESC LIMIT ?2"
+                    ))?;
+                    let rows = stmt
+                        .query_map(
+                            params![status.as_str(), limit as i64],
+                            job_row_from_query_row,
+                        )?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    rows
+                }
+                Some(track) => {
+                    let mut stmt = conn.prepare(&format!(
+                        "{base_select} WHERE track=?1 AND status=?2 ORDER BY created_at_ms DESC LIMIT ?3"
+                    ))?;
+                    let rows = stmt
+                        .query_map(
+                            params![track, status.as_str(), limit as i64],
+                            job_row_from_query_row,
+                        )?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    rows
+                }
+            };
+            Ok(rows)
+        };
+
+        match preview_view {
+            "attention" => append(query_status(JobStatus::Failed, ATTENTION_PREVIEW_LIMIT)?),
+            "history" => {
+                append(query_status(JobStatus::Succeeded, HISTORY_PREVIEW_LIMIT)?);
+                append(query_status(JobStatus::Failed, HISTORY_PREVIEW_LIMIT)?);
+                append(query_status(JobStatus::Canceled, HISTORY_PREVIEW_LIMIT)?);
+            }
+            _ => {
+                append(query_status(JobStatus::Running, RUNNING_PREVIEW_LIMIT)?);
+                append(query_status(JobStatus::Queued, QUEUED_PREVIEW_LIMIT)?);
+            }
         }
-        _ => {
-            append(query_status(JobStatus::Running, RUNNING_PREVIEW_LIMIT)?);
-            append(query_status(JobStatus::Queued, QUEUED_PREVIEW_LIMIT)?);
-        }
-    }
 
-    jobs.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
+        jobs.sort_by(|a, b| b.created_at_ms.cmp(&a.created_at_ms));
 
-    let counts = conn.query_row(
-        r#"
-SELECT
-  (SELECT COUNT(*) FROM job WHERE status='queued'),
-  (SELECT COUNT(*) FROM job WHERE status='running'),
-  (SELECT COUNT(*) FROM job WHERE status='succeeded'),
-  (SELECT COUNT(*) FROM job WHERE status='failed'),
-  (SELECT COUNT(*) FROM job WHERE status='canceled')
-"#,
-        [],
-        |row| {
-            Ok(JobsOverviewCounts {
-                queued: row.get::<_, i64>(0)? as usize,
-                running: row.get::<_, i64>(1)? as usize,
-                succeeded: row.get::<_, i64>(2)? as usize,
-                failed: row.get::<_, i64>(3)? as usize,
-                canceled: row.get::<_, i64>(4)? as usize,
-                total: 0,
-            })
-        },
-    )?;
-    let counts = JobsOverviewCounts {
-        total: counts.queued + counts.running + counts.succeeded + counts.failed + counts.canceled,
-        ..counts
-    };
-
-    let selected_counts = match selected_track.as_deref() {
-        None => counts.clone(),
-        Some("unclassified") => conn.query_row(
+        let counts = conn.query_row(
             r#"
-SELECT
-  SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END),
-  SUM(CASE WHEN status='running' THEN 1 ELSE 0 END),
-  SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END),
-  SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),
-  SUM(CASE WHEN status='canceled' THEN 1 ELSE 0 END),
-  COUNT(*)
-FROM job
-WHERE track IS NULL OR track='' OR track NOT IN ('youtube_single','youtube_recurring','instagram','other_video','image_archive','localization')
-"#,
+    SELECT
+      (SELECT COUNT(*) FROM job WHERE status='queued'),
+      (SELECT COUNT(*) FROM job WHERE status='running'),
+      (SELECT COUNT(*) FROM job WHERE status='succeeded'),
+      (SELECT COUNT(*) FROM job WHERE status='failed'),
+      (SELECT COUNT(*) FROM job WHERE status='canceled')
+    "#,
             [],
             |row| {
                 Ok(JobsOverviewCounts {
-                    queued: row.get::<_, Option<i64>>(0)?.unwrap_or(0) as usize,
-                    running: row.get::<_, Option<i64>>(1)?.unwrap_or(0) as usize,
-                    succeeded: row.get::<_, Option<i64>>(2)?.unwrap_or(0) as usize,
-                    failed: row.get::<_, Option<i64>>(3)?.unwrap_or(0) as usize,
-                    canceled: row.get::<_, Option<i64>>(4)?.unwrap_or(0) as usize,
-                    total: row.get::<_, i64>(5)? as usize,
+                    queued: row.get::<_, i64>(0)? as usize,
+                    running: row.get::<_, i64>(1)? as usize,
+                    succeeded: row.get::<_, i64>(2)? as usize,
+                    failed: row.get::<_, i64>(3)? as usize,
+                    canceled: row.get::<_, i64>(4)? as usize,
+                    total: 0,
                 })
             },
-        )?,
-        Some(track) => conn.query_row(
-            r#"
-SELECT
-  SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END),
-  SUM(CASE WHEN status='running' THEN 1 ELSE 0 END),
-  SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END),
-  SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),
-  SUM(CASE WHEN status='canceled' THEN 1 ELSE 0 END),
-  COUNT(*)
-FROM job
-WHERE track=?1
-"#,
-            [track],
-            |row| {
-                Ok(JobsOverviewCounts {
-                    queued: row.get::<_, Option<i64>>(0)?.unwrap_or(0) as usize,
-                    running: row.get::<_, Option<i64>>(1)?.unwrap_or(0) as usize,
-                    succeeded: row.get::<_, Option<i64>>(2)?.unwrap_or(0) as usize,
-                    failed: row.get::<_, Option<i64>>(3)?.unwrap_or(0) as usize,
-                    canceled: row.get::<_, Option<i64>>(4)?.unwrap_or(0) as usize,
-                    total: row.get::<_, i64>(5)? as usize,
-                })
-            },
-        )?,
-    };
+        )?;
+        let counts = JobsOverviewCounts {
+            total: counts.queued + counts.running + counts.succeeded + counts.failed + counts.canceled,
+            ..counts
+        };
 
-    Ok(JobsOverviewSnapshot {
-        jobs,
-        counts,
-        selected_counts,
-        generated_at_ms: now_ms(),
-        preview_view: preview_view.to_string(),
-        selected_track,
-        running_preview_limit: RUNNING_PREVIEW_LIMIT,
-        queued_preview_limit: QUEUED_PREVIEW_LIMIT,
-        attention_preview_limit: ATTENTION_PREVIEW_LIMIT,
-        history_preview_limit: HISTORY_PREVIEW_LIMIT,
-    })
+        let selected_counts = match selected_track.as_deref() {
+            None => counts.clone(),
+            Some("unclassified") => conn.query_row(
+                r#"
+    SELECT
+      SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END),
+      SUM(CASE WHEN status='running' THEN 1 ELSE 0 END),
+      SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END),
+      SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),
+      SUM(CASE WHEN status='canceled' THEN 1 ELSE 0 END),
+      COUNT(*)
+    FROM job
+    WHERE track IS NULL OR track='' OR track NOT IN ('youtube_single','youtube_recurring','instagram','other_video','image_archive','localization')
+    "#,
+                [],
+                |row| {
+                    Ok(JobsOverviewCounts {
+                        queued: row.get::<_, Option<i64>>(0)?.unwrap_or(0) as usize,
+                        running: row.get::<_, Option<i64>>(1)?.unwrap_or(0) as usize,
+                        succeeded: row.get::<_, Option<i64>>(2)?.unwrap_or(0) as usize,
+                        failed: row.get::<_, Option<i64>>(3)?.unwrap_or(0) as usize,
+                        canceled: row.get::<_, Option<i64>>(4)?.unwrap_or(0) as usize,
+                        total: row.get::<_, i64>(5)? as usize,
+                    })
+                },
+            )?,
+            Some(track) => conn.query_row(
+                r#"
+    SELECT
+      SUM(CASE WHEN status='queued' THEN 1 ELSE 0 END),
+      SUM(CASE WHEN status='running' THEN 1 ELSE 0 END),
+      SUM(CASE WHEN status='succeeded' THEN 1 ELSE 0 END),
+      SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),
+      SUM(CASE WHEN status='canceled' THEN 1 ELSE 0 END),
+      COUNT(*)
+    FROM job
+    WHERE track=?1
+    "#,
+                [track],
+                |row| {
+                    Ok(JobsOverviewCounts {
+                        queued: row.get::<_, Option<i64>>(0)?.unwrap_or(0) as usize,
+                        running: row.get::<_, Option<i64>>(1)?.unwrap_or(0) as usize,
+                        succeeded: row.get::<_, Option<i64>>(2)?.unwrap_or(0) as usize,
+                        failed: row.get::<_, Option<i64>>(3)?.unwrap_or(0) as usize,
+                        canceled: row.get::<_, Option<i64>>(4)?.unwrap_or(0) as usize,
+                        total: row.get::<_, i64>(5)? as usize,
+                    })
+                },
+            )?,
+        };
+
+        Ok(JobsOverviewSnapshot {
+            jobs,
+            counts,
+            selected_counts,
+            generated_at_ms: now_ms(),
+            preview_view: preview_view.to_string(),
+            selected_track,
+            running_preview_limit: RUNNING_PREVIEW_LIMIT,
+            queued_preview_limit: QUEUED_PREVIEW_LIMIT,
+            attention_preview_limit: ATTENTION_PREVIEW_LIMIT,
+            history_preview_limit: HISTORY_PREVIEW_LIMIT,
+        })
+    })();
+    conn.record_phase("overview_queries", query_started.elapsed());
+    if result.is_err() {
+        conn.mark_outcome("failed");
+    }
+    result
 }
 
 /// Small canonical active projection used by progress-heavy product surfaces. Unlike the Jobs
@@ -35986,6 +36006,47 @@ EOF
         assert!(history.jobs.iter().any(|job| job.id == succeeded.id));
         assert!(!history.jobs.iter().any(|job| job.id == queued.id));
         assert!(!history.jobs.iter().any(|job| job.id == running.id));
+    }
+
+    #[test]
+    fn jobs_overview_request_context_preserves_shape_and_records_query_timing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let overview = jobs_overview_snapshot_with_context(&paths, None, None,
+            Some(db::DatabaseOperationContext::new("agent_bridge", "jobs.overview")
+                .with_request_id("overview-request-test"))).expect("overview");
+        assert_eq!(overview.preview_view, "now");
+        assert!(overview.jobs.is_empty());
+        assert_eq!(overview.counts.total, 0);
+        let runtime = db::AppDatabase::for_paths(&paths).expect("runtime").snapshot();
+        let receipt = runtime.recent_receipts.iter()
+            .find(|row| row.request_id.as_deref() == Some("overview-request-test")).expect("correlated receipt");
+        assert_eq!(receipt.operation, "jobs.overview");
+        assert!(receipt.queue_wait_ms.is_some());
+        assert!(receipt.phase_ms.contains_key("open"));
+        assert!(receipt.phase_ms.contains_key("overview_queries"));
+        assert_eq!(receipt.outcome, "completed_read_context");
+    }
+
+    #[test]
+    fn jobs_overview_request_timing_preserves_query_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let database = db::AppDatabase::for_paths(&paths).expect("runtime");
+        database.write_context(db::DatabaseOperationContext::new("test", "remove_owned_fixture_table"))
+            .expect("writer").execute_batch("DROP TABLE job").expect("fixture failure");
+        let baseline = jobs_overview_snapshot(&paths, None, None).expect_err("missing table").to_string();
+        let actual = jobs_overview_snapshot_with_context(&paths, None, None,
+            Some(db::DatabaseOperationContext::new("agent_bridge", "jobs.overview")
+                .with_request_id("overview-failure-test"))).expect_err("same failure").to_string();
+        assert_eq!(actual, baseline);
+        let runtime = database.snapshot();
+        let receipt = runtime.recent_receipts.iter()
+            .find(|row| row.request_id.as_deref() == Some("overview-failure-test")).expect("failure receipt");
+        assert_eq!(receipt.outcome, "failed");
+        assert!(receipt.phase_ms.contains_key("overview_queries"));
     }
 
     #[test]

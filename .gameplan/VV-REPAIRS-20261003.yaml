@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: batch
 assignment: VV-REPAIRS-20261003
 parent: null
-generation: 14
+generation: 19
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -38,3 +38,7 @@ steps:
 - {id: GP-022, role: any, at: before_round, do: verify installer guard targets installed executable path, check: {type: confirm}, source: 'failure: isolated agent desktop process falsely blocked core update', state: active}
 - {id: GP-023, role: any, at: before_round, do: verify isolated headless process alive before each bridge action, check: {type: confirm}, source: 'infra: isolated PID186868 exited with stale bridge sidecars', state: active}
 - {id: GP-024, role: any, at: before_round, do: require production migration uses background safe-mode launch, check: {type: confirm}, source: 'failure: current headless mode refuses production root', state: active}
+- {id: GP-025, role: any, at: before_round, do: require explicit nonzero preparation check abort before actions, check: {type: confirm}, source: 'failure: semicolon launched probe after failed check; new local dir relocated confirmations', state: active}
+- {id: GP-026, role: any, at: before_round, do: require normalized full executable paths in installer process guard, check: {type: confirm}, source: 'risk: forward-slash installed path differs from process backslash path', state: active}
+- {id: GP-027, role: any, at: before_round, do: verify final candidate destination absent before packaging, check: {type: file, path: offline-installer-runtime/package_candidates_final_9f8a137/candidate_0.1.205_runtime_b9bd5d61388584cb50b2dadf, exists: false}, source: 'fail: prior candidate destination collision requires distinct supported OutputDir', state: retired}
+- {id: GP-028, role: any, at: before_round, do: require canonical writer timeout spelling in live monitor, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0323/20261003/monitor_live_database.py, contains: writer_admission_timeout}, source: 'failure: monitor missed six actual writer_admission_timeout events', state: active}
