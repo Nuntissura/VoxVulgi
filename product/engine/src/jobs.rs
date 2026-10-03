@@ -11863,7 +11863,7 @@ fn fetch_queued_jobs_for_track_inner(
     let mut result = Vec::with_capacity(limit);
     let paused = is_queue_paused_conn(&conn)?;
     if paused || (matches!(wanted_track, JobTrack::YoutubeSingle | JobTrack::OtherVideo)
-        && wanted_type == Some(JobType::DownloadDirectUrl.as_str())
+        && wanted_type.is_none_or(|kind| kind == JobType::DownloadDirectUrl.as_str())
         && has_selected_downloads_conn(&conn)?) {
         let mut stmt = conn.prepare("SELECT j.id,j.type,j.params_json FROM job j
           LEFT JOIN job_selected_download s ON s.job_id=j.id AND s.attempt_no=j.attempt_no
@@ -33138,6 +33138,21 @@ mod tests {
         let conn = db::open_readonly(&paths).unwrap();
         assert!(!selected_priority_prevents_claim_conn(&conn, "other", JobTrack::OtherVideo).unwrap());
         assert!(!selected_priority_prevents_claim_conn(&conn, "selected", JobTrack::YoutubeSingle).unwrap());
+    }
+
+    #[test]
+    fn selected_downloads_other_video_priority_precedes_generic_scan_limit() {
+        let (_dir, paths) = selected_queue_fixture();
+        let conn = db::open(&paths).unwrap();
+        conn.execute("UPDATE job SET track='other_video' WHERE id IN ('older','selected','second')", []).unwrap();
+        drop(conn);
+        start_selected_downloads(&paths, &["selected".into()], "continue_all").expect("select");
+        let generic = fetch_queued_jobs_for_track(&paths, JobTrack::OtherVideo, 1).unwrap();
+        assert_eq!(generic[0].0, "selected");
+        let typed = fetch_queued_jobs_for_track_and_type(&paths, JobTrack::OtherVideo,
+            JobType::DownloadDirectUrl.as_str(), 1).unwrap();
+        assert_eq!(typed[0].0, "selected");
+        assert!(matches!(claim_job_for_track(&paths, "older", JobTrack::OtherVideo).unwrap(), DispatchClaimOutcome::DeferredChanged));
     }
 
     fn seed_subtitle_publication_item(paths: &AppPaths, item_id: &str) {

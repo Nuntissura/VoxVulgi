@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-0334
 parent: null
-generation: 9
+generation: 10
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -32,3 +32,4 @@ steps:
 - {id: GP-016, role: any, at: before_round, do: require changed source and manual catalog mapped to owning checks, check: {type: confirm}, source: 'WP0334: explicit new behavior changes manual catalog and schema', state: active}
 - {id: GP-017, role: any, at: before_verdict, do: require exact selected attempt and unrelated queued state in packaged proof, check: {type: confirm}, source: 'WP0334: queue-only selection must not resume unrelated jobs', state: active}
 - {id: GP-018, role: any, at: before_round, do: require prepolicy attempt and stale candidate priority rechecked at atomic publication and claim, check: {type: confirm}, source: 'WP0334-F01/F02: independently reviewed retry and priority races', state: active}
+- {id: GP-019, role: any, at: before_round, do: require typed and generic selected priority applied before scan LIMIT, check: {type: confirm}, source: 'RED7875be2: Continue all generic fetch returned older before selected', state: active}
