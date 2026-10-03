@@ -1,7 +1,7 @@
 {
   "file_id": "WP-0333-v1",
   "file_kind": "work_packet",
-  "updated_at": "2026-10-03",
+  "updated_at": "2026-10-04",
   "id": "WP-0333",
   "version": 1,
   "title": "Fixed SQLite prerequisite and checkpoint maintenance",
@@ -1360,6 +1360,49 @@
       "production_fix_proven": false,
       "live_closure_proven": false,
       "phase2_status": "AUTOMATIC_CHECKPOINT_AUTHORITY_AND_CRASH_PACKAGED_LIVE_GATES_PENDING"
+    },
+    {
+      "record_id": "WP-0333-PROCESS-CRASH-20261004-01",
+      "date": "2026-10-04",
+      "note": "Scoped process-crash criterion PASS: actual canonical-density AppDatabase baseline and disposable FULL/no-close/auto0 cells each retained32 exact externally acknowledged payloads after abrupt owned-child termination; separate independent WAL-aware reopen matched all69 post-migration protected table multisets, rejected the uncommitted sentinel, and passed schema61/quick_check. No power-loss, migration-preservation, concurrent-maintenance, live shutdown or whole-packet completion claim.",
+      "source_commit": "5aa6b3659c565e583bd96b30a8fc35546443bff4",
+      "example_sha256": "6512aec7a285d41d5e865bcf5f39cca78fca0f9dcbe3bd4db586ec1fb38e6e95",
+      "installed_desktop_source_unchanged": "dc4aec110d37c11bd4e7fa9b6b4ba1a1c2fdf2e5",
+      "summary": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004_crash_reopen/summary.md",
+      "process_crash_cells": [
+        {
+          "mode": "baseline",
+          "acknowledged_commits": 32,
+          "protected_table_count": 69,
+          "verdict": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004_crash_reopen/baseline/verdict.json",
+          "independent_review": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004_crash_reopen/baseline/independent_review.json",
+          "independent_pass": true
+        },
+        {
+          "mode": "full_no_close_no_auto",
+          "acknowledged_commits": 32,
+          "protected_table_count": 69,
+          "verdict": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004_crash_reopen/full/verdict.json",
+          "independent_review": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004_crash_reopen/full/independent_review.json",
+          "independent_pass": true
+        }
+      ],
+      "source_backup_sha256": "1d9463ba77cd250512552d4f033fe025295cb9fa0bbd3a22e82a7b05e3a3088b",
+      "source_backup_unchanged": true,
+      "source_job_count": 18902,
+      "actual_runtime_sqlite_version": "3.53.2",
+      "process_crash_criterion_proven": true,
+      "production_checkpoint_policy_selected": false,
+      "previous_red_variance_preserved": true,
+      "variance_cause_proven": false,
+      "live_closure_proven": false,
+      "whole_packet_complete": false,
+      "remaining": [
+        "Operator checkpoint-policy decision and separately reviewed production authority/spec/exception amendment before automatic maintenance",
+        "Complete exact final packaged normal successful-download/read/export/active-shutdown acceptance with WP-0323/WP-0332",
+        "Independent final acceptance review retaining unexplained prior RED variance and all eight authoritative criteria"
+      ],
+      "status_retained": "IN_PROGRESS"
     }
   ],
   "session_review_20261003": {
