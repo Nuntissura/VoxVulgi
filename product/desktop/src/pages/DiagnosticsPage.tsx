@@ -3008,7 +3008,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         </button>
         <button type="button" className="diag-summary-tile" data-testid="diagnostics-summary-failures" data-agent-safe-action="true" aria-label="Recent failures — go to Recent failures details" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => { const section = document.getElementById("diag-failures"); if (section instanceof HTMLDetailsElement) section.open = true; section?.scrollIntoView({ behavior: "smooth" }); }}>
           <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Recent failures</div>
-          <div style={{ fontWeight: 700, fontSize: 18, color: recentFailures.length > 0 ? "#dc2626" : "#166534" }}>
+          <div style={{ fontWeight: 700, fontSize: 18, color: sectionStatus.jobs.state === "ready" ? recentFailures.length > 0 ? "#dc2626" : "#166534" : undefined }}>
             {sectionStatus.jobs.state === "ready" ? recentFailures.length : diagnosticPendingText(sectionStatus.jobs.state)}
           </div>
         </button>

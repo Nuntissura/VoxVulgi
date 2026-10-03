@@ -10,7 +10,19 @@
 .diagnostics-page .diagnostics-section > summary {
   cursor: pointer;
   padding: 4px 0;
+  display: flex;
+  align-items: center;
+  list-style: none;
 }
+.diagnostics-page .diagnostics-section > summary::-webkit-details-marker { display: none; }
+.diagnostics-page .diagnostics-section > summary::before {
+  content: "+";
+  flex: 0 0 16px;
+  font-family: sans-serif;
+  font-weight: 700;
+  text-align: center;
+}
+.diagnostics-page .diagnostics-section[open] > summary::before { content: "−"; }
 .diagnostics-page .diagnostics-section > summary h2 {
   display: inline;
   margin: 0 0 0 8px;
