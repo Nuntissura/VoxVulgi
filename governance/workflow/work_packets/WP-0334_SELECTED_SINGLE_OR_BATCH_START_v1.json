@@ -30,5 +30,9 @@
   ],
   "verification": ["Root coordinates one canonical cargo_cache and one compatible test/build batch", "Engine selection/priority/pause/claim/Safe/restart tests; bridge validation/receipt and frontend decision/manual/semantic tests", "Disposable packaged headless mixed queue: single/batch decisions, receipts, independent SQLite reads, inspected snapshots", "Exact requested video download and ffprobe; WP-0332 retains separate shutdown proof"],
   "non_goals": ["Offline ISO packaging", "Version bump or changelog edits", "Deleting user media/subscriptions/history", "Native foreground input or arbitrary WebView scripts"],
-  "status_updates": [{"date": "2026-10-03", "state": "IN_PROGRESS", "note": "Primary-source patterns and current code inspected; operator clarified two-choice prompt before implementation."}]
+  "recorded_findings": [
+    {"id": "WP0334-F01", "severity": "HIGH", "status": "OPEN", "failure": "Policy prefetch captures params but not attempt; concurrent same-ID retry with unchanged params can authorize its changed attempt", "remediation": "Capture attempt and params before policy resolution, compare both atomically before publishing any grants, test changed-attempt refusal"},
+    {"id": "WP0334-F02", "severity": "HIGH", "status": "OPEN", "failure": "An older prefetched scheduler candidate can claim after Continue all publishes selected priority because queue pause is false", "remediation": "Recheck pending selected priority at atomic claim, defer stale unselected candidate without rewriting original ordering, test claim after priority publication"}
+  ],
+  "status_updates": [{"date": "2026-10-03", "state": "IN_PROGRESS", "note": "Primary-source patterns and current code inspected; operator clarified two-choice prompt before implementation. Candidate73ae88d pushed; two independent race findings require remediation before validation."}]
 }

@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-0334
 parent: null
-generation: 4
+generation: 9
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -19,13 +19,16 @@ steps:
 - {id: GP-003, role: any, at: before_round, do: confirm heavy build|test processes on target disk == 0, check: {type: confirm}, source: 'preset:build-round', state: active}
 - {id: GP-004, role: any, at: before_round, do: verify free disk(CARGO_TARGET_DIR or repo) >= 50 GiB, check: {type: cmd, argv: [python, -c, 'import os,shutil,sys;g=shutil.disk_usage(os.environ.get(''CARGO_TARGET_DIR'') or ''.'').free/2**30;print(round(g,1),''GiB free'');sys.exit(0 if g>=float(''50'') else 1)'], expect_exit: 0, timeout_seconds: 15}, source: 'preset:build-round', state: active}
 - {id: GP-005, role: any, at: before_round, do: confirm deepest generated path < 260 chars or long paths enabled, check: {type: confirm}, source: 'preset:build-round', state: active}
-- {id: GP-006, role: any, at: before_round, do: confirm test entrypoint + config unchanged since last green round, check: {type: confirm}, source: 'preset:build-round', state: active}
+- {id: GP-006, role: any, at: before_round, do: confirm test entrypoint + config unchanged since last green round, check: {type: confirm}, source: 'preset:build-round', state: retired}
 - {id: GP-007, role: any, at: before_round, do: forbid timeout wrapper around test entrypoint, check: {type: confirm}, source: 'preset:build-round', state: active}
 - {id: GP-008, role: any, at: before_round, do: record candidate SHA = pushed HEAD; later pushes -> next round, check: {type: confirm}, source: 'preset:build-round', state: active}
 - {id: GP-009, role: any, at: before_round, do: confirm env vars|config files read by changed code set for test run, check: {type: confirm}, source: 'preset:build-round', state: active}
 - {id: GP-010, role: any, at: on_resume, do: confirm reread state|notes|receipts|gameplan before new work, check: {type: confirm}, source: 'preset:resume', state: active}
 - {id: GP-011, role: any, at: on_resume, do: confirm statuses recounted from source records; memory counts == 0, check: {type: confirm}, source: 'preset:resume', state: active}
 - {id: GP-012, role: any, at: on_resume, do: confirm half-written records finished before new work, check: {type: confirm}, source: 'preset:resume', state: active}
-- {id: GP-013, role: any, at: before_round, do: require exact selected attempt and unrelated queued state in packaged proof, check: {type: confirm}, source: 'WP0334: queue-only selection must not resume unrelated jobs', state: active}
+- {id: GP-013, role: any, at: before_round, do: require exact selected attempt and unrelated queued state in packaged proof, check: {type: confirm}, source: 'WP0334: queue-only selection must not resume unrelated jobs', state: retired}
 - {id: GP-014, role: any, at: before_round, do: require one shared cargo cache and no agent Cargo builds, check: {type: confirm}, source: 'WP0334: concurrent compiler churn invalidates efficient build batch', state: active}
 - {id: GP-015, role: any, at: before_round, do: require Safe Mode and explicit Pause all rechecked before selected claim, check: {type: confirm}, source: 'WP0334: live Safe Mode previously used only queue pause', state: active}
+- {id: GP-016, role: any, at: before_round, do: require changed source and manual catalog mapped to owning checks, check: {type: confirm}, source: 'WP0334: explicit new behavior changes manual catalog and schema', state: active}
+- {id: GP-017, role: any, at: before_verdict, do: require exact selected attempt and unrelated queued state in packaged proof, check: {type: confirm}, source: 'WP0334: queue-only selection must not resume unrelated jobs', state: active}
+- {id: GP-018, role: any, at: before_round, do: require prepolicy attempt and stale candidate priority rechecked at atomic publication and claim, check: {type: confirm}, source: 'WP0334-F01/F02: independently reviewed retry and priority races', state: active}
