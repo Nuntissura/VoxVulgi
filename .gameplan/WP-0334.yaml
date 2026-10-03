@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-0334
 parent: null
-generation: 14
+generation: 16
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -37,3 +37,5 @@ steps:
 - {id: GP-021, role: any, at: before_round, do: require owned process exit code checked when Windows retains exited object, check: {type: confirm}, source: backup helper falsely equated retained OpenProcess handle with live PID, state: active}
 - {id: GP-022, role: any, at: before_round, do: require WMI probe Detached_Process8 and ShowWindow0; forbid unsupported CREATE_NO_WINDOW flag, check: {type: confirm}, source: 'infra: WMI Create returned21 for unsupported CreateFlags134217728', state: active}
 - {id: GP-023, role: any, at: before_round, do: require selected audio mapping and cardinality stamped before strict MKV publication, check: {type: confirm}, source: 'exact video failed: selected ko audio inherited eng container tag', state: active}
+- {id: GP-024, role: any, at: before_round, do: require owning Python tests construct actual postprocessor with initialized progress hooks, check: {type: confirm}, source: 'REDf395400: object.__new__ skipped yt-dlp progress hook initialization', state: active}
+- {id: GP-025, role: any, at: before_round, do: require native process inventory fail closed on CIM failure or stderr before silent installer, check: {type: confirm}, source: 'HIGH native helper: nonterminating CIM errors could mimic empty process set', state: active}

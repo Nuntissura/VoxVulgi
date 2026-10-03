@@ -16,14 +16,14 @@ class ArchiveAudioMetadataTests(unittest.TestCase):
             filename = Path(folder) / 'owned.mkv'
             filename.write_bytes(b'original')
             info = dict(info, filepath=str(filename), ext='mkv')
-            pp = object.__new__(policy.VoxVulgiArchiveMetadataPP)
+            pp = policy.VoxVulgiArchiveMetadataPP()
             pp.get_metadata_object = lambda path: {'streams': observed}
             calls = []
             def remux(source, output, options):
                 calls.append(list(options))
                 Path(output).write_bytes(b'remuxed')
             pp.run_ffmpeg = remux
-            pp.run(info)
+            _, info = pp.run(info)
             return calls, info, filename.read_bytes()
 
     def test_conflicting_container_language_corrected_from_exact_selection_without_subtitles(self):
