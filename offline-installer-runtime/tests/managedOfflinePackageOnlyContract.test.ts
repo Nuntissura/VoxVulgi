@@ -87,6 +87,24 @@ test("package entrypoint consumes qualified bytes and cannot build or repair pro
   assert.doesNotMatch(source, /build_desktop_target|prep_offline_bundle|reconcile_offline_python|warmup|Invoke-WebRequest|Start-BitsTransfer/i);
 });
 
+test("production package binds core binary verification to the actual Tauri binary while fixtures retain overrides", () => {
+  const packageSource = read("offline-installer-runtime", "scripts", "package_offline_release.ps1");
+  const cargo = read("product", "desktop", "src-tauri", "Cargo.toml");
+  const binaryName = /^name\s*=\s*"([^"]+)"/m.exec(cargo)?.[1];
+  assert.equal(binaryName, "desktop");
+  const definitions = /\$defs = @\(([\s\S]*?)\n\s*\)/.exec(packageSource)?.[1];
+  assert.ok(definitions);
+  assert.ok(definitions.includes(`"/DMAIN_BINARY_NAME=${binaryName}.exe"`));
+  assert.match(packageSource, /Invoke-Checked \$iscc \(@\(\$installerSource\) \+ \$defs\)/);
+  const core = read("product", "desktop", "src-tauri", "installer", "templates", "installer.nsi");
+  assert.match(core, /WriteRegStr SHCTX "\$\{UNINSTKEY\}" "MainBinaryName" "\$\{MAINBINARYNAME\}\.exe"/);
+  const wrapper = read("offline-installer-runtime", "installer", "VoxVulgi_offline_full.iss");
+  assert.match(wrapper, /#ifndef MAIN_BINARY_NAME/);
+  assert.match(wrapper, /CompareText\(ObservedBinaryName, ExtractFileName\(MainBinaryName\)\) <> 0 then\s*RaiseException\('The core installer registered an unexpected main binary name\.'/);
+  const fixture = read("offline-installer-runtime", "scripts", "test_offline_installer_performance.ps1");
+  assert.match(fixture, /MAIN_BINARY_NAME = 'VoxVulgiFixture\.exe'/);
+});
+
 test("installer writes an immutable LocalAppData generation and atomically selects its manifest", () => {
   const source = read(
     "offline-installer-runtime",

@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: batch
 assignment: VV-REPAIRS-20261003
 parent: null
-generation: 59
+generation: 64
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -79,3 +79,7 @@ steps:
 - {id: GP-063, role: any, at: before_round, do: require changed Windows dependency and lockfiles reviewed; test entrypoint stable; owning checks mapped, check: {type: confirm}, source: 'authority: WP0333 filename amendment intentionally changes manifest inputs; unchanged-config preset conflicts', state: active}
 - {id: GP-064, role: any, at: before_round, do: require every churn argument matched to current parser; reader-count writer-count reader-pin-ms; booleans0/1, check: {type: confirm}, source: 'wasted probe: invented readers/writers/pin names and true/false were refused before database creation', state: active}
 - {id: GP-065, role: any, at: before_round, do: require JSON UTC timestamps kept as strings before DateTimeOffset parsing; compare native UTC creation, check: {type: confirm}, source: 'observer mistake: PS7 auto-converted JSON date then string coercion lost UTC; PID reuse was not established', state: active}
+- {id: GP-066, role: any, at: before_round, do: require canonical queue pause equals1; Safe Mode success alone is insufficient, check: {type: confirm}, source: 'update preflight: safe_mode_set ignores queue pause write errors; config true but canonical pause0', state: retired}
+- {id: GP-067, role: any, at: before_round, do: require async UI action commit before canonical queue pause1 and running0 proof, check: {type: confirm}, source: 'preflight correction: UI receipt preceded successful queue_control commit; first reread was too early', state: active}
+- {id: GP-068, role: any, at: before_round, do: require production wrapper expected binary matches real core desktop.exe before ISO retry, check: {type: confirm}, source: 'exact ISO failure: default VoxVulgi.exe rejected real NSIS desktop.exe; rollback restored old core', state: active}
+- {id: GP-069, role: any, at: before_round, do: require gameplan notes <=120 chars and abort on every controller failure, check: {type: confirm}, source: confirmation note exceeded120 chars; preparation gate stopped core installation before launch, state: active}

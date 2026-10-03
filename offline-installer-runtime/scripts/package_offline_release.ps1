@@ -152,6 +152,7 @@ try {
   [IO.Directory]::CreateDirectory($wrapperOut) | Out-Null
   $defs = @(
     "/DAPP_VERSION=$AppVersion", "/DSETUP_EXE=$setup", "/DOUTPUT_DIR=$wrapperOut",
+    "/DMAIN_BINARY_NAME=desktop.exe",
     "/DWRAPPER_SOURCE_SHA256=$sourceHash", "/DRUNTIME_ID=$runtimeId",
     "/DRUNTIME_MANIFEST_SHA256=$manifestHash", "/DRUNTIME_MANIFEST_BYTES=$((Get-Item $manifest).Length)"
   )
