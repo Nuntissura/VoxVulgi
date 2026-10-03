@@ -811,6 +811,80 @@ struct VfsTiming { calls: u64, total_ns: u64, max_ns: u64 }
 const VFS_TIMING_NAMES: [&str; 9] = ["xClose", "xShmUnmap", "xShmLock", "xSync", "xDelete", "xSyncMainDb", "xSyncWal", "xSyncUnknown", "fileKindOverflow"];
 #[derive(Clone, Copy, Default)]
 struct VfsProbeFile { pointer: usize, open_flags: std::os::raw::c_int }
+#[derive(Clone, Copy, Default, Serialize)]
+struct ShmLockSlotReceipt {
+    shared_lock_ok: u64, shared_unlock_ok: u64, unlock_error: u64,
+    exclusive_busy: u64, other_error: u64,
+}
+#[derive(Clone, Copy, Default, Serialize)]
+struct ShmLockFileReceipt {
+    #[serde(skip)]
+    pointer: usize,
+    file_id: u64, main_db: bool, closed: bool, shared_mask: u8,
+    slots: [ShmLockSlotReceipt; 8],
+}
+#[derive(Clone, Copy)]
+struct ShmLockCapture {
+    enabled: bool, files: [ShmLockFileReceipt; 64], used: usize,
+    unknown: u64, overflow: u64, calls: u64,
+}
+impl Default for ShmLockCapture {
+    fn default() -> Self { Self { enabled: false, files: [ShmLockFileReceipt::default(); 64], used: 0, unknown: 0, overflow: 0, calls: 0 } }
+}
+thread_local! {
+    static SHM_LOCK_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static SHM_LOCK_BORROW_CONFLICTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static SHM_LOCK_CAPTURE: std::cell::RefCell<ShmLockCapture> = std::cell::RefCell::new(ShmLockCapture::default());
+}
+fn with_shm_capture(update: impl FnOnce(&mut ShmLockCapture)) {
+    if !SHM_LOCK_ENABLED.try_with(std::cell::Cell::get).unwrap_or(false) { return; }
+    let _ = SHM_LOCK_CAPTURE.try_with(|capture| {
+        if let Ok(mut state) = capture.try_borrow_mut() { update(&mut state); }
+        else { let _ = SHM_LOCK_BORROW_CONFLICTS.try_with(|count| count.set(count.get().saturating_add(1))); }
+    });
+}
+fn capture_shm_open(file: *mut rusqlite::ffi::sqlite3_file, flags: i32) {
+    with_shm_capture(|state| {
+        if state.used == 64 { state.overflow = state.overflow.saturating_add(1); }
+        else {
+            state.files[state.used] = ShmLockFileReceipt { pointer: file as usize,
+                main_db: flags & rusqlite::ffi::SQLITE_OPEN_MAIN_DB != 0,
+                file_id: state.used as u64 + 1, ..ShmLockFileReceipt::default() };
+            state.used += 1;
+        }
+    });
+}
+fn capture_shm_close(file: *mut rusqlite::ffi::sqlite3_file) {
+    with_shm_capture(|state| {
+        if let Some(record) = state.files[..state.used].iter_mut().find(|record| record.pointer == file as usize && !record.closed) {
+            record.closed = true;
+        } else { state.unknown = state.unknown.saturating_add(1); }
+    });
+}
+fn capture_shm_result(file: *mut rusqlite::ffi::sqlite3_file, offset: i32, count: i32, flags: i32, result: i32) {
+    with_shm_capture(|state| {
+        state.calls = state.calls.saturating_add(1);
+        let valid_flags = matches!(flags, 5 | 6 | 9 | 10);
+        let valid_range = offset >= 0 && count > 0 && offset < 8 && count <= 8 - offset
+            && (flags & rusqlite::ffi::SQLITE_SHM_SHARED == 0 || count == 1);
+        let index = state.files[..state.used].iter().position(|record| record.pointer == file as usize && !record.closed);
+        if !valid_flags || !valid_range || index.is_none() { state.unknown = state.unknown.saturating_add(1); }
+        else if let Some(index) = index {
+            let record = &mut state.files[index];
+            for slot in offset as usize..(offset + count) as usize {
+                let outcome = &mut record.slots[slot];
+                if result == rusqlite::ffi::SQLITE_OK {
+                    if flags == 6 { outcome.shared_lock_ok = outcome.shared_lock_ok.saturating_add(1); record.shared_mask |= 1 << slot; }
+                    if flags == 5 { outcome.shared_unlock_ok = outcome.shared_unlock_ok.saturating_add(1); record.shared_mask &= !(1 << slot); }
+                } else if flags & rusqlite::ffi::SQLITE_SHM_UNLOCK != 0 {
+                    outcome.unlock_error = outcome.unlock_error.saturating_add(1);
+                } else if flags == 10 && result & 255 == rusqlite::ffi::SQLITE_BUSY {
+                    outcome.exclusive_busy = outcome.exclusive_busy.saturating_add(1);
+                } else { outcome.other_error = outcome.other_error.saturating_add(1); }
+            }
+        }
+    });
+}
 thread_local! {
     static VFS_PROBE_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static VFS_PROBE_TIMINGS: std::cell::Cell<[VfsTiming; 9]> = const {
@@ -832,6 +906,7 @@ fn record_vfs_timing(index: usize, elapsed: u64) {
 }
 
 fn probe_file_open(file: *mut rusqlite::ffi::sqlite3_file, flags: std::os::raw::c_int) {
+    capture_shm_open(file, flags);
     if !VFS_PROBE_ENABLED.try_with(std::cell::Cell::get).unwrap_or(false) { return; }
     let _ = VFS_PROBE_FILES.try_with(|files| {
         let mut current = files.get();
@@ -881,6 +956,22 @@ fn thread_sqlite_bytes_read() -> u64 {
 
 static READ_COUNTING_BASE_VFS: OnceLock<usize> = OnceLock::new();
 
+/// Opaque validated disposable-fixture identity; never installed by production code.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct DisposableFilenameProbe { exact: PathBuf, plain: PathBuf }
+thread_local! {
+    static DISPOSABLE_FILENAME_PROBE: std::cell::RefCell<Option<DisposableFilenameProbe>> = const { std::cell::RefCell::new(None) };
+}
+fn short_extended_local_filename(path: &Path) -> Option<PathBuf> {
+    let text = path.to_str()?;
+    let bytes = text.as_bytes();
+    if !bytes.starts_with(b"\\\\?\\") || !bytes.get(4).is_some_and(u8::is_ascii_alphabetic)
+        || bytes.get(5) != Some(&b':') || bytes.get(6) != Some(&b'\\')
+        || text.encode_utf16().count() >= 260 { return None; }
+    Some(PathBuf::from(&text[4..]))
+}
+
 /// The real file lives directly after the wrapper's `sqlite3_file` header in the same
 /// allocation (`szOsFile` = header + base `szOsFile`).
 unsafe fn read_counting_real_file(
@@ -902,6 +993,8 @@ macro_rules! forward_io {
 
 unsafe extern "C" fn counting_close(file: *mut rusqlite::ffi::sqlite3_file) -> std::os::raw::c_int {
     let result = timed_vfs_call(0, || forward_io!(file, xClose, rusqlite::ffi::SQLITE_OK));
+    if result == rusqlite::ffi::SQLITE_OK { capture_shm_close(file); }
+    else { with_shm_capture(|state|state.unknown = state.unknown.saturating_add(1)); }
     probe_file_close(file);
     result
 }
@@ -1024,7 +1117,9 @@ unsafe extern "C" fn counting_shm_lock(
     count: std::os::raw::c_int,
     flags: std::os::raw::c_int,
 ) -> std::os::raw::c_int {
-    timed_vfs_call(2, || forward_io!(file, xShmLock, rusqlite::ffi::SQLITE_IOERR, offset, count, flags))
+    let result = timed_vfs_call(2, || forward_io!(file, xShmLock, rusqlite::ffi::SQLITE_IOERR, offset, count, flags));
+    capture_shm_result(file, offset, count, flags, result);
+    result
 }
 
 unsafe extern "C" fn counting_shm_barrier(file: *mut rusqlite::ffi::sqlite3_file) {
@@ -1163,6 +1258,7 @@ pub(super) fn open_counted_connection(
     path: &Path,
     flags: rusqlite::OpenFlags,
 ) -> rusqlite::Result<Connection> {
+    let path = AppDatabase::disposable_open_filename(path)?;
     match read_counting_vfs_name() {
         Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs),
         None => Connection::open_with_flags(path, flags),
@@ -1287,6 +1383,81 @@ pub struct AppDatabase {
 pub type DatabaseRuntime = AppDatabase;
 
 impl AppDatabase {
+    /// Validate once outside admission; only the harness marker's exact root/db/app.sqlite is eligible.
+    #[doc(hidden)]
+    pub fn prepare_disposable_filename_probe(root: &Path, path: &Path) -> rusqlite::Result<DisposableFilenameProbe> {
+        let invalid = || rusqlite::Error::InvalidPath(path.to_path_buf());
+        let root = root.canonicalize().map_err(|_|invalid())?;
+        let parent = path.parent().ok_or_else(invalid)?.canonicalize().map_err(|_|invalid())?;
+        match std::fs::symlink_metadata(path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => return Err(invalid()),
+        }
+        if parent != root.join("db") || path.file_name() != Some(std::ffi::OsStr::new("app.sqlite"))
+            || !root.join("wp0323_disposable_fixture.json").is_file() { return Err(invalid()); }
+        let marker: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("wp0323_disposable_fixture.json")).map_err(|_|invalid())?).map_err(|_|invalid())?;
+        if marker["root"].as_str().map(Path::new) != Some(root.as_path())
+            || marker["pid"].as_u64() != Some(std::process::id() as u64) { return Err(invalid()); }
+        for variable in ["APPDATA", "LOCALAPPDATA"] {
+            let base = std::env::var_os(variable).ok_or_else(invalid)?;
+            let protected = PathBuf::from(base).join("com.voxvulgi.voxvulgi");
+            let protected = protected.canonicalize().unwrap_or(protected);
+            let normalize = |value: &Path|value.to_string_lossy().replace('\\', "/").to_lowercase().trim_start_matches("//?/").trim_end_matches('/').to_string();
+            let candidate = normalize(&root);
+            let protected = normalize(&protected);
+            if candidate == protected || candidate.starts_with(&(protected.clone()+"/"))
+                || protected.starts_with(&(candidate+"/")) { return Err(invalid()); }
+        }
+        let exact = parent.join("app.sqlite");
+        if path != exact { return Err(invalid()); }
+        let plain = short_extended_local_filename(&exact).ok_or_else(invalid)?;
+        Ok(DisposableFilenameProbe { exact, plain })
+    }
+    #[doc(hidden)]
+    pub fn enable_disposable_filename_probe(probe: DisposableFilenameProbe) {
+        DISPOSABLE_FILENAME_PROBE.with(|current| *current.borrow_mut() = Some(probe));
+    }
+    #[doc(hidden)]
+    pub fn end_disposable_filename_probe() { DISPOSABLE_FILENAME_PROBE.with(|current| *current.borrow_mut() = None); }
+    #[doc(hidden)]
+    pub fn disposable_filename_probe_enabled() -> bool { DISPOSABLE_FILENAME_PROBE.with(|current|current.borrow().is_some()) }
+    /// Lexical exact-identity matching only; no filesystem work in admitted opens.
+    #[doc(hidden)]
+    pub fn disposable_open_filename(path: &Path) -> rusqlite::Result<std::borrow::Cow<'_, Path>> {
+        DISPOSABLE_FILENAME_PROBE.with(|current| match current.borrow().as_ref() {
+            None => Ok(std::borrow::Cow::Borrowed(path)),
+            Some(probe) if path == probe.exact || path == probe.plain => Ok(std::borrow::Cow::Owned(probe.plain.clone())),
+            Some(_) => Err(rusqlite::Error::InvalidPath(path.to_path_buf())),
+        })
+    }
+    /// Harness-only capture on this thread; begin before any counted-VFS connection opens.
+    #[doc(hidden)]
+    pub fn begin_shm_lock_probe() {
+        // Registration occurs outside callbacks; the harness still verifies exact availability.
+        let _ = read_counting_vfs_name();
+        SHM_LOCK_CAPTURE.with(|capture| *capture.borrow_mut() = ShmLockCapture { enabled: true, ..ShmLockCapture::default() });
+        SHM_LOCK_BORROW_CONFLICTS.with(|count|count.set(0));
+        SHM_LOCK_ENABLED.with(|enabled|enabled.set(true));
+    }
+    /// Snapshot allocates only outside native callbacks. Unknown/overflow rejects attribution.
+    #[doc(hidden)]
+    pub fn snapshot_shm_lock_probe() -> serde_json::Value {
+        SHM_LOCK_CAPTURE.with(|capture| {
+            let state = capture.borrow();
+            let conflicts = SHM_LOCK_BORROW_CONFLICTS.with(std::cell::Cell::get);
+            serde_json::json!({"enabled":state.enabled,"files":&state.files[..state.used],
+                "unknown":state.unknown,"overflow":state.overflow,"borrow_conflicts":conflicts,
+                "native_shm_calls":state.calls,
+                "attribution_proven":state.enabled && state.calls > 0 && state.files[..state.used].iter().any(|file|file.main_db)
+                    && state.unknown == 0 && state.overflow == 0 && conflicts == 0,
+                "limits":"Counters reflect native delegate results; shared_mask is inferred from successful shared lock/unlock calls, not OS lock introspection. File IDs are capture-local generations. Slots0..7 are SQLite SHM lock offsets."})
+        })
+    }
+    #[doc(hidden)]
+    pub fn end_shm_lock_probe() {
+        SHM_LOCK_ENABLED.with(|enabled|enabled.set(false));
+        SHM_LOCK_CAPTURE.with(|capture|capture.borrow_mut().enabled = false);
+    }
     /// Begin an example-only per-thread VFS probe. Never nest probes on one thread.
     #[doc(hidden)]
     pub fn begin_vfs_timing_probe() {
@@ -2229,6 +2400,135 @@ mod tests {
         assert_eq!(identity.sqlite_version_number, 3_053_002);
         assert_eq!(identity.sqlite_version, "3.53.2");
         assert_eq!(identity.sqlite_source_id, "2026-06-03 19:12:13 d6e03d8c777cfa2d35e3b60d8ec3e0187f3e9f99d8e2ee9cac695fd6fcdf1a24");
+    }
+
+    #[test]
+    fn disposable_filename_probe_lexical_classes_and_length() {
+        assert_eq!(short_extended_local_filename(Path::new(r"\\?\C:\fixture\db\app.sqlite")), Some(PathBuf::from(r"C:\fixture\db\app.sqlite")));
+        for path in [r"\\server\share\app.sqlite", r"\\?\UNC\server\share\app.sqlite", r"\\.\C:\app.sqlite", r"C:\app.sqlite", r"\\?\Volume{a}\app.sqlite", r"\\?\C:relative"] {
+            assert!(short_extended_local_filename(Path::new(path)).is_none(), "unsupported path accepted");
+        }
+        let long = format!(r"\\?\C:\{}", "x".repeat(253));
+        assert_eq!(long.encode_utf16().count(), 260);
+        assert!(short_extended_local_filename(Path::new(&long)).is_none());
+        AppDatabase::end_disposable_filename_probe();
+        let original = Path::new(r"\\?\C:\fixture\db\app.sqlite");
+        assert!(matches!(AppDatabase::disposable_open_filename(original).unwrap(), std::borrow::Cow::Borrowed(_)));
+        AppDatabase::enable_disposable_filename_probe(DisposableFilenameProbe { exact: original.to_path_buf(), plain: PathBuf::from(r"C:\fixture\db\app.sqlite") });
+        assert_eq!(AppDatabase::disposable_open_filename(original).unwrap().as_ref(), Path::new(r"C:\fixture\db\app.sqlite"));
+        assert!(AppDatabase::disposable_open_filename(Path::new(r"\\?\C:\other\app.sqlite")).is_err());
+        AppDatabase::end_disposable_filename_probe();
+        assert_eq!(AppDatabase::disposable_open_filename(original).unwrap().as_ref(), original);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn disposable_filename_probe_validated_fixture_native_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().canonicalize().unwrap();
+        std::fs::create_dir(root.join("db")).unwrap();
+        let path = root.join("db/app.sqlite");
+        assert!(AppDatabase::prepare_disposable_filename_probe(&root, &path).is_err(), "missing marker accepted");
+        std::fs::write(root.join("wp0323_disposable_fixture.json"), b"{}").unwrap();
+        assert!(AppDatabase::prepare_disposable_filename_probe(&root, &path).is_err(), "unowned marker accepted");
+        std::fs::write(root.join("wp0323_disposable_fixture.json"), serde_json::to_vec(&serde_json::json!({"root":root,"pid":std::process::id()})).unwrap()).unwrap();
+        std::fs::write(&path, b"existing fixture").unwrap();
+        assert!(AppDatabase::prepare_disposable_filename_probe(&root, &path).is_err(), "existing database accepted");
+        assert_eq!(std::fs::read(&path).unwrap(), b"existing fixture");
+        std::fs::remove_file(&path).unwrap();
+        let probe = AppDatabase::prepare_disposable_filename_probe(&root, &path).expect("validated disposable fixture");
+        AppDatabase::enable_disposable_filename_probe(probe);
+        let connection = Connection::open(AppDatabase::disposable_open_filename(&path).unwrap()).unwrap();
+        connection.execute_batch("CREATE TABLE proof(value); INSERT INTO proof VALUES(73)").unwrap();
+        let native = unsafe { std::ffi::CStr::from_ptr(rusqlite::ffi::sqlite3_db_filename(connection.handle(), c"main".as_ptr())) }.to_bytes();
+        assert!(!native.starts_with(b"\\\\"), "native filename retained UNC locking spelling");
+        connection.close().unwrap();
+        let counted = open_counted_connection(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+        assert_eq!(counted.query_row("SELECT value FROM proof", [], |row|row.get::<_, i64>(0)).unwrap(), 73);
+        let native = unsafe { std::ffi::CStr::from_ptr(rusqlite::ffi::sqlite3_db_filename(counted.handle(), c"main".as_ptr())) }.to_bytes();
+        assert!(!native.starts_with(b"\\\\"), "counted native filename retained UNC spelling");
+        counted.close().unwrap();
+        AppDatabase::end_disposable_filename_probe();
+        let exact = Connection::open(&path).unwrap();
+        assert_eq!(exact.query_row("SELECT value FROM proof", [], |row|row.get::<_, i64>(0)).unwrap(), 73, "spelling changed database identity");
+        assert!(AppDatabase::prepare_disposable_filename_probe(&root, &root.join("db/other.sqlite")).is_err());
+    }
+
+    #[test]
+    fn shm_lock_probe_disabled_mapping_generation_and_bounds() {
+        AppDatabase::begin_shm_lock_probe();
+        AppDatabase::end_shm_lock_probe();
+        let file = 123_usize as *mut rusqlite::ffi::sqlite3_file;
+        capture_shm_open(file, rusqlite::ffi::SQLITE_OPEN_MAIN_DB);
+        capture_shm_result(file, 3, 1, 6, rusqlite::ffi::SQLITE_OK);
+        assert_eq!(AppDatabase::snapshot_shm_lock_probe()["files"].as_array().unwrap().len(), 0);
+        AppDatabase::begin_shm_lock_probe();
+        capture_shm_open(file, rusqlite::ffi::SQLITE_OPEN_MAIN_DB);
+        capture_shm_result(file, 3, 1, 6, rusqlite::ffi::SQLITE_OK);
+        capture_shm_result(file, 3, 1, 5, rusqlite::ffi::SQLITE_IOERR);
+        assert_eq!(AppDatabase::snapshot_shm_lock_probe()["files"][0]["shared_mask"], 8);
+        capture_shm_result(file, 3, 1, 5, rusqlite::ffi::SQLITE_OK);
+        capture_shm_result(file, 3, 1, 10, rusqlite::ffi::SQLITE_BUSY);
+        capture_shm_result(file, 3, 1, 6, rusqlite::ffi::SQLITE_IOERR);
+        capture_shm_close(file);
+        capture_shm_open(file, rusqlite::ffi::SQLITE_OPEN_MAIN_DB); // Reused native address retains the closed generation.
+        let snapshot = AppDatabase::snapshot_shm_lock_probe();
+        assert_eq!(snapshot["files"][0]["slots"][3]["unlock_error"], 1);
+        assert_eq!(snapshot["files"][0]["slots"][3]["exclusive_busy"], 1);
+        assert_eq!(snapshot["files"][0]["slots"][3]["other_error"], 1);
+        assert_eq!(snapshot["files"][0]["shared_mask"], 0);
+        assert_eq!(snapshot["files"][0]["closed"], true);
+        assert_eq!(snapshot["files"][1]["file_id"], 2);
+        assert!(!snapshot.to_string().contains("pointer"));
+        capture_shm_result(file, 7, 2, 6, rusqlite::ffi::SQLITE_OK);
+        assert_eq!(AppDatabase::snapshot_shm_lock_probe()["attribution_proven"], false);
+        SHM_LOCK_CAPTURE.with(|capture| {
+            let _held = capture.borrow();
+            capture_shm_result(file, 3, 1, 6, rusqlite::ffi::SQLITE_OK);
+        });
+        assert_eq!(AppDatabase::snapshot_shm_lock_probe()["borrow_conflicts"], 1);
+        AppDatabase::begin_shm_lock_probe();
+        for pointer in 1..=65 { capture_shm_open(pointer as *mut rusqlite::ffi::sqlite3_file, rusqlite::ffi::SQLITE_OPEN_MAIN_DB); }
+        assert_eq!(AppDatabase::snapshot_shm_lock_probe()["overflow"], 1);
+        assert_eq!(AppDatabase::snapshot_shm_lock_probe()["files"].as_array().unwrap().len(), 64);
+        AppDatabase::end_shm_lock_probe();
+    }
+
+    #[test]
+    fn shm_lock_probe_actual_wal_read_rollback_and_close() {
+        let _serial = serial_test_guard();
+        AppDatabase::begin_shm_lock_probe();
+        AppDatabase::end_shm_lock_probe();
+        let (_directory, _paths, database) = fixture();
+        let writer = database.write_context(DatabaseOperationContext::new("test", "shm_seed")).expect("writer");
+        writer.execute("INSERT INTO meta(key,value) VALUES('shm_seed','actual')", []).expect("real WAL frame");
+        let disabled = open_counted_connection(&database.inner.database_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_FULL_MUTEX).expect("disabled reader");
+        let value: String = disabled.query_row("SELECT value FROM meta WHERE key='shm_seed'", [], |row|row.get(0)).expect("disabled passthrough");
+        assert_eq!(value, "actual");
+        disabled.close().expect("disabled close");
+        assert!(AppDatabase::snapshot_shm_lock_probe()["files"].as_array().unwrap().is_empty());
+        AppDatabase::begin_shm_lock_probe();
+        let reader = open_counted_connection(&database.inner.database_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_FULL_MUTEX).expect("reader");
+        reader.execute_batch("BEGIN").expect("begin");
+        let _: String = reader.query_row("SELECT value FROM meta WHERE key='shm_seed'", [], |row|row.get(0)).expect("snapshot");
+        let during = AppDatabase::snapshot_shm_lock_probe();
+        assert!(during["files"].as_array().unwrap().iter().any(|file| file["shared_mask"].as_u64().unwrap() != 0));
+        reader.execute_batch("ROLLBACK").expect("rollback");
+        let after = AppDatabase::snapshot_shm_lock_probe();
+        let unlocks = |snapshot: &serde_json::Value| snapshot["files"].as_array().unwrap().iter()
+            .flat_map(|file|file["slots"].as_array().unwrap())
+            .map(|slot|slot["shared_unlock_ok"].as_u64().unwrap()).sum::<u64>();
+        assert!(unlocks(&after) > unlocks(&during), "ROLLBACK must expose its actual shared unlock callback");
+        assert_eq!(after["attribution_proven"], true);
+        reader.close().expect("checked close");
+        assert!(AppDatabase::snapshot_shm_lock_probe()["files"].as_array().unwrap().iter().all(|file| file["closed"] == true));
+        AppDatabase::end_shm_lock_probe();
+        AppDatabase::begin_shm_lock_probe();
+        assert!(AppDatabase::snapshot_shm_lock_probe()["files"].as_array().unwrap().is_empty());
+        AppDatabase::end_shm_lock_probe();
+        drop(writer);
     }
 
     #[test]

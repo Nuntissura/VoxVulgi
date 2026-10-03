@@ -87,7 +87,60 @@
       "PERSIST_WAL: checkpoint precedes persistence handling",
       "Concurrent checkpoint on pinned3.46.0: documented WAL-reset race",
       "Higher admission timeouts or weakened atomicity: conceal rather than establish repair"
-    ]
+    ],
+    "disposable_filename_counterfactual_2026_10_03": {
+      "recorded_before_implementation": true,
+      "sources_checked": [
+        {
+          "source": "Pinned libsqlite3-sys0.38.2 SQLite3.53.2 sqlite3/sqlite3.c",
+          "anchors": [
+            "winIsUNCPath53024-53028",
+            "bUseSharedLockHandle53056/53122",
+            "winCloseSharedMemory52985-53005",
+            "winShmPurge52819-52840",
+            "winFullPathname54800-54820/54867-54868"
+          ],
+          "observed": "Leading two backslashes classify extended-local spelling as UNC locking branch; shared-node handle closes only at empty-list purge, and connection close has no explicit slot unlock. Native full-path output is copied without removing extended-local prefix."
+        },
+        {
+          "url": "https://sqlite.org/c3ref/io_methods.html",
+          "checked": "2026-10-03",
+          "observed": "VFS exposes actual xShmLock/xShmUnmap/xClose delegate interfaces; logical callback results are distinct from OS lock inspection."
+        },
+        {
+          "url": "https://sqlite.org/c3ref/db_filename.html",
+          "checked": "2026-10-03",
+          "observed": "Public filename getter returns VFS xFullPathname output; lifetime ends at detach/connection close."
+        }
+      ],
+      "reuse": "Existing default-disabled per-thread instrumentation and guarded disposable runtime/harness opens; canonical AppDatabase registry/path key retained.",
+      "rejected": [
+        "Production prefix stripping or long-path behavior weakening",
+        "Mixed simultaneous SHM names",
+        "UNC/extendedUNC/device/unknown/long-path transformation",
+        "Filesystem/hash/canonicalize work inside admitted connection open",
+        "Treating balanced callbacks as OS-lock proof"
+      ],
+      "selected": "DISPOSABLE-ONLY default-off per-thread exact-fixture adapter: transform only validated extended-local short(<260 UTF16) filename to plain-local spelling of the same database identity. Apply consistently to all live owner opens: startup/direct/counted/read/write/maintenance/pin/reopen/fresh/keeper. Exclude immutable backup URI.",
+      "constraints": [
+        "Refuse UNC/extendedUNC/device/unknown/long names",
+        "No mixed simultaneous SHM spellings",
+        "No filesystem/hash/canonicalization inside admitted open",
+        "Preserve canonical AppDatabase registry/path key and original admission bounds",
+        "No production mode, production policy selection or long-path weakening"
+      ],
+      "risks_and_controls": [
+        "Different native name could split shared-node identity: exact fixture validation before threads and all live opens use one spelling; immutable backup excluded.",
+        "Path shortening could misaddress data or lose long-path support: short local identity only, refuse unsupported classes and lengths; production unchanged.",
+        "Conditional thread configuration could miss an open: require native filename receipts for every worker and maintenance/keeper/fresh owner, negative scope/mode guards.",
+        "A passing counterfactual does not establish live cause: preserve original RED and require canonical counterpart plus existing production authority/packaged gates."
+      ],
+      "validation_plan": [
+        "Owning default-disabled/exact-fixture/path-class/length/identity tests and invalid mode/value guards before fixture creation",
+        "Fresh then canonical-density same-policy counterpart with7worker native filenames, balanced captured lock receipts, reconciled canonical writes, original final checkpoint, keeper close and database drain",
+        "Independent source review before compile; production policy remains unselected"
+      ]
+    }
   },
   "recorded_evidence": {
     "red": "../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0323/20261003/churn_sync_file_kind_summary.json",
@@ -728,6 +781,260 @@
       "focused_tests_passed_reused": 32,
       "canonical_counterpart_passed": false,
       "production_permission_granted": false,
+      "production_policy_changed": false,
+      "production_fix_proven": false,
+      "live_closure_proven": false
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Native SHM canonical probe remains original maintenance RED101matchedwrites/0workerfailures/34743ms/final24of2161. Captured keeper slot4 acquires2/unlocks2 with0failed unlocks and rollback/preclose inferredmask0 refutes failed-unlock candidate only for these captured calls. Logical delegate success is not OS lock introspection; closed worker calls were not captured. Postclose sequential checkpoints complete but do not override original failure.",
+      "canonical_native_shm": {
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/canonical_native_shm_summary.json",
+        "source_summary": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_canonical_native_shm_v1\\churn_summary.json",
+        "summary_sha256": "336B1949F0B1A4B5AD107A20B7145F780D32F6CD98F658F60B59E38890ED8C9B",
+        "exact_copy_verified": true,
+        "frozen_artifacts": {
+          "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/native_shm_lock_runtime.rs": "A1C9CFF1768158DA9B42E45F85C89BB83CF5D843ECB155C3E394DBEB361CCD15",
+          "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/native_shm_lock_example.rs": "A19C30F3CD2E8B9A13FA4223343459F8105771DC920761FBE3EC53B5B5231275",
+          "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/native_shm_lock_example.exe": "79C8B50B891ECD1A5E92502F50D532115D78475DF793783C81897BD1456B67C3"
+        },
+        "verdict": "RED_ORIGINAL_FINAL_MAINTENANCE",
+        "worker_failures": 0,
+        "reconciled_commits": 101,
+        "canonical_counter_matches": true,
+        "elapsed_ms": 34743,
+        "original_final_checkpoint": {
+          "log_frames": 2161,
+          "checkpointed_frames": 24,
+          "busy": 0,
+          "pin_active": false
+        },
+        "pre_keeper_close_diagnostics": [
+          {
+            "requested_vfs": null,
+            "checkpoint": {
+              "busy": 0,
+              "checkpointed_frames": 24,
+              "log_frames": 2161
+            },
+            "checkpoint_ms": 0,
+            "elapsed_ms": 6
+          },
+          {
+            "requested_vfs": "voxvulgi_read_counting",
+            "checkpoint": {
+              "busy": 0,
+              "checkpointed_frames": 24,
+              "log_frames": 2161
+            },
+            "checkpoint_ms": 0,
+            "elapsed_ms": 4
+          }
+        ],
+        "post_keeper_close_diagnostics_sequential": [
+          {
+            "requested_vfs": null,
+            "checkpoint": {
+              "busy": 0,
+              "checkpointed_frames": 2161,
+              "log_frames": 2161
+            },
+            "checkpoint_ms": 1641,
+            "elapsed_ms": 1667
+          },
+          {
+            "requested_vfs": "voxvulgi_read_counting",
+            "checkpoint": {
+              "busy": 0,
+              "checkpointed_frames": 2161,
+              "log_frames": 2161
+            },
+            "checkpoint_ms": 66,
+            "elapsed_ms": 93
+          }
+        ],
+        "keeper_slot4_after_rollback": {
+          "exclusive_busy": 0,
+          "other_error": 0,
+          "shared_lock_ok": 2,
+          "shared_unlock_ok": 2,
+          "unlock_error": 0
+        },
+        "keeper_rollback_shared_mask": 0,
+        "keeper_preclose_shared_mask": 0,
+        "keeper_capture_attribution_proven": true,
+        "keeper_unknown": 0,
+        "keeper_overflow": 0,
+        "keeper_borrow_conflicts": 0,
+        "preclose_counted_checkpoint_exclusive_busy_offsets": [
+          4,
+          5,
+          6
+        ],
+        "counted_probe_slot7_shared_acquire": 1,
+        "counted_probe_slot7_shared_unlock": 1,
+        "failed_keeper_unlock_candidate_refuted_scope": "Captured keeper native delegate calls only",
+        "inferred_mask_is_os_lock_introspection": false,
+        "closed_worker_calls_captured": false,
+        "final_checkpoint_complete": false,
+        "original_verdict_overridden": false,
+        "native_cause_proven": false,
+        "recovery_retries_used": 0,
+        "max_sampled_wal_bytes": 8903352,
+        "database_drain_ms": 1
+      },
+      "fresh_owning_test_results": [
+        {
+          "log": "product/desktop/build_target/logs/wp0333_shm_lock_owning_tests.log",
+          "sha256": "9C82AA520FE63A5C26AD4FD0BF02C2ABF2FE7AE0B34DDE9428F57746476A7F06",
+          "passed": 2
+        },
+        {
+          "log": "product/desktop/build_target/logs/wp0333_shm_existing_runtime_tests.log",
+          "sha256": "F72C10FE4661D8F323BADE322A386831527B50625B3B05E5910FF891CDE7CAF9",
+          "passed": 17
+        }
+      ],
+      "unchanged_prior_assertions_reused": 14,
+      "new_total34_tests_claim": false,
+      "negative_guards": [
+        {
+          "log": "product/desktop/build_target/logs/wp0333_lock_invalid_value.log",
+          "sha256": "DC5BFE4CB2FF17D7768C2973FFD1C497F5564313719A9AE448965B3752CC954C",
+          "exact_error": "maintenance-lock-probe must be0 or1",
+          "fixture_root": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_lock_invalid_value_v1",
+          "fixture_exists_after": false,
+          "before_absence_basis": "Root observed absent before command; independently absent after command"
+        },
+        {
+          "log": "product/desktop/build_target/logs/wp0333_lock_invalid_mode.log",
+          "sha256": "213A274A890D42E58276FD9B5B65215B351E2B38995E45A47915983BEC6E6620",
+          "exact_error": "Lock probe requires keeper plus maintenance and owner reopen",
+          "fixture_root": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_lock_invalid_mode_v1",
+          "fixture_exists_after": false,
+          "before_absence_basis": "Root observed absent before command; independently absent after command"
+        }
+      ],
+      "canonical_counterpart_passed": false,
+      "production_policy_changed": false,
+      "production_fix_proven": false,
+      "live_closure_proven": false
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Canonical worker SHM capture retains original maintenance RED111matchedwrites/0workerfailures/33497ms/final56of2400 despite complete postclose probes.612closed main files across7valid workers have balanced captured successful shared acquire/unlock,0unlock/othererrors/positivehistoricalmasks/unknown/overflow/coveragefailures. This refutes failed or unbalanced shared unlock only for captured delegate calls, not OS locks. Next disposable filename counterfactual research recorded before implementation.",
+      "canonical_worker_shm": {
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/canonical_worker_shm_summary.json",
+        "source_summary": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_canonical_worker_shm_v1\\churn_summary.json",
+        "summary_sha256": "5508273A4898E886CF80C3D1512D5FB3F54F6131AE2FFE3143C361A9C18C4479",
+        "exact_copy_verified": true,
+        "frozen_artifacts": {
+          "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/worker_native_filename_source.rs": "94B4FD32DB97678582A40D85247ECF39572161C6F54E16E64456EB36D806D8D3",
+          "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/worker_native_filename.exe": "AA29D0ACEB5EB16FB0F16837933393D65A2FCE199137207026BAA922625056AF",
+          "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/native_shm_lock_runtime.rs": "A1C9CFF1768158DA9B42E45F85C89BB83CF5D843ECB155C3E394DBEB361CCD15"
+        },
+        "verdict": "RED_ORIGINAL_FINAL_MAINTENANCE",
+        "reconciled_commits": 111,
+        "worker_failures": 0,
+        "canonical_counter_matches": true,
+        "elapsed_ms": 33497,
+        "original_final_checkpoint": {
+          "log_frames": 2400,
+          "checkpointed_frames": 56
+        },
+        "closed_main_files": 612,
+        "workers_with_valid_capture": 7,
+        "first_native_filename_each_worker": {
+          "prefix_class": "extended_local",
+          "byte_length": 96,
+          "utf8": true,
+          "coverage_proven": true
+        },
+        "all_captured_shared_acquire_unlock_counts_balanced": true,
+        "unlock_errors": 0,
+        "other_errors": 0,
+        "positive_historical_shared_mask_files": 0,
+        "unknown": 0,
+        "overflow": 0,
+        "borrow_conflicts": 0,
+        "coverage_failures": 0,
+        "refuted_candidate_scope": "Failed/unbalanced shared unlock in actual captured delegate calls only; no OS lock-mask proof",
+        "post_keeper_close_complete_checkpoints_sequential": true,
+        "original_verdict_overridden": false
+      },
+      "production_policy_changed": false,
+      "production_fix_proven": false,
+      "live_closure_proven": false
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Canonical plain-local counterpart overall RED2writer admission timeouts5010/5008ms despite48independently reconciled persisted writes. Original partial-checkpoint issue advanced: final maintenance1011of1011/10ms and pin recovery passed;51native observations allplain verified.22owning checks(2+20)GREEN. Phase2 blocked: no production policy selected or live fix claim.",
+      "canonical_plain_local": {
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/canonical_plain_local_summary.json",
+        "source_summary": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_canonical_plain_local_v1\\churn_summary.json",
+        "summary_sha256": "6F178B1245D8D5715290DD7B1A7EC1669AC4601E001D86079894AD305A119A17",
+        "exact_copy_verified": true,
+        "frozen_artifacts": {
+          "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/plain_local_filename_runtime.rs": "0FCBC8776F94786A9D501563E10F1C51F6F956BEC35F0910C3BCBEB66C263330",
+          "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/plain_local_filename_example.rs": "1134B334B0DBC7CFAC9FFB5944309F1F53D9C841B0FB0734302A1A4B20F4F8FD",
+          "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/plain_local_filename_example.exe": "E0A0BF6BE6A368DE095563CC72294B8AEC8528159BD9AA8AFBA56219C7827C46"
+        },
+        "verdict": "RED_WORKER_ADMISSION_FAILURES",
+        "reconciled_commits": 48,
+        "worker_failures": 2,
+        "failures_by_kind": {
+          "writer_admission_timeout": 2
+        },
+        "writer_timeout_elapsed_ms": [
+          5010,
+          5008
+        ],
+        "canonical_counter_matches": true,
+        "elapsed_ms": 30051,
+        "filename_counterfactual": {
+          "all_plain_local": true,
+          "enabled": true,
+          "every_worker_plain_local": true,
+          "limits": "Exact validated disposable identity only; immutable standalone inspection URIs are excluded. Native filename coverage does not select a production path or policy solution.",
+          "native_observations": 51,
+          "proven": true
+        },
+        "original_final_checkpoint": {
+          "log_frames": 1011,
+          "checkpointed_frames": 1011,
+          "checkpoint_ms": 10,
+          "busy": 0,
+          "pin_active": false
+        },
+        "original_final_checkpoint_complete": true,
+        "partial_during_pin": true,
+        "recovered_after_pin": true,
+        "database_drain_ms": 2,
+        "independent_canonical_reread": {
+          "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/plain_local_independent_read.json",
+          "sha256": "0817832571898072D269AF3711040B8F6C899BECE0F7629D534974A8B51C778C",
+          "persisted_committed_fixture_jobs": 48,
+          "worker_acknowledged_writes": 48,
+          "schema_version": 60,
+          "acknowledgements_reconcile": true
+        }
+      },
+      "owning_test_results": [
+        {
+          "log": "product/desktop/build_target/logs/wp0333_plain_local_owning_tests.log",
+          "sha256": "D882D7725A5958166DD71604375E8667C19FC1C894B2BDA3A33C89B17348C656",
+          "passed": 2
+        },
+        {
+          "log": "product/desktop/build_target/logs/wp0333_plain_local_runtime_regressions.log",
+          "sha256": "8B2DCA1987432D1E1C62C20CA3E035FCC9D22FDF817A35D1A8414000C7A7412C",
+          "passed": 20
+        }
+      ],
+      "owning_test_count": 22,
+      "canonical_counterpart_passed": false,
+      "phase2_status": "BLOCKED_BY_CANONICAL_ADMISSION_FAILURES",
+      "production_policy_selected": false,
       "production_policy_changed": false,
       "production_fix_proven": false,
       "live_closure_proven": false

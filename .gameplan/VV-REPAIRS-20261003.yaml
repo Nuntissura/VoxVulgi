@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: batch
 assignment: VV-REPAIRS-20261003
 parent: null
-generation: 43
+generation: 53
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -64,3 +64,13 @@ steps:
 - {id: GP-048, role: any, at: before_round, do: require canonical retry exhaustion and worker RED before mapped-keeper counterfactual, check: {type: confirm}, source: 'failure: four261prep errors exhaust3retries;3writeradmissionfails;52canonicalcommits', state: active}
 - {id: GP-049, role: any, at: before_round, do: require canonical keeper final partial RED before post-close diagnostic, check: {type: confirm}, source: 'failure:81canonicalwrites0workererrors butfinal518of1736 whileidlekeeperalive', state: active}
 - {id: GP-050, role: any, at: before_round, do: require original final partial and post-keeper-close complete checkpoint before native lock attribution, check: {type: confirm}, source: 'failure:92canonicalwrites0workerfails; finalpartial butfreshCP848of848 afterkeeperclose', state: active}
+- {id: GP-051, role: any, at: before_round, do: require confirmations written in separate command before gated test invocation, check: {type: confirm}, source: 'prep error: hook evaluates before combined confirm and cargo command can execute', state: active}
+- {id: GP-052, role: any, at: before_round, do: require broker native window observation failure rejects quiet proof, check: {type: confirm}, source: 'review finding: ignored EnumWindows failure could falsely report zero visible windows', state: active}
+- {id: GP-053, role: any, at: before_round, do: require durable broker and child ownership ledger before native package queries, check: {type: confirm}, source: 'review finding: fallible broker identity query preceded its durable ownership ledger', state: active}
+- {id: GP-054, role: any, at: before_round, do: require keeper balanced unlock proof and partial checkpoint before tracing other owners, check: {type: confirm}, source: 'failure:101writes0fails;keeperunlockbalanced;CPreadslots4-6busy;final24of2161', state: active}
+- {id: GP-055, role: any, at: before_round, do: require all worker balanced unlock and native extended-local paths before plain-local counterfactual, check: {type: confirm}, source: 'failure:612closedfiles balance;111writes0fails;extendedlocal;final56of2400 incomplete', state: active}
+- {id: GP-056, role: any, at: before_round, do: require setup broker TimeoutException alias resolves System and ServiceProcess ambiguity, check: {type: confirm}, source: 'compile failure: ServiceProcess introduces ambiguous TimeoutException symbol', state: active}
+- {id: GP-057, role: any, at: before_round, do: require actual installed Core0.159.2 setup source verified before mutation gate, check: {type: confirm}, source: 'preflight gap: installedCore0.159.2 differs from inspected source0.160.0', state: active}
+- {id: GP-058, role: any, at: before_round, do: require disposable filename probe rejects existing database entries including dangling links, check: {type: file, path: product/engine/src/database_runtime.rs, contains: 'std::fs::symlink_metadata(path)'}, source: 'HIGH review: parent-only canonicalization allowed pre-existing linked database target', state: active}
+- {id: GP-059, role: any, at: before_round, do: require independent SQLite canonical read opens URI with uri=True, check: {type: confirm}, source: 'read proof failure: sqlite3.connect URI string omitted uri=True', state: active}
+- {id: GP-060, role: any, at: before_round, do: require plain-local complete checkpoint plus two FIFO timeouts before distinct storage hypothesis, check: {type: confirm}, source: 'counterpart RED:48canonicalwrites;CP1011of1011;nativeplaincoverage;2writeradmissiontimeouts', state: active}
