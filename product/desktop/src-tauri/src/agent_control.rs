@@ -27,6 +27,21 @@ pub(super) fn ensure_explicit_headless_runner(paths: &AppPaths) -> Result<(), St
     Ok(())
 }
 
+fn record_selected_runner_start_error(receipt: &mut jobs::SelectedDownloadStartReceipt, error: String) {
+    receipt.held = true;
+    receipt.hold_reason = Some(format!("explicit_runner_start_failed: {error}"));
+    receipt.next_eligible_at_ms = None;
+}
+
+pub(super) fn reconcile_selected_runner_start(paths: &AppPaths, receipt: &mut jobs::SelectedDownloadStartReceipt) -> bool {
+    if let Err(error) = ensure_explicit_headless_runner(paths) {
+        // Admission is already durable. Return its exact original IDs instead of losing the receipt.
+        record_selected_runner_start_error(receipt, error);
+        return true;
+    }
+    false
+}
+
 pub(super) fn catalog() -> Value {
     serde_json::from_str(CATALOG).expect("embedded agent manual must be valid JSON")
 }
@@ -287,12 +302,12 @@ fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, St
             if urls.is_empty() || urls.len() > 25 { return Err("provide 1-25 URLs".into()); }
             let urls = urls.iter().map(|v| v.as_str().filter(|s|s.len()<=2048).map(str::to_string).ok_or("invalid URL".to_string())).collect::<Result<Vec<_>,_>>()?;
             if let Some(mode) = request["mode"].as_str() {
-                let submission = jobs::enqueue_selected_download_batch(paths, urls, None,
+                let mut submission = jobs::enqueue_selected_download_batch(paths, urls, None,
                     request["output_dir"].as_str().map(str::to_string), None, None,
                     request["preset_id"].as_str().map(str::to_string), Vec::new(), mode).map_err(|e|e.to_string())?;
-                if submission.start.is_some() { ensure_explicit_headless_runner(paths)?; }
-                let all_succeeded = submission.submission_error.is_none();
-                return Ok(json!({"jobs":submission.jobs.into_iter().map(safe_job).collect::<Vec<_>>(),"start":submission.start,"submission_error":submission.submission_error,"all_succeeded":all_succeeded,"completion":if all_succeeded { "submission accepted; inspect canonical jobs and held receipt; not a completed download" } else { "canonical jobs queued, queue paused, selected start not admitted; inspect exact jobs before retry" }}));
+                let runner_start_failed = submission.start.as_mut().is_some_and(|start| reconcile_selected_runner_start(paths, start));
+                let all_succeeded = submission.submission_error.is_none() && !runner_start_failed;
+                return Ok(json!({"jobs":submission.jobs.into_iter().map(safe_job).collect::<Vec<_>>(),"start":submission.start,"submission_error":submission.submission_error,"all_succeeded":all_succeeded,"completion":if all_succeeded { "submission accepted; inspect canonical jobs and held receipt; not a completed download" } else if runner_start_failed { "selection admitted; runner startup failed; inspect exact canonical jobs before retrying runner startup" } else { "canonical jobs queued, queue paused, selected start not admitted; inspect exact jobs before retry" }}));
             }
             let rows = jobs::enqueue_download_direct_url_batch_with_repairs(paths, urls, None,
                 request["output_dir"].as_str().map(str::to_string), None, None,
@@ -308,8 +323,8 @@ fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, St
             let values = request["job_ids"].as_array().filter(|v| !v.is_empty() && v.len() <= 1500).ok_or("select 1-1500 exact job IDs")?;
             let selected = values.iter().map(|v|v.as_str().filter(|s|token(s)).map(str::to_string).ok_or("invalid job ID")).collect::<Result<Vec<_>,_>>()?;
             let mode = request["mode"].as_str().filter(|m|matches!(*m,"only"|"continue_all")).ok_or("mode must be only or continue_all")?;
-            let result = jobs::start_selected_downloads(paths, &selected, mode).map_err(|e|e.to_string())?;
-            ensure_explicit_headless_runner(paths)?;
+            let mut result = jobs::start_selected_downloads(paths, &selected, mode).map_err(|e|e.to_string())?;
+            reconcile_selected_runner_start(paths, &mut result);
             serde_json::to_value(result).map_err(|e|e.to_string())
         }
         "jobs.retry" | "downloads.restart_current" | "jobs.cancel" => {
@@ -514,6 +529,23 @@ mod tests {
         assert!(confirm(&json!({"confirmation":"JOBS.CANCEL:a,b"}),"jobs.cancel",&selected).is_ok());
         assert!(!token("../escape")); assert!(!token(""));
     }
+    #[test]
+    fn selected_runner_start_failure_preserves_admitted_ids_and_scope() {
+        let mut receipt = jobs::SelectedDownloadStartReceipt {
+            mode: "continue_all".into(), job_ids: vec!["new-job-a".into(), "new-job-b".into()],
+            paused: false, rest_paused: false, held: false, hold_reason: None, next_eligible_at_ms: Some(123),
+        };
+        record_selected_runner_start_error(&mut receipt, "read_admission_timeout".into());
+        let serialized = serde_json::to_value(&receipt).unwrap();
+        assert_eq!(serialized["job_ids"], json!(["new-job-a","new-job-b"]));
+        assert_eq!(serialized["mode"], "continue_all");
+        assert_eq!(serialized["rest_paused"], false);
+        assert!(serialized["hold_reason"].as_str().unwrap().contains("read_admission_timeout"));
+        assert!(receipt.held);
+        assert!(receipt.hold_reason.unwrap().contains("explicit_runner_start_failed"));
+        assert!(receipt.next_eligible_at_ms.is_none());
+    }
+
     #[test] fn selected_download_schema_rejects_wrong_mode_duplicates_and_missing_operation() {
         let c = catalog();
         let descriptor = c["commands"].as_array().unwrap().iter().find(|v|v["name"]=="downloads.start_selected").unwrap();

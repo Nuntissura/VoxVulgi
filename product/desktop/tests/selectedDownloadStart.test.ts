@@ -26,8 +26,8 @@ test("semantic UI and backend explicit selected decisions share hidden runner ac
   const desktop = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   const bridge = readFileSync(new URL("../src-tauri/src/agent_control.rs", import.meta.url), "utf8");
   const body = (name: string) => desktop.slice(desktop.indexOf(`fn ${name}(`)).split("#[tauri::command]")[0];
-  assert.match(body("jobs_start_selected_downloads"), /agent_control::ensure_explicit_headless_runner\(&state.paths\)/);
-  assert.match(body("jobs_enqueue_selected_download_batch"), /if receipt.start.is_some\(\).*ensure_explicit_headless_runner/);
+  assert.match(body("jobs_start_selected_downloads"), /agent_control::reconcile_selected_runner_start\(&state.paths, &mut receipt\)/);
+  assert.match(body("jobs_enqueue_selected_download_batch"), /if let Some\(start\) = receipt.start.as_mut\(\).*reconcile_selected_runner_start/);
   assert.doesNotMatch(body("jobs_enqueue_download_batch"), /ensure_explicit_headless_runner/);
   assert.match(bridge, /pub\(super\) fn ensure_explicit_headless_runner/);
   assert.match(bridge, /state.agent_headless && !safe_mode/);
