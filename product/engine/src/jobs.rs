@@ -61,6 +61,11 @@ pub(crate) fn job_runner_shutdown_requested() -> bool {
     JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
 }
 
+/// Publish cancellation intent before terminating lifecycle-owned children.
+pub fn request_job_runner_shutdown() {
+    JOB_RUNNER_SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+}
+
 pub(crate) fn external_command_cancel_requested() -> bool {
     if job_runner_shutdown_requested() {
         return true;
@@ -9487,7 +9492,7 @@ impl JobRunnerShutdownReport {
 
 impl JobRunnerHandle {
     pub fn stop(&self) {
-        JOB_RUNNER_SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+        request_job_runner_shutdown();
         self.stop.store(true, Ordering::SeqCst);
         update_youtube_gate_runtime(&self.runtime_state, "ready", None, None);
     }
@@ -14179,6 +14184,9 @@ fn execute_job(
             ) {
                 Ok(path) => path,
                 Err(err) => {
+                    if preserve_shutdown_interrupted_download(paths, job_id, &err) {
+                        return Ok(());
+                    }
                     if let Some((
                         auth_fingerprint,
                         runtime_epoch,
@@ -21157,6 +21165,20 @@ fn set_failed(paths: &AppPaths, job_id: &str, error: &str) -> Result<()> {
     Ok(())
 }
 
+fn preserve_shutdown_interrupted_download(paths: &AppPaths, job_id: &str, error: &EngineError) -> bool {
+    if !matches!(error, EngineError::JobInterruptedByShutdown) {
+        return false;
+    }
+    // Keep the original running row for the existing canonical startup recovery. Do not
+    // publish a provider failure or manufacture a replacement attempt during shutdown.
+    let _ = log_line(paths, job_id, "info", "job_shutdown_interrupted", serde_json::json!({
+        "recovery": "original_running_job_on_startup"
+    }));
+    append_engine_diagnostics_trace_row_best_effort(paths, "job_shutdown_interrupted", "info",
+        serde_json::json!({"job_id":job_id,"recovery":"original_running_job_on_startup"}));
+    true
+}
+
 fn is_canceled(paths: &AppPaths, job_id: &str) -> Result<bool> {
     if JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
         return Ok(true);
@@ -24700,6 +24722,9 @@ fn run_command_output_with_control_inner(
     use std::process::Stdio;
     use std::time::Instant;
 
+    if bind_yt_dlp_lifecycle && job_runner_shutdown_requested() {
+        return Err(CommandRunError::Canceled);
+    }
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
 
@@ -24748,10 +24773,18 @@ fn run_command_output_with_control_inner(
 
         match child.try_wait() {
             Ok(Some(status)) => {
+                let shutdown_at_exit = job_runner_shutdown_requested();
                 let stdout = stdout_handle.join().unwrap_or_default();
                 let stderr = stderr_handle.join().unwrap_or_default();
                 if let Some(reason) = abort_reason {
                     return Err(reason);
+                }
+                // Capture intent when exit is observed: a genuine failure observed before
+                // shutdown must stay a failure even if shutdown starts during pipe draining.
+                if lifecycle_exit_is_shutdown_interruption(
+                    bind_yt_dlp_lifecycle, shutdown_at_exit, status.success(),
+                ) {
+                    return Err(CommandRunError::Canceled);
                 }
                 return Ok(std::process::Output {
                     status,
@@ -24769,6 +24802,18 @@ fn run_command_output_with_control_inner(
                 return Err(CommandRunError::Wait(err));
             }
         }
+    }
+}
+
+fn lifecycle_exit_is_shutdown_interruption(lifecycle_owned: bool, shutdown_requested: bool, success: bool) -> bool {
+    lifecycle_owned && shutdown_requested && !success
+}
+
+fn yt_dlp_cancellation_error(shutdown_requested: bool) -> EngineError {
+    if shutdown_requested {
+        EngineError::JobInterruptedByShutdown
+    } else {
+        EngineError::InstallFailed("job canceled while running yt-dlp".to_string())
     }
 }
 
@@ -25372,6 +25417,10 @@ fn run_yt_dlp(
                 failures.push(failure);
                 continue;
             }
+            Err(CommandRunError::Spawn(e))
+                if e.kind() == std::io::ErrorKind::Interrupted && job_runner_shutdown_requested() => {
+                return Err(EngineError::JobInterruptedByShutdown);
+            }
             Err(CommandRunError::Spawn(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                 emit_downloader_causal_event(
                     paths,
@@ -25411,18 +25460,17 @@ fn run_yt_dlp(
                 continue;
             }
             Err(CommandRunError::Canceled) => {
+                let shutdown_requested = job_runner_shutdown_requested();
                 emit_downloader_causal_event(
                     paths,
                     job_id,
                     "downloader_outcome",
                     candidate_index,
-                    Some("canceled"),
+                    Some(if shutdown_requested { "shutdown_interrupted" } else { "canceled" }),
                     None,
                     Some(launch_started.elapsed().as_millis().min(i64::MAX as u128) as i64),
                 );
-                return Err(EngineError::InstallFailed(
-                    "job canceled while running yt-dlp".to_string(),
-                ));
+                return Err(yt_dlp_cancellation_error(shutdown_requested));
             }
             Err(CommandRunError::TimedOut(limit)) => {
                 emit_downloader_causal_event(
@@ -36252,6 +36300,59 @@ EOF
     }
 
     // WP-0254: interrupted download work resumes on restart instead of being forgotten.
+    #[test]
+    fn shutdown_interrupted_download_preserves_original_until_startup_recovery() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let params_json = r#"{"url":"https://www.youtube.com/watch?v=shutdown-fixture","provider":"youtube_yt_dlp_v1"}"#;
+        let job = enqueue_with_type_item_and_batch_id(&paths, JobType::DownloadDirectUrl,
+            params_json.to_string(), None, Some("shutdown-original-batch".to_string())).expect("enqueue");
+        let conn = db::open(&paths).expect("fixture connection");
+        conn.execute("UPDATE job SET status='running', started_at_ms=42, attempt_no=3 WHERE id=?1", [&job.id]).expect("running attempt");
+        let outcome_count_before: i64 = conn.query_row("SELECT COUNT(*) FROM downloader_outcome", [], |row|row.get(0)).expect("outcome count");
+        let error = augment_yt_dlp_error("https://www.youtube.com/watch?v=shutdown-fixture",
+            yt_dlp_cancellation_error(true), true, false, true);
+        assert!(matches!(error, EngineError::JobInterruptedByShutdown));
+        assert!(preserve_shutdown_interrupted_download(&paths, &job.id, &error));
+        let before_recovery: (String, i64, String, Option<String>, String, Option<String>, Option<i64>) = conn.query_row(
+            "SELECT id,attempt_no,params_json,batch_id,status,error,finished_at_ms FROM job WHERE id=?1", [&job.id],
+            |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?))).expect("preserved original");
+        assert_eq!(before_recovery, (job.id.clone(), 3, params_json.to_string(), Some("shutdown-original-batch".into()), "running".into(), None, None));
+        assert_eq!(requeue_orphaned_running_jobs(&conn).expect("canonical startup recovery"), 1);
+        let recovered: (String, i64, String, Option<String>, String, Option<i64>, Option<i64>, Option<String>) = conn.query_row(
+            "SELECT id,attempt_no,params_json,batch_id,status,started_at_ms,finished_at_ms,error FROM job WHERE id=?1", [&job.id],
+            |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?))).expect("recovered original");
+        assert_eq!(recovered, (job.id.clone(), 3, params_json.to_string(), Some("shutdown-original-batch".into()), "queued".into(), None, None, None));
+        let (jobs, attempts, outcomes): (i64,i64,i64) = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM job),(SELECT COUNT(*) FROM job_attempt),(SELECT COUNT(*) FROM downloader_outcome)", [],
+            |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).expect("no manufactured lineage or failure");
+        assert_eq!((jobs,attempts,outcomes), (1,0,outcome_count_before));
+    }
+
+    #[test]
+    fn ordinary_nonzero_download_failure_is_not_shutdown_interruption() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let job = enqueue(&paths, JobType::DownloadDirectUrl, "{}".to_string()).expect("enqueue");
+        let conn = db::open(&paths).expect("fixture connection");
+        conn.execute("UPDATE job SET status='running' WHERE id=?1", [&job.id]).expect("running");
+        let error = EngineError::ExternalToolFailed { tool:"yt-dlp".into(), code:Some(1), stderr:"actual subtitle failure".into() };
+        assert!(!lifecycle_exit_is_shutdown_interruption(true, false, false));
+        assert!(!lifecycle_exit_is_shutdown_interruption(false, true, false));
+        assert!(!lifecycle_exit_is_shutdown_interruption(true, true, true));
+        assert!(lifecycle_exit_is_shutdown_interruption(true, true, false));
+        assert!(!preserve_shutdown_interrupted_download(&paths, &job.id, &error));
+        assert!(!matches!(yt_dlp_cancellation_error(false), EngineError::JobInterruptedByShutdown));
+        set_failed(&paths, &job.id, &error.to_string()).expect("ordinary failure bookkeeping");
+        assert_eq!(requeue_orphaned_running_jobs(&conn).expect("startup recovery"), 0);
+        let (status, persisted_error): (String,Option<String>) = conn.query_row("SELECT status,error FROM job WHERE id=?1", [&job.id],
+            |row|Ok((row.get(0)?,row.get(1)?))).expect("failed row");
+        assert_eq!(status, "failed");
+        assert_eq!(persisted_error.as_deref(), Some(error.to_string().as_str()));
+    }
+
     #[test]
     fn running_download_jobs_resume_after_restart_recovery() {
         let dir = tempfile::tempdir().expect("tempdir");

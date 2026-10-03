@@ -19345,6 +19345,12 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                voxvulgi_engine::jobs::request_job_runner_shutdown();
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    if let Some(runner) = &state.runner {
+                        runner.stop();
+                    }
+                }
                 let _ = voxvulgi_engine::cmd::shutdown_yt_dlp_children();
                 cancel_youtube_retention_worker();
                 signal_watcher_stop();

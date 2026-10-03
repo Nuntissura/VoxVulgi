@@ -40,6 +40,9 @@ pub enum EngineError {
         stderr: String,
     },
 
+    #[error("job interrupted by app shutdown")]
+    JobInterruptedByShutdown,
+
     #[error("hash mismatch for {path}: expected {expected}, got {actual}")]
     HashMismatch {
         path: PathBuf,
