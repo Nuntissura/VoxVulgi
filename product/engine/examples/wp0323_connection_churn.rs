@@ -1,7 +1,7 @@
 //! Disposable non-cfg(test) AppDatabase connection-lifetime probe.
-//! Usage: --root <new-absolute-directory> [--seconds 20] [--database-copy <schema59-or60-backup>] [--workload meta|job_insert] [--reader-interval-ms 0..1000] [--writer-interval-ms 0..1000] [--reader-count 1..16] [--writer-count 1..4]
+//! Usage: --root <new-absolute-directory> [--seconds 20] [--database-copy <schema59-or60-backup>] [--workload meta|job_insert] [--reader-interval-ms 0..1000] [--writer-interval-ms 0..1000] [--reader-count 1..16] [--writer-count 1..4] [--connection-policy baseline|no_close_checkpoint|no_close_checkpoint_full]
 //! No live backup, keeper connection, injected lock, or admission delay.
-use rusqlite::{Connection, OpenFlags, TransactionBehavior};
+use rusqlite::{config::DbConfig, Connection, OpenFlags, TransactionBehavior};
 use serde::Serialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -21,6 +21,9 @@ const READ_JOB: &str = "wp0323_churn_fixture_read";
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Workload { Meta, JobInsert }
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ConnectionPolicy { Baseline, NoCloseCheckpoint, NoCloseCheckpointFull }
 
 fn hash_file(path: &Path) -> ProbeResult<(String, u64)> {
     let mut file = std::fs::File::open(path)?;
@@ -68,6 +71,9 @@ struct WorkerReport {
     max_query_ms: u128,
     failures_by_kind: BTreeMap<String, u64>,
     first_failures: Vec<serde_json::Value>,
+    policy_observations: Vec<serde_json::Value>,
+    vfs_timings: Vec<serde_json::Value>,
+    slow_vfs_operations: Vec<serde_json::Value>,
 }
 
 fn normalized(path: &Path) -> String {
@@ -90,11 +96,12 @@ fn reject_protected(path: &Path) -> ProbeResult<()> {
     Ok(())
 }
 
-fn parse() -> ProbeResult<(PathBuf, u64, Option<PathBuf>, Workload, u64, u64, usize, usize)> {
+fn parse() -> ProbeResult<(PathBuf, u64, Option<PathBuf>, Workload, u64, u64, usize, usize, ConnectionPolicy)> {
     let mut root = None;
     let mut seconds = 20;
     let mut copy = None;
     let mut workload = Workload::Meta;
+    let mut policy = ConnectionPolicy::Baseline;
     let mut reader_interval_ms: u64 = 0;
     let mut writer_interval_ms: u64 = 0;
     let mut reader_count: usize = 4;
@@ -110,6 +117,7 @@ fn parse() -> ProbeResult<(PathBuf, u64, Option<PathBuf>, Workload, u64, u64, us
             Some("--reader-interval-ms") => reader_interval_ms = value.to_str().ok_or("Invalid reader interval")?.parse()?,
             Some("--writer-interval-ms") => writer_interval_ms = value.to_str().ok_or("Invalid writer interval")?.parse()?,
             Some("--database-copy") => copy = Some(PathBuf::from(value)),
+            Some("--connection-policy") => policy = match value.to_str() { Some("baseline") => ConnectionPolicy::Baseline, Some("no_close_checkpoint") => ConnectionPolicy::NoCloseCheckpoint, Some("no_close_checkpoint_full") => ConnectionPolicy::NoCloseCheckpointFull, _ => return Err("Unsupported connection-policy".into()) },
             Some("--workload") => workload = match value.to_str() { Some("meta") => Workload::Meta, Some("job_insert") => Workload::JobInsert, _ => return Err("workload must be meta or job_insert".into()) },
             _ => return Err("Unknown argument; see usage at source header".into()),
         }
@@ -117,6 +125,7 @@ fn parse() -> ProbeResult<(PathBuf, u64, Option<PathBuf>, Workload, u64, u64, us
     if !(1..=30).contains(&seconds) { return Err("seconds must be1..30".into()); }
     if reader_interval_ms > 1000 || writer_interval_ms > 1000 { return Err("Intervals must be0..1000ms".into()); }
     if !(1..=16).contains(&reader_count) || !(1..=4).contains(&writer_count) { return Err("reader-count must be1..16 and writer-count1..4".into()); }
+    if policy != ConnectionPolicy::Baseline && workload != Workload::JobInsert { return Err("Nonbaseline connection policy requires job_insert workload so synchronous is set before any transaction".into()); }
     let root = root.ok_or("--root is required")?;
     if !root.is_absolute() || root.exists() { return Err("root must be an absent absolute directory".into()); }
     let parent = root.parent().ok_or("Root parent missing")?.canonicalize()?;
@@ -130,11 +139,28 @@ fn parse() -> ProbeResult<(PathBuf, u64, Option<PathBuf>, Workload, u64, u64, us
         if ![59, CURRENT_PROBE_SCHEMA].contains(&standalone_schema(&source)?) {
             return Err("database-copy must have schema59 or60; only the disposable destination may migrate".into());
         }
-        return Ok((root, seconds, Some(source), workload, reader_interval_ms, writer_interval_ms, reader_count, writer_count));
+        return Ok((root, seconds, Some(source), workload, reader_interval_ms, writer_interval_ms, reader_count, writer_count, policy));
     }
-    Ok((root, seconds, None, workload, reader_interval_ms, writer_interval_ms, reader_count, writer_count))
+    Ok((root, seconds, None, workload, reader_interval_ms, writer_interval_ms, reader_count, writer_count, policy))
 }
 
+
+
+// Counterfactual stays on disposable AppDatabase contexts; no environment or production defaults.
+fn apply_policy(connection: &Connection, policy: ConnectionPolicy) -> voxvulgi_engine::Result<serde_json::Value> {
+    let disabled = connection.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
+    if policy == ConnectionPolicy::NoCloseCheckpointFull {
+        connection.pragma_update(None, "synchronous", "FULL")?;
+    }
+    let effective = connection.db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE)?;
+    let synchronous: i64 = connection.pragma_query_value(None, "synchronous", |row|row.get(0))?;
+    let autocheckpoint: i64 = connection.pragma_query_value(None, "wal_autocheckpoint", |row|row.get(0))?;
+    if !disabled || !effective || autocheckpoint != 1000
+        || (policy == ConnectionPolicy::NoCloseCheckpointFull && synchronous != 2) {
+        return Err(voxvulgi_engine::EngineError::InstallFailed("Counterfactual connection policy did not match requested settings".into()));
+    }
+    Ok(json!({"no_checkpoint_on_close":effective,"synchronous":synchronous,"wal_autocheckpoint":autocheckpoint}))
+}
 
 // Exact enqueue SQL shape; synthetic IDs stay confined to the disposable root and no runner starts.
 fn insert_job(connection: &Connection, id: &str, params_json: &str) -> rusqlite::Result<usize> {
@@ -143,22 +169,29 @@ fn insert_job(connection: &Connection, id: &str, params_json: &str) -> rusqlite:
         rusqlite::params![id, Option::<String>::None, Option::<String>::None, "download_direct_url", "queued", 0.0_f32, Option::<String>::None, params_json, std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis().min(i64::MAX as u128) as i64, Option::<i64>::None, Option::<i64>::None, format!("{id}.jsonl"), "recurring", "youtube_recurring", Option::<String>::None])
 }
 
-fn worker(database: db::AppDatabase, barrier: Arc<Barrier>, deadline: Instant, index: usize, writer_count: usize, workload: Workload, job_params: Arc<String>, interval_ms: u64) -> WorkerReport {
+fn worker(database: db::AppDatabase, barrier: Arc<Barrier>, deadline: Instant, index: usize, writer_count: usize, workload: Workload, job_params: Arc<String>, interval_ms: u64, policy: ConnectionPolicy) -> WorkerReport {
     let is_writer = index < writer_count;
     let lane = if is_writer { format!("churn_writer_{index}") } else { format!("churn_reader_{}", index-writer_count+1) };
     let mut report = WorkerReport { lane: lane.clone(), ..Default::default() };
+    let mut vfs_totals = [(0_u64, 0_u64, 0_u64); 5];
+    let mut vfs_names = [""; 5];
     barrier.wait();
     while Instant::now() < deadline && report.attempts < MAX_ITERATIONS {
         report.attempts += 1;
         let request_id = format!("{lane}-{}", report.attempts);
         let context = db::DatabaseOperationContext::new(&lane, if workload == Workload::Meta { "wp0323_short_meta_churn" } else { "wp0323_job_insert_churn" })
             .with_request_id(&request_id);
+        db::AppDatabase::begin_vfs_timing_probe();
         let started = Instant::now();
         let mut query_ms = 0;
         let result = if workload == Workload::JobInsert && is_writer {
             // Same autocommit INSERT column/value shape as jobs.rs enqueue; no extra transaction.
             (|| {
                 let connection = database.write_context(context)?;
+                if policy != ConnectionPolicy::Baseline {
+                    let effective = apply_policy(&connection, policy)?;
+                    if report.policy_observations.is_empty() { report.policy_observations.push(effective); }
+                }
                 let query_started = Instant::now();
                 let id = format!("{JOB_PREFIX}{index}_{}", report.attempts);
                 let result = insert_job(&connection, &id, &job_params);
@@ -169,6 +202,10 @@ fn worker(database: db::AppDatabase, barrier: Arc<Barrier>, deadline: Instant, i
             })()
         } else if workload == Workload::JobInsert {
             database.read(context, |connection| {
+                if policy != ConnectionPolicy::Baseline {
+                    let effective = apply_policy(connection, policy)?;
+                    if report.policy_observations.is_empty() { report.policy_observations.push(effective); }
+                }
                 let query_started = Instant::now();
                 let result = if index == writer_count {
                     connection.query_row("SELECT value FROM meta WHERE key=?1", [KEY], |row| row.get::<_, String>(0))
@@ -190,6 +227,10 @@ fn worker(database: db::AppDatabase, barrier: Arc<Barrier>, deadline: Instant, i
             })
         } else {
             database.read(context, |connection| {
+                if policy != ConnectionPolicy::Baseline {
+                    let effective = apply_policy(connection, policy)?;
+                    if report.policy_observations.is_empty() { report.policy_observations.push(effective); }
+                }
                 let query_started = Instant::now();
                 let result = connection.query_row("SELECT value FROM meta WHERE key=?1", [KEY], |row| row.get::<_, String>(0));
                 query_ms = query_started.elapsed().as_millis();
@@ -198,6 +239,16 @@ fn worker(database: db::AppDatabase, barrier: Arc<Barrier>, deadline: Instant, i
             })
         };
         let elapsed = started.elapsed().as_millis();
+        let metrics = db::AppDatabase::finish_vfs_timing_probe();
+        for (i, (name, calls, total_ns, max_ns)) in metrics.iter().copied().enumerate() {
+            vfs_names[i] = name;
+            vfs_totals[i].0 = vfs_totals[i].0.saturating_add(calls);
+            vfs_totals[i].1 = vfs_totals[i].1.saturating_add(total_ns);
+            vfs_totals[i].2 = vfs_totals[i].2.max(max_ns);
+        }
+        if elapsed >= 1000 && report.slow_vfs_operations.len() < 32 {
+            report.slow_vfs_operations.push(json!({"request_id":request_id,"elapsed_ms":elapsed,"query_ms":query_ms,"callbacks":metrics}));
+        }
         report.total_operation_ms += elapsed;
         report.max_operation_ms = report.max_operation_ms.max(elapsed);
         report.total_query_ms += query_ms;
@@ -222,11 +273,13 @@ fn worker(database: db::AppDatabase, barrier: Arc<Barrier>, deadline: Instant, i
             std::thread::yield_now();
         }
     }
+    report.vfs_timings = vfs_totals.iter().enumerate().map(|(i, (calls, total_ns, max_ns))|
+        json!({"callback":vfs_names[i],"calls":calls,"total_ns":total_ns,"max_single_call_ns":max_ns})).collect();
     report
 }
 
 fn main() -> ProbeResult<()> {
-    let (root, seconds, source, workload, reader_interval_ms, writer_interval_ms, reader_count, writer_count) = parse()?;
+    let (root, seconds, source, workload, reader_interval_ms, writer_interval_ms, reader_count, writer_count, policy) = parse()?;
     std::fs::create_dir(&root)?;
     let root = root.canonicalize()?;
     reject_protected(&root)?;
@@ -287,9 +340,9 @@ fn main() -> ProbeResult<()> {
         let database = database.clone();
         let barrier = Arc::clone(&barrier);
         let job_params = Arc::clone(&job_params);
-        std::thread::spawn(move || worker(database, barrier, deadline, index, writer_count, workload, job_params, if index < writer_count { writer_interval_ms } else { reader_interval_ms }))
+        std::thread::spawn(move || worker(database, barrier, deadline, index, writer_count, workload, job_params, if index < writer_count { writer_interval_ms } else { reader_interval_ms }, policy))
     }).collect::<Vec<_>>();
-    println!("{}", json!({"event":"started","pid":std::process::id(),"root":root,"seconds":seconds,"writer_count":writer_count,"reader_count":reader_count,"keeper":false,"workload":format!("{workload:?}"),"reader_interval_ms":reader_interval_ms,"writer_interval_ms":writer_interval_ms,"source_job_count":job_count,"page_count":page_count,"page_size":page_size,"job_params_bytes":job_params.len(),"destination_schema_before_migration":destination_schema_before_migration,"destination_schema_after_migration":destination_schema_after_migration}));
+    println!("{}", json!({"event":"started","pid":std::process::id(),"root":root,"seconds":seconds,"writer_count":writer_count,"reader_count":reader_count,"keeper":false,"workload":format!("{workload:?}"),"connection_policy":format!("{policy:?}"),"reader_interval_ms":reader_interval_ms,"writer_interval_ms":writer_interval_ms,"source_job_count":job_count,"page_count":page_count,"page_size":page_size,"job_params_bytes":job_params.len(),"destination_schema_before_migration":destination_schema_before_migration,"destination_schema_after_migration":destination_schema_after_migration}));
     barrier.wait();
     let mut reports = Vec::new();
     let mut panics = 0;
@@ -297,6 +350,7 @@ fn main() -> ProbeResult<()> {
         match worker.join() { Ok(report) => reports.push(report), Err(_) => panics += 1 }
     }
     let verification = database.read(db::DatabaseOperationContext::new("probe_verify", "disposable_counter_read"), |connection| {
+        if policy != ConnectionPolicy::Baseline { apply_policy(connection, policy)?; }
         if workload == Workload::Meta {
             Ok(connection.query_row("SELECT value FROM meta WHERE key=?1", [KEY], |row| row.get::<_, String>(0))?)
         } else {
@@ -304,6 +358,7 @@ fn main() -> ProbeResult<()> {
             Ok(count.to_string())
         }
     });
+    let connection_policy_proven = policy == ConnectionPolicy::Baseline || (reports.len() == reader_count+writer_count && reports.iter().all(|report| !report.policy_observations.is_empty()));
     let writer_succeeded = Some(reports.iter().filter(|report| report.lane.starts_with("churn_writer_")).map(|report| report.succeeded).sum::<u64>());
     let counter = verification.as_ref().ok().and_then(|value| value.parse::<u64>().ok());
     let canonical_counter_matches = panics == 0 && writer_succeeded.is_some() && writer_succeeded == counter;
@@ -314,9 +369,9 @@ fn main() -> ProbeResult<()> {
     let wal_bytes_after_workload = std::fs::metadata(&wal_path).map(|m|m.len()).unwrap_or(0);
     let wal_frames_after_workload = wal_bytes_after_workload.saturating_sub(32)/(page_size+24);
     let failures = reports.iter().map(|report| report.attempts-report.succeeded).sum::<u64>();
-    let summary = json!({"event":"terminal","root":root,"source_backup":source,"backup_provenance":backup_provenance,"workload":format!("{workload:?}"),"reader_interval_ms":reader_interval_ms,"writer_interval_ms":writer_interval_ms,"writer_count":writer_count,"reader_count":reader_count,"page_count_before_workload":page_count,"page_size":page_size,"wal_bytes_after_workload":wal_bytes_after_workload,"wal_frames_after_workload":wal_frames_after_workload,"source_job_count":job_count,"destination_schema_before_migration":destination_schema_before_migration,"destination_schema_after_migration":destination_schema_after_migration,"elapsed_ms":started.elapsed().as_millis(),"workers":reports,"worker_panics":panics,"failures":failures,"canonical_counter_matches":canonical_counter_matches,"counter":counter,"verification_error":verification.err().map(|error|error.to_string()),"shutdown":{"elapsed_ms":drain_started.elapsed().as_millis(),"error":drain.as_ref().err().map(ToString::to_string)},"runtime":snapshot,"limits":"Recent runtime receipts are bounded512 and do not represent all operations. Tight or cadenced churn is a hypothesis probe; no live symptom or causal attribution is claimed. Runtime SQL/open/close bounds are unchanged; pathological close may prevent terminal output."});
+    let summary = json!({"event":"terminal","root":root,"source_backup":source,"backup_provenance":backup_provenance,"workload":format!("{workload:?}"),"connection_policy":format!("{policy:?}"),"reader_interval_ms":reader_interval_ms,"writer_interval_ms":writer_interval_ms,"writer_count":writer_count,"reader_count":reader_count,"page_count_before_workload":page_count,"page_size":page_size,"wal_bytes_after_workload":wal_bytes_after_workload,"wal_frames_after_workload":wal_frames_after_workload,"source_job_count":job_count,"destination_schema_before_migration":destination_schema_before_migration,"destination_schema_after_migration":destination_schema_after_migration,"elapsed_ms":started.elapsed().as_millis(),"workers":reports,"worker_panics":panics,"failures":failures,"canonical_counter_matches":canonical_counter_matches,"connection_policy_proven":connection_policy_proven,"counter":counter,"verification_error":verification.err().map(|error|error.to_string()),"shutdown":{"elapsed_ms":drain_started.elapsed().as_millis(),"error":drain.as_ref().err().map(ToString::to_string)},"runtime":snapshot,"limits":"Recent runtime receipts are bounded512 and do not represent all operations. Tight or cadenced churn is a hypothesis probe; no live symptom or causal attribution is claimed. VFS callback durations may overlap and are not a partition; unwrapped native SHM calls appear only within xShmUnmap. Runtime SQL/open/close bounds are unchanged; pathological close may prevent terminal output."});
     std::fs::write(root.join("churn_summary.json"), serde_json::to_vec_pretty(&summary)?)?;
     println!("{}", summary);
-    if failures != 0 || panics != 0 || !canonical_counter_matches || drain.is_err() { return Err("Probe failed; inspect churn_summary.json".into()); }
+    if failures != 0 || panics != 0 || !canonical_counter_matches || !connection_policy_proven || drain.is_err() { return Err("Probe failed; inspect churn_summary.json".into()); }
     Ok(())
 }

@@ -790,7 +790,7 @@ impl DerefMut for DatabaseWriteContext {
 // WP-0324 read-counting VFS. SQLite's page-cache counter (`SQLITE_DBSTATUS_CACHE_MISS`) misses
 // overflow pages of large TEXT/BLOB values, which the bundled build reads straight from the file
 // (`SQLITE_DIRECT_OVERFLOW_READ`). This shim counts every `xRead` instead. It copies the default
-// VFS, overrides only `xOpen`, and wraps each opened file so every I/O method forwards to the
+// VFS, overrides `xOpen` and delegates `xDelete`, and wraps each opened file so every I/O method forwards to the
 // real file (same pattern as SQLite's ext/misc/appendvfs.c and vfsstat.c). Bytes are added to a
 // per-thread counter; a runtime context records the delta on the thread that opened it.
 
@@ -800,6 +800,32 @@ const SQLITE_IOERR_SHORT_READ: std::os::raw::c_int = rusqlite::ffi::SQLITE_IOERR
 
 thread_local! {
     static THREAD_SQLITE_BYTES_READ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+// Disposable example probes only; no allocation, logging or runtime mutex inside SQLite callbacks.
+#[derive(Clone, Copy, Default)]
+struct VfsTiming { calls: u64, total_ns: u64, max_ns: u64 }
+const VFS_TIMING_NAMES: [&str; 5] = ["xClose", "xShmUnmap", "xShmLock", "xSync", "xDelete"];
+thread_local! {
+    static VFS_PROBE_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static VFS_PROBE_TIMINGS: std::cell::Cell<[VfsTiming; 5]> = const {
+        std::cell::Cell::new([VfsTiming { calls: 0, total_ns: 0, max_ns: 0 }; 5])
+    };
+}
+
+fn timed_vfs_call(index: usize, call: impl FnOnce() -> std::os::raw::c_int) -> std::os::raw::c_int {
+    if !VFS_PROBE_ENABLED.try_with(std::cell::Cell::get).unwrap_or(false) { return call(); }
+    let started = Instant::now();
+    let result = call();
+    let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+    let _ = VFS_PROBE_TIMINGS.try_with(|metrics| {
+        let mut current = metrics.get();
+        current[index].calls = current[index].calls.saturating_add(1);
+        current[index].total_ns = current[index].total_ns.saturating_add(elapsed);
+        current[index].max_ns = current[index].max_ns.max(elapsed);
+        metrics.set(current);
+    });
+    result
 }
 
 fn thread_sqlite_bytes_read() -> u64 {
@@ -828,7 +854,7 @@ macro_rules! forward_io {
 }
 
 unsafe extern "C" fn counting_close(file: *mut rusqlite::ffi::sqlite3_file) -> std::os::raw::c_int {
-    forward_io!(file, xClose, rusqlite::ffi::SQLITE_OK)
+    timed_vfs_call(0, || forward_io!(file, xClose, rusqlite::ffi::SQLITE_OK))
 }
 
 unsafe extern "C" fn counting_read(
@@ -865,7 +891,7 @@ unsafe extern "C" fn counting_sync(
     file: *mut rusqlite::ffi::sqlite3_file,
     flags: std::os::raw::c_int,
 ) -> std::os::raw::c_int {
-    forward_io!(file, xSync, rusqlite::ffi::SQLITE_IOERR, flags)
+    timed_vfs_call(3, || forward_io!(file, xSync, rusqlite::ffi::SQLITE_IOERR, flags))
 }
 
 unsafe extern "C" fn counting_file_size(
@@ -940,7 +966,7 @@ unsafe extern "C" fn counting_shm_lock(
     count: std::os::raw::c_int,
     flags: std::os::raw::c_int,
 ) -> std::os::raw::c_int {
-    forward_io!(file, xShmLock, rusqlite::ffi::SQLITE_IOERR, offset, count, flags)
+    timed_vfs_call(2, || forward_io!(file, xShmLock, rusqlite::ffi::SQLITE_IOERR, offset, count, flags))
 }
 
 unsafe extern "C" fn counting_shm_barrier(file: *mut rusqlite::ffi::sqlite3_file) {
@@ -951,7 +977,7 @@ unsafe extern "C" fn counting_shm_unmap(
     file: *mut rusqlite::ffi::sqlite3_file,
     delete: std::os::raw::c_int,
 ) -> std::os::raw::c_int {
-    forward_io!(file, xShmUnmap, rusqlite::ffi::SQLITE_OK, delete)
+    timed_vfs_call(1, || forward_io!(file, xShmUnmap, rusqlite::ffi::SQLITE_OK, delete))
 }
 
 unsafe extern "C" fn counting_fetch(
@@ -1033,6 +1059,20 @@ unsafe extern "C" fn counting_open(
     rc
 }
 
+unsafe extern "C" fn counting_delete(
+    _vfs: *mut rusqlite::ffi::sqlite3_vfs,
+    name: *const std::os::raw::c_char,
+    sync_dir: std::os::raw::c_int,
+) -> std::os::raw::c_int {
+    let Some(base) = READ_COUNTING_BASE_VFS.get().map(|p| *p as *mut rusqlite::ffi::sqlite3_vfs) else {
+        return rusqlite::ffi::SQLITE_IOERR;
+    };
+    timed_vfs_call(4, || match (*base).xDelete {
+        Some(delete) => delete(base, name, sync_dir),
+        None => rusqlite::ffi::SQLITE_IOERR,
+    })
+}
+
 /// Registers the read-counting VFS once (not as the process default). `None` means
 /// registration failed and callers open with the default VFS, uncounted.
 fn read_counting_vfs_name() -> Option<&'static str> {
@@ -1051,6 +1091,7 @@ fn read_counting_vfs_name() -> Option<&'static str> {
             vfs.pNext = std::ptr::null_mut();
             vfs.zName = c"voxvulgi_read_counting".as_ptr();
             vfs.xOpen = Some(counting_open);
+            if (*base).xDelete.is_some() { vfs.xDelete = Some(counting_delete); }
             let vfs = Box::into_raw(Box::new(vfs));
             rusqlite::ffi::sqlite3_vfs_register(vfs, 0) == rusqlite::ffi::SQLITE_OK
         }
@@ -1187,6 +1228,21 @@ pub struct AppDatabase {
 pub type DatabaseRuntime = AppDatabase;
 
 impl AppDatabase {
+    /// Begin an example-only per-thread VFS probe. Never nest probes on one thread.
+    #[doc(hidden)]
+    pub fn begin_vfs_timing_probe() {
+        VFS_PROBE_TIMINGS.with(|metrics| metrics.set([VfsTiming::default(); 5]));
+        VFS_PROBE_ENABLED.with(|enabled| enabled.set(true));
+    }
+
+    /// (callback, calls, accumulated nanoseconds, maximum single-call nanoseconds).
+    /// Metrics can overlap through nested forwarding; they are not a duration partition.
+    #[doc(hidden)]
+    pub fn finish_vfs_timing_probe() -> [(&'static str, u64, u64, u64); 5] {
+        VFS_PROBE_ENABLED.with(|enabled| enabled.set(false));
+        let metrics = VFS_PROBE_TIMINGS.with(std::cell::Cell::get);
+        std::array::from_fn(|i| (VFS_TIMING_NAMES[i], metrics[i].calls, metrics[i].total_ns, metrics[i].max_ns))
+    }
     pub fn for_paths(paths: &AppPaths) -> Result<Self> {
         let database_path = paths.db_dir().join("app.sqlite");
         let key = absolute_key(&database_path)?;
@@ -2086,6 +2142,27 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
             vec![0, 1, 2, 3]
         );
+    }
+
+    #[test]
+    fn vfs_probe_records_actual_callbacks_and_resets_between_operations() {
+        let _serial = serial_test_guard();
+        let (_directory, _paths, database) = fixture();
+        AppDatabase::begin_vfs_timing_probe();
+        database.read(DatabaseOperationContext::new("test", "vfs_probe"), |connection| {
+            Ok(connection.query_row("SELECT COUNT(*) FROM meta", [], |row| row.get::<_, i64>(0))?)
+        }).expect("actual counted VFS read and close");
+        let metrics = AppDatabase::finish_vfs_timing_probe();
+        assert_eq!(metrics[0].0, "xClose");
+        assert!(metrics[0].1 > 0, "actual close must be observed");
+        assert!(metrics.iter().all(|(_, _, total, max)| total >= max));
+        AppDatabase::begin_vfs_timing_probe();
+        let reset = AppDatabase::finish_vfs_timing_probe();
+        assert!(reset.iter().all(|(_, calls, total, max)| *calls == 0 && *total == 0 && *max == 0));
+        database.read(DatabaseOperationContext::new("test", "vfs_probe_disabled"), |connection| {
+            Ok(connection.query_row("SELECT COUNT(*) FROM meta", [], |row| row.get::<_, i64>(0))?)
+        }).expect("unprobed read");
+        assert!(AppDatabase::finish_vfs_timing_probe().iter().all(|(_, calls, _, _)| *calls == 0));
     }
 
     #[test]
