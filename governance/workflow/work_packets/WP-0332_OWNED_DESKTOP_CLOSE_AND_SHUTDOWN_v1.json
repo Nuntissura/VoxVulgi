@@ -61,7 +61,7 @@
       "require_fresh_unchanged_identity_before_close": true
     },
     "authorized_scope": [
-      "Submit exactly one controlled local-HTTP fixture download through the authenticated product bridge with selected execution mode only; record its canonical job ID and attempts",
+      "Run one controlled local-HTTP fixture transfer at a time through the authenticated product bridge; queue-only preparation and selected execution mode only preserve pause. Repeat only this owned test fixture when a prior cell completed before the close boundary or a recorded harness fault prevented proof; retain every prior cell, canonical job and attempt",
       "Keep all other queued and recurring work paused throughout the controlled test and restart; do not continue all",
       "Send normal WM_CLOSE first to the verified Tauri Window of exact approved PID179536, or a fresh normal app started and owned by this session after the operator independently closed179536, while the controlled download is canonically running",
       "Restart the same verified installed binary quietly after actual process exit and independently reconcile the controlled original job, attempts, recovery, owned children, bridge sidecars and protected data"
@@ -70,7 +70,7 @@
       "Disruption of any other process, force termination of the approved app, or interruption after PID/executable/start identity changes without fresh exact authorization",
       "Direct SQL writes, manual job-state changes or synthetic recovery proof",
       "Retry, deletion or alteration of the three historical failed originals29f0c228-be8a-40e3-9675-b12a12fb44ca,55e5625b-784d-4992-ad8c-7c7197e344c0,74de4514-f870-4b0e-ab23-94b5baddef34 or their batch",
-      "User database replacement, user-data/media deletion, installer execution, version changes, broad queue resume or additional download submissions"
+      "User database replacement, user-data/media deletion, installer execution, version changes, broad queue resume, unrelated download submissions or more than one controlled running transfer"
     ],
     "proof_gates_retained": [
       "Actual canonical running state before normal close; never equate enqueue or UI projection with running",
@@ -87,6 +87,14 @@
       "observed_bridge_sidecar_absent": true,
       "controlled_download_not_started": true,
       "next_target": "Fresh session-owned normal installed app with native PID, creation, hash and launcher receipt; original foreign-PID approval never transfers to another foreign process"
+    },
+    "controlled_test_continuation": {
+      "reason": "The first owned fixture finished before the requested close; ordinary retry refuses a canonical source already present. Preserve its successful output and original history and use a second fixture endpoint for the same active-shutdown test instead of deleting media or weakening deduplication",
+      "first_job_retained": "d5b8a013-84bb-4b1a-a187-d195f017e3d4",
+      "first_item_retained": "0aa60599-179f-4770-bf04-32b98127b88c",
+      "product_boundary_unchanged": true,
+      "only_session_owned_app_may_be_closed": true,
+      "automate_transfer_check_and_close_without_model_or_tool_gap": true
     },
     "authorization_is_not_execution_or_success_proof": true
   },

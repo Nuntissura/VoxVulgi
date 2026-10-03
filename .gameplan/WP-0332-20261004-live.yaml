@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: batch
 assignment: WP-0332-20261004-live
 parent: null
-generation: 11
+generation: 12
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -34,3 +34,4 @@ steps:
 - {id: GP-018, role: any, at: before_submit, do: require independently reconciled settled full-row baseline before normal WM_CLOSE, check: {type: confirm}, source: 'failure: guard close after baseline capture; never block acquisition of its required evidence', state: active}
 - {id: GP-019, role: any, at: before_verdict, do: require native ctypes pointer argument signatures before independent preservation observer retry, check: {type: confirm}, source: 'infra: observer GetPackageFullName pointer overflow before database access', state: active}
 - {id: GP-020, role: any, at: before_round, do: require captured native close helper stderr and exit receipt before classifying close outcome, check: {type: confirm}, source: 'infra: WMI PowerShell helper exited without normal close receipt', state: active}
+- {id: GP-021, role: any, at: before_submit, do: require atomic native active-transfer check and close dispatch with no model or tool gap, check: {type: confirm}, source: 'failure: separate checks and WMI dispatch missed active transfer timing', state: active}
