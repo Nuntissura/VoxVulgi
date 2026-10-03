@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: batch
 assignment: WP-0332-20261004-live
 parent: null
-generation: 6
+generation: 7
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -30,3 +30,4 @@ steps:
 - {id: GP-014, role: any, at: before_round, do: require one controlled job only and preserve pause plus canonical protected data, check: {type: confirm}, source: 'WP0332: operator-approved native active close/restart boundary', state: active}
 - {id: GP-015, role: any, at: before_round, do: require native quiet helper with fresh ownership receipt and no broad process stops, check: {type: confirm}, source: 'infra: unpackaged identity and exclusive restart receipt before launch', state: active}
 - {id: GP-016, role: any, at: before_round, do: require new session-owned normal app after operator independently closed approved old PID, check: {type: confirm}, source: 'environment: operator closed179536 before controlled test started', state: active}
+- {id: GP-017, role: any, at: before_round, do: require settled full-row protected baseline with exact controlled-source attribution before normal close, check: {type: confirm}, source: 'failure: startup queue timestamps and fixture source registration changed aggregate hashes', state: active}
