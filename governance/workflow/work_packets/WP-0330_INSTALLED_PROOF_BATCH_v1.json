@@ -9,5 +9,42 @@
   "constraints": ["Do not replace existing acceptance criteria", "No historical DONE promotion from source inspection", "No user-data deletion or provider cooldown override", "Foreign process stops require exact PID approval", "No duplicate compiler runs or cache deletion"],
   "acceptance": ["Every currently NEEDS_VALIDATION packet has its remaining acceptance and proof dependency recorded", "Every authorized compatible scenario exercised on the exact candidate", "DONE only under PROOF_STANDARD; blocked scenarios retain original scope"],
   "verification": ["Canonical board/packet status agreement", "Scenario receipts and independent canonical rereads", "Visual snapshots inspected for UI scenarios"],
-  "status_updates": [{"date": "2026-10-03", "note": "Opened for operator-approved all-items implementation; inventory and proof execution pending"},{"date":"2026-10-03","note":"Final9f8a137 ownedheadless Options cleanup audit proved fixture path inputs and Start/Continue inventory exposed only scroll_into_view, with no cleanup backend path. Root authorized minimum existing-handler semantic IDs/text effect classes to unblock disposable read-only filesystem inventory proof. Quarantine, reconciliation and rollback activation restrictions unchanged; packaged rebuild and audit/fixture proof remain required."}]
+  "status_updates": [{"date": "2026-10-03", "note": "Opened for operator-approved all-items implementation; inventory and proof execution pending"},{"date":"2026-10-03","note":"Final9f8a137 ownedheadless Options cleanup audit proved fixture path inputs and Start/Continue inventory exposed only scroll_into_view, with no cleanup backend path. Root authorized minimum existing-handler semantic IDs/text effect classes to unblock disposable read-only filesystem inventory proof. Quarantine, reconciliation and rollback activation restrictions unchanged; packaged rebuild and audit/fixture proof remain required."}],
+  "session_review_20261003": {
+    "record_id": "WP-0330-REVIEW-20261003-01",
+    "date": "2026-10-03",
+    "status": "IN_PROGRESS",
+    "findings": [
+      {
+        "id": "WP-0330-F-001",
+        "text": "Inventory contains33 packets,66 scenarios and10 compatible batches; inventory is not execution proof.",
+        "evidence": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json"
+      },
+      {
+        "id": "WP-0330-F-002",
+        "text": "Owned packaged cleanup inventory and empty-source subscription export were exercised; originals unchanged. Group approval/quarantine/rollback and actual nonempty/busy-database export remain unproven.",
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0330/20261003_cleanup_fixture/summary.md"
+      }
+    ],
+    "insights": [
+      {
+        "id": "WP-0330-I-001",
+        "text": "Batch compatible scenarios after their product/runtime dependencies stabilize; reuse prior proof only when its asserted inputs and behavior are unchanged. Empty fixture export cannot close the operator actual export case."
+      }
+    ],
+    "remaining_checks": [
+      {
+        "id": "WP-0330-C-001",
+        "text": "Reconcile inventory against the current canonical board; distinguish historically inventoried33 from current remaining NEEDS_VALIDATION count."
+      },
+      {
+        "id": "WP-0330-C-002",
+        "text": "Execute each authorized compatible remaining scenario on the final exact candidate; independently reread canonical results and inspect UI snapshots."
+      },
+      {
+        "id": "WP-0330-C-003",
+        "text": "Retain explicit dependency/native-interaction/offline-environment gaps per underlying WP; no DONE from inventory or shared build alone."
+      }
+    ]
+  }
 }

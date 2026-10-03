@@ -1361,5 +1361,46 @@
       "live_closure_proven": false,
       "phase2_status": "AUTOMATIC_CHECKPOINT_AUTHORITY_AND_CRASH_PACKAGED_LIVE_GATES_PENDING"
     }
-  ]
+  ],
+  "session_review_20261003": {
+    "record_id": "WP-0333-REVIEW-20261003-01",
+    "date": "2026-10-03",
+    "status": "IN_PROGRESS",
+    "findings": [
+      {
+        "id": "WP-0333-F-001",
+        "text": "Guarded filename adapter and fixed SQLite prerequisite have28 owning checks plus TLS-off canonical counterpart69 reconciled writes/359reads/0failures; native file identity independently checked.",
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/summary.md"
+      },
+      {
+        "id": "WP-0333-F-002",
+        "text": "Installed13a core has a completed30minute bounded live observation; this neither resolves earlier RED variance nor proves successful downloads/export/crash recovery.",
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0323/20261003/live_monitor_1791030167663/live_30minute_result.json"
+      }
+    ],
+    "insights": [
+      {
+        "id": "WP-0333-I-001",
+        "text": "Filename-only selection and checkpoint-policy selection are separate. A clean bounded observation is insufficient to declare the complete production database solution proven."
+      }
+    ],
+    "remaining_checks": [
+      {
+        "id": "WP-0333-C-001",
+        "text": "Durable acknowledged-write crash/reopen preservation on actual runtime; independently reconcile canonical data."
+      },
+      {
+        "id": "WP-0333-C-002",
+        "text": "Obtain operator checkpoint-policy decision and separately reviewed authority/spec amendment before any production automatic maintenance; current policy remains unchanged."
+      },
+      {
+        "id": "WP-0333-C-003",
+        "text": "Complete exact packaged normal successful-download/read/export/active-shutdown proof with WP0323/0332, retaining all admission/durability bounds."
+      },
+      {
+        "id": "WP-0333-C-004",
+        "text": "Independent final acceptance review; preserve unexplained earlier RED variance rather than asserting a physical root cause."
+      }
+    ]
+  }
 }

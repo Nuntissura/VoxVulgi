@@ -107,3 +107,18 @@ See `summary.md` in the proof bundle for commands and logs.
 - Current status: NEEDS_VALIDATION
 - Provider cache and read-counting VFS built/installed; original uncompiled/page-cache statements are historical. Current session observed repeated database_heavy_read at jobs.rs:5344 (operator_activity_page); this proves attribution is emitted, not the timeout cause or complete live runner acceptance. Remaining runner I/O/cache proof and follow-up remediation of measured reads.
 - Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
+
+<topic id="normal-runner-io-proof-review-20261003" status="NEEDS_VALIDATION" wp="WP-0324" updated_at="2026-10-03">
+
+## Findings and insights
+
+- WP-0324-F-20261003-001: Provider cache/read-counting VFS are implemented and have focused/headless A/B evidence. The initially uncompiled record is historical. Existing live attribution identifies operator_activity_page; it does not establish the read timeout cause.
+- WP-0324-I-20261003-001: WP-0323's successful30-minute jobs.overview monitor measures database requests/errors, not process read-I/O, provider rehash frequency or per-candidate gate timing. It cannot close this packet. Evidence: product/desktop/build_target/tool_artifacts/wp_runs/WP-0324/summary.md and WP-0323/20261003/live_monitor_1791030167663/live_30minute_result.json.
+
+## Still to check
+
+- WP-0324-C-20261003-001: Actual normal-runner candidate path reuses provider identity cache; measure absence of repeated90–110MB provider rehash bursts over the required observation interval and jobs_track_runtime_get p50<1second against the original contract.
+- WP-0324-C-20261003-002: Correlate database_heavy_read VFS receipts with exact normal-runner/query call sites and changed read inputs, preserving attribution versus root-cause distinction.
+- WP-0324-C-20261003-003: Reuse unchanged focused proof; record final candidate/runtime identities and independent live result before DONE. Status remains NEEDS_VALIDATION.
+
+</topic>

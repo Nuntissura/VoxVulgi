@@ -9,5 +9,83 @@
   "constraints": ["Version remains 0.1.205; changelog unchanged", "Reuse product/desktop/build_target/cargo_cache; no cargo clean", "Root coordinates all Cargo runs", "Packaging cannot build/download/repair/qualify runtimes", "No fabricated qualification identity", "Preserve user data and installer maintenance labels"],
   "acceptance": ["Exact source identity, test results and installer hash recorded", "Quiet packaged app navigation, semantic actions and inspected screenshots pass", "Approved same-PID app update preserves protected data", "Full ISO passes exact offline clean/update/rollback gates, or concrete external dependency recorded without claiming completion"],
   "verification": ["Focused frontend and Rust batch", "Governed core build", "Hidden isolated app smoke", "Installed database 30-minute proof remains WP-0323", "GUIDE qualification and package-only proof"],
-  "status_updates": [{"date": "2026-10-03", "note": "Opened; prior candidate 977851b retained; final integrated artifact pending"},{"date":"2026-10-03","note":"Exact wrapper update returned core exit0 then rejected MainBinaryName and completed rollback. Production package had omitted MAIN_BINARY_NAME, inheriting VoxVulgi.exe while actual NSIS desktop package registers desktop.exe. Remediation adds only /DMAIN_BINARY_NAME=desktop.exe to production compile definitions; fixture override and fail-closed postcondition unchanged. Focused regression added; root execution and exact repackaged ISO acceptance pending.","failure_evidence":"product/desktop/build_target/tool_artifacts/wp_runs/WP-0329/20261003/normal_update_13a02c5_inno.log","failure_evidence_sha256":"EC64AED1349F87F760BFC28AC416C78669E2FDD80889F53269BB468FB5D427CB","changed_files":["offline-installer-runtime/scripts/package_offline_release.ps1","offline-installer-runtime/tests/managedOfflinePackageOnlyContract.test.ts"],"validation_status":"NOT_RUN_BY_AGENT_ROOT_OWNS_EXECUTION"}]
+  "status_updates": [{"date": "2026-10-03", "note": "Opened; prior candidate 977851b retained; final integrated artifact pending"},{"date":"2026-10-03","note":"Exact wrapper update returned core exit0 then rejected MainBinaryName and completed rollback. Production package had omitted MAIN_BINARY_NAME, inheriting VoxVulgi.exe while actual NSIS desktop package registers desktop.exe. Remediation adds only /DMAIN_BINARY_NAME=desktop.exe to production compile definitions; fixture override and fail-closed postcondition unchanged. Focused regression added; root execution and exact repackaged ISO acceptance pending.","failure_evidence":"product/desktop/build_target/tool_artifacts/wp_runs/WP-0329/20261003/normal_update_13a02c5_inno.log","failure_evidence_sha256":"EC64AED1349F87F760BFC28AC416C78669E2FDD80889F53269BB468FB5D427CB","changed_files":["offline-installer-runtime/scripts/package_offline_release.ps1","offline-installer-runtime/tests/managedOfflinePackageOnlyContract.test.ts"],"validation_status":"NOT_RUN_BY_AGENT_ROOT_OWNS_EXECUTION"}],
+  "session_review_20261003": {
+    "record_id": "WP-0331-REVIEW-20261003-01",
+    "date": "2026-10-03",
+    "kind": "research_and_execution_review",
+    "status": "IN_PROGRESS",
+    "operator_direction": [
+      "Research online and deliberate with agents before the single final installer attempt",
+      "Record findings in owning packets first; consider completing product repairs before final bundling"
+    ],
+    "findings": [
+      {
+        "id": "WP-0331-F-001",
+        "text": "Previous exact ISO update failed after core exit0 because wrapper expected VoxVulgi.exe rather than desktop.exe; actual log records completed runtime/core/generation rollback.",
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0329/20261003/normal_update_13a02c5_inno.log"
+      },
+      {
+        "id": "WP-0331-F-002",
+        "text": "Production MAIN_BINARY_NAME=desktop.exe correction passed seven owning contract checks and was pushed at e1806d73b887. This does not prove installer acceptance.",
+        "evidence": "product/desktop/build_target/logs/wp0331_real_binary_package_contract.log"
+      },
+      {
+        "id": "WP-0331-F-003",
+        "text": "Core13a02c5 built and separate core NSIS Update exited0. Fourteen protected table counts/hashes matched after rollback and core update. Earlier summary describing710 as latest is historical.",
+        "evidence": [
+          "product/desktop/build_target/tool_artifacts/wp_runs/WP-0323/20261003/core_update_13a02c5_terminal.json",
+          "product/desktop/build_target/tool_artifacts/wp_runs/WP-0323/20261003/after_core_13a02c5_update_protected.json"
+        ]
+      },
+      {
+        "id": "WP-0331-F-004",
+        "text": "Corrected e180 ISO exists as CANDIDATE_NOT_RELEASED; SHA256 ca6d97c36e5aa60809cbe2658c44bc4b2743e8ed0fbef9370b2a71ea942b4950,7377000448bytes. No passing final acceptance or publication.",
+        "evidence": "offline-installer-runtime/package_candidates_final_e1806d7/state.json"
+      }
+    ],
+    "insights": [
+      {
+        "id": "WP-0331-I-001",
+        "text": "Final bundling should follow stabilization of product/runtime-changing work. Changed core/runtime/wrapper inputs invalidate affected candidate proof; unchanged qualified archives and compiler artifacts remain reusable."
+      },
+      {
+        "id": "WP-0331-I-002",
+        "text": "WP0329 needs managed-runtime activation before real workflow proof, while final delivery depends on WP0329. Clarify intermediate product verification versus the operator single final attempt before any installation; no extra attempt inferred."
+      },
+      {
+        "id": "WP-0331-I-003",
+        "text": "GUIDE phase separation is suitable; observed binary binding, runtime layout and machine-bound validation defects do not establish an unsupported component combination. Packaging cannot replace product workflow proof."
+      }
+    ],
+    "remaining_checks": [
+      {
+        "id": "WP-0331-C-001",
+        "text": "Complete relevant product/runtime gates in WP0323/0324/0328/0329/0332/0333, then compatible WP0330 proof; preserve every existing acceptance requirement."
+      },
+      {
+        "id": "WP-0331-C-002",
+        "text": "Resolve WP0316 validation portability/deadline findings and a genuinely clean standard-user offline environment before final acceptance."
+      },
+      {
+        "id": "WP-0331-C-003",
+        "text": "Bind final selected source/core/runtime/wrapper identities; reuse this candidate only if all bound inputs still match, otherwise package stable inputs through GUIDE only."
+      },
+      {
+        "id": "WP-0331-C-004",
+        "text": "Prove exact mounted ISO clean install, required offline workflow, Update/keep/recovery/rollback and retained data, zero downloads; independently verify and publish only the passing hash."
+      }
+    ],
+    "single_final_attempt": {
+      "state": "UNUSED",
+      "execution_held": true,
+      "interpretation_requires_clarification_before_intermediate_install": true
+    },
+    "cross_references": [
+      "WP-0316",
+      "WP-0329",
+      "WP-0330"
+    ],
+    "limits": "Research/review record only; no GUIDE amendment, acceptance weakening, environment setup or installer execution authorized by this record."
+  }
 }

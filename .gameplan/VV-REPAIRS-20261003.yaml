@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: batch
 assignment: VV-REPAIRS-20261003
 parent: null
-generation: 64
+generation: 65
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -83,3 +83,4 @@ steps:
 - {id: GP-067, role: any, at: before_round, do: require async UI action commit before canonical queue pause1 and running0 proof, check: {type: confirm}, source: 'preflight correction: UI receipt preceded successful queue_control commit; first reread was too early', state: active}
 - {id: GP-068, role: any, at: before_round, do: require production wrapper expected binary matches real core desktop.exe before ISO retry, check: {type: confirm}, source: 'exact ISO failure: default VoxVulgi.exe rejected real NSIS desktop.exe; rollback restored old core', state: active}
 - {id: GP-069, role: any, at: before_round, do: require gameplan notes <=120 chars and abort on every controller failure, check: {type: confirm}, source: confirmation note exceeded120 chars; preparation gate stopped core installation before launch, state: active}
+- {id: GP-070, role: any, at: before_round, do: require bounded diagnostic SQL uses parameterized LIMIT with valid token spacing, check: {type: confirm}, source: 'read-only diagnosis typo: limit10 rejected before canonical rows read; corrected LIMIT parameter', state: active}

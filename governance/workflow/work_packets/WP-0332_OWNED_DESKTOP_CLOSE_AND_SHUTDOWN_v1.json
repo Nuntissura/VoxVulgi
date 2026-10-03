@@ -52,5 +52,41 @@
   "constraints": ["No production mutation or foreign process interruption", "Do not equate CloseMainWindow return/window disappearance with process exit", "No source change before reproduced cause or exact blocked-call evidence", "Preserve database/job atomicity and process ownership", "Root coordinates builds; retain version0.1.205"],
   "acceptance": ["Exact owned close request reaches bounded shutdown or explicit failure receipt", "Owned runner stops and joins before database drain", "Bridge sidecars and owned children reconcile with actual process exit", "Packaged application proof preserves canonical job attempts and protected data", "Installer update is not labeled graceful when forced termination was required"],
   "verification": ["Source call/lock inspection", "Owned isolated actual executable lifecycle probe", "Focused owning shutdown regressions after a proven fix", "Final packaged close/update boundary"],
-  "status_updates": [{"date": "2026-10-03", "note": "Opened from exact forced-exit receipts; source inspection alone cannot establish whether RunEvent::Exit was reached"}, {"date": "2026-10-03", "note": "Fresh packaged isolated PID267548 received direct WM_CLOSE first on its verified Tauri Window, exited0 within202ms and recorded database drain. Prior auxiliary-window destruction invalidates hang attribution. Normal installed active-runner close/update and canonical preservation gates remain open", "proof": "../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261003/summary.md"}, {"date": "2026-10-03", "note": "Proper normal Tauri-first close exposed three false terminal failures (runtime RED); typed interruption repair and both focused tests passed (focused GREEN). IN_PROGRESS retained until rebuilt normal active-download close/recovery boundary passes", "proof": "../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261003/summary.md"}]
+  "status_updates": [{"date": "2026-10-03", "note": "Opened from exact forced-exit receipts; source inspection alone cannot establish whether RunEvent::Exit was reached"}, {"date": "2026-10-03", "note": "Fresh packaged isolated PID267548 received direct WM_CLOSE first on its verified Tauri Window, exited0 within202ms and recorded database drain. Prior auxiliary-window destruction invalidates hang attribution. Normal installed active-runner close/update and canonical preservation gates remain open", "proof": "../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261003/summary.md"}, {"date": "2026-10-03", "note": "Proper normal Tauri-first close exposed three false terminal failures (runtime RED); typed interruption repair and both focused tests passed (focused GREEN). IN_PROGRESS retained until rebuilt normal active-download close/recovery boundary passes", "proof": "../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261003/summary.md"}],
+  "session_review_20261003": {
+    "record_id": "WP-0332-REVIEW-20261003-01",
+    "date": "2026-10-03",
+    "status": "IN_PROGRESS",
+    "findings": [
+      {
+        "id": "WP-0332-F-001",
+        "text": "Typed shutdown-interruption repair and two focused tests passed; repair is included in built/installed13a02c5. Earlier not-yet-rebuilt description is historical.",
+        "evidence": [
+          "product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261003/summary.md",
+          "product/desktop/build_target/logs/build_desktop_target_20261003-132032_0_1_205.log",
+          "product/desktop/build_target/tool_artifacts/wp_runs/WP-0323/20261003/core_update_13a02c5_terminal.json"
+        ]
+      }
+    ],
+    "insights": [
+      {
+        "id": "WP-0332-I-001",
+        "text": "Idle/isolated graceful exit does not prove shutdown preserves an active download. Process exit alone does not establish canonical recovery or runner-join-before-drain ordering."
+      }
+    ],
+    "remaining_checks": [
+      {
+        "id": "WP-0332-C-001",
+        "text": "Exercise current rebuilt normal active-download Tauri-first close and restart; independently reconcile original job IDs,attempts and replacements."
+      },
+      {
+        "id": "WP-0332-C-002",
+        "text": "Prove bounded runner join before database drain, owned child/sidecar reconciliation and protected-data preservation; record forced versus graceful truthfully."
+      },
+      {
+        "id": "WP-0332-C-003",
+        "text": "Retain exact three recorded failed originals and their batch; no broad retry or foreign-process stop implied."
+      }
+    ]
+  }
 }

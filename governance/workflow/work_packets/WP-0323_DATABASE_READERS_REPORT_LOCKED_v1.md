@@ -126,3 +126,20 @@ Operator direction 2026-09-24: VoxVulgi cargo builds slow down the higher-priori
 - The preceding pending canonical run completed: exit0, 31,636ms, zero admission failures/panics, all81 committed inserts independently matching the destination count, verified settings and observed known VFS callbacks on all seven workers, and successful2ms drain. The immutable source/destination hashes and sizes match before destination-only schema59-to60 migration. Evidence: `WP-0323/20261003/churn_full_no_auto_checkpoint_summary.json`, `churn_no_auto_checkpoint_identity.json`, and `wp0323_canonical_full_no_auto_checkpoint.log`.
 - Main-database sync is absent; each writer retains FULL WAL sync (maximum801.701ms). Maximum worker operation is2269ms for writers and793ms for readers. The WAL remains7,148,232bytes/1735frames: this proves the disposable counterfactual, not sustained WAL maintenance or a production repair. Production settings remain unchanged.
 - Before testing separate concurrent maintenance, require a fixed SQLite implementation. Official SQLite WAL documentation identifies the WAL-reset race through3.51.2, fixed3.51.3 and later; current bundled3.46.0 is within the affected range, without any claim of observed corruption. Verified rusqlite0.40.2 tag bundles SQLite3.53.2 and supports MSRV1.88 (current compiler1.91.1). Research: https://www.sqlite.org/wal.html and https://github.com/rusqlite/rusqlite/releases and the v0.40.2 `libsqlite3-sys/sqlite3/sqlite3.h` version macros. Production maintenance design, durability/recovery proof, original clean30-minute live/download/export acceptance, and final packaged proof remain open; WP stays IN_PROGRESS.
+
+<topic id="database-live-proof-review-20261003" status="IN_PROGRESS" wp="WP-0323" updated_at="2026-10-03">
+
+## Findings and proof limits
+
+- WP-0323-F-20261003-001: Installed13a02c5 completed1800.128seconds/60successful jobs.overview samples, zero probe failures and zero matched database-error events. Evidence: product/desktop/build_target/tool_artifacts/wp_runs/WP-0323/20261003/live_monitor_1791030167663/live_30minute_result.json. This is bounded observation, not full database acceptance.
+- WP-0323-F-20261003-002: Latest succeeded count remained432; controlled probe job fadf6174-6aae-4916-8c7d-6ad3d4db11b4 failed with Video unavailable. Evidence: product/desktop/build_target/tool_artifacts/wp_runs/WP-0323/20261003/live_13a02c5_controlled_probe_canonical_failures.json. Provider cooldown/failure cannot establish normal successful-download proof.
+- WP-0323-I-20261003-001: Own-runtime writer-timeout RED and passing filename counterpart are not an exact before/after reproduction of the reported read_admission_timeout. Single-video history showing classification up to date is useful workflow evidence but does not prove every database path.
+
+## Still to check
+
+- WP-0323-C-20261003-001: Independently reconcile the complete observation trace window for database_locked/SQLITE_BUSY as well as admission errors; the monitor does not explicitly match those two forms.
+- WP-0323-C-20261003-002: Prove normal successful downloads under unchanged provider pacing, and exact reported read-admission/history behavior; do not force cooldown release or treat a removed-video error as database success.
+- WP-0323-C-20261003-003: Prove first-attempt nonempty subscription export on final installed code and independently compare canonical subscriptions. Earlier export comparison covered316 subscriptions on an earlier build and does not supply fresh final-build proof.
+- WP-0323-C-20261003-004: Reconcile WP-0333 crash/reopen and WP-0332 active shutdown proof. Preserve retained data, original reproduction history, admission bounds and unchanged0.1.205. Status remains IN_PROGRESS; no complete database fix claimed.
+
+</topic>
