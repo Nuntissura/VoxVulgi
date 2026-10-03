@@ -21411,6 +21411,33 @@ fn is_canceled(paths: &AppPaths, job_id: &str) -> Result<bool> {
     Ok(status == JobStatus::Canceled.as_str())
 }
 
+fn direct_download_cancellation_error(shutdown_requested: bool) -> EngineError {
+    if shutdown_requested {
+        EngineError::JobInterruptedByShutdown
+    } else {
+        EngineError::InstallFailed("job canceled".to_string())
+    }
+}
+
+fn direct_download_fallback_error(url: &str, direct_error: EngineError, fallback_error: EngineError) -> EngineError {
+    if matches!(fallback_error, EngineError::JobInterruptedByShutdown) {
+        return fallback_error;
+    }
+    EngineError::InstallFailed(format!(
+        "direct download failed for {} ({direct_error}); yt-dlp fallback failed ({fallback_error})",
+        redact_url_for_log(url)
+    ))
+}
+
+fn direct_download_child_error(error: EngineError, shutdown_requested: bool) -> EngineError {
+    if shutdown_requested && matches!(&error, EngineError::ExternalToolFailed { tool, code: None, stderr }
+        if matches!(tool.as_str(), "ffmpeg" | "ffprobe") && stderr == &format!("{tool} canceled")) {
+        EngineError::JobInterruptedByShutdown
+    } else {
+        error
+    }
+}
+
 fn is_queue_paused(paths: &AppPaths) -> Result<bool> {
     let conn = db::open_readonly(paths)?;
     is_queue_paused_conn(&conn)
@@ -26622,8 +26649,11 @@ fn download_url_to_library(
     ) {
         Ok(path) => Ok(path),
         Err(direct_err) => {
+            if matches!(direct_err, EngineError::JobInterruptedByShutdown) {
+                return Err(direct_err);
+            }
             if is_canceled(paths, job_id).unwrap_or(false) {
-                return Err(EngineError::InstallFailed("job canceled".to_string()));
+                return Err(direct_download_cancellation_error(JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)));
             }
             // Fallback for webpage URLs and hosts that need extractor logic.
             match download_yt_dlp_url_to_library(
@@ -26652,10 +26682,7 @@ fn download_url_to_library(
                     subtitle_mode,
                 ) {
                 Ok(path) => Ok(path),
-                Err(yt_err) => Err(EngineError::InstallFailed(format!(
-                    "direct download failed for {} ({direct_err}); yt-dlp fallback failed ({yt_err})",
-                    redact_url_for_log(url)
-                ))),
+                Err(yt_err) => Err(direct_download_fallback_error(url, direct_err, yt_err)),
             }
         }
     }
@@ -27158,6 +27185,7 @@ fn download_direct_http_url_to_library(
         output_subdir,
     ) {
         Ok(path) => return Ok(path),
+        Err(err @ EngineError::JobInterruptedByShutdown) => return Err(err),
         Err(err) => Some(err.to_string()),
     };
 
@@ -27172,7 +27200,7 @@ fn download_direct_http_url_to_library(
 
     for candidate in media_candidates {
         if is_canceled(paths, job_id)? {
-            return Err(EngineError::InstallFailed("job canceled".to_string()));
+            return Err(direct_download_cancellation_error(JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)));
         }
 
         match download_direct_media_asset(
@@ -27184,6 +27212,7 @@ fn download_direct_http_url_to_library(
             output_subdir,
         ) {
             Ok(path) => return Ok(path),
+            Err(e @ EngineError::JobInterruptedByShutdown) => return Err(e),
             Err(e) => last_err = Some(e.to_string()),
         }
 
@@ -27214,6 +27243,7 @@ fn download_direct_http_url_to_library(
                 subtitle_mode,
             ) {
                 Ok(path) => return Ok(path),
+                Err(e @ EngineError::JobInterruptedByShutdown) => return Err(e),
                 Err(e) => last_err = Some(e.to_string()),
             }
         }
@@ -27259,7 +27289,7 @@ fn download_direct_media_asset(
     output_subdir: Option<&str>,
 ) -> Result<PathBuf> {
     if is_canceled(paths, job_id)? {
-        return Err(EngineError::InstallFailed("job canceled".to_string()));
+        return Err(direct_download_cancellation_error(JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)));
     }
 
     let request_url = strip_range_query_params(url);
@@ -27268,6 +27298,9 @@ fn download_direct_media_asset(
 
     let agent = build_http_agent(60);
     let mut response = call_get_with_cookie(&agent, &request_url, auth_cookie).map_err(|err| {
+        if JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+            return EngineError::JobInterruptedByShutdown;
+        }
         EngineError::InstallFailed(format!(
             "request failed for {}: {err}",
             redact_url_for_log(url)
@@ -27300,16 +27333,23 @@ fn download_direct_media_asset(
     loop {
         if is_canceled(paths, job_id)? {
             let _ = std::fs::remove_file(&temp_path);
-            return Err(EngineError::InstallFailed("job canceled".to_string()));
+            return Err(direct_download_cancellation_error(JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)));
         }
 
         let read = body_reader.read(&mut buf).map_err(|err| {
             let _ = std::fs::remove_file(&temp_path);
+            if JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+                return EngineError::JobInterruptedByShutdown;
+            }
             EngineError::InstallFailed(format!(
                 "failed reading response body for {}: {err}",
                 redact_url_for_log(url)
             ))
         })?;
+        if JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(EngineError::JobInterruptedByShutdown);
+        }
         if read == 0 {
             break;
         }
@@ -27388,6 +27428,10 @@ fn download_direct_media_asset(
     let output_guard = ManagedOutputGuard::acquire(&final_path)?;
 
     let source_probe = ffmpeg::probe(paths, &temp_path).map_err(|err| {
+        let err = direct_download_child_error(err, JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst));
+        if matches!(err, EngineError::JobInterruptedByShutdown) {
+            return err;
+        }
         EngineError::InstallFailed(format!(
             "downloaded file from {} is not valid playable media: {err}; staging retained at {}",
             redact_url_for_log(url),
@@ -27403,9 +27447,12 @@ fn download_direct_media_asset(
     }
 
     if final_path.exists() {
-        if validate_managed_mkv_output(paths, &final_path, &expectations_from_probe(&source_probe))
-            .is_ok()
-        {
+        let validation = validate_managed_mkv_output(paths, &final_path, &expectations_from_probe(&source_probe))
+            .map_err(|err| direct_download_child_error(err, JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)));
+        if let Err(err @ EngineError::JobInterruptedByShutdown) = validation {
+            return Err(err);
+        }
+        if validation.is_ok() {
             // A retry of the same job may encounter its previously validated final artifact.
             // Reuse it without overwriting managed media.
             let _ = std::fs::remove_file(&temp_path);
@@ -27452,7 +27499,7 @@ fn download_direct_media_asset(
     )? {
         JobCommandOutput::Completed(output) => output,
         JobCommandOutput::Canceled => {
-            return Err(EngineError::InstallFailed("job canceled".to_string()));
+            return Err(direct_download_cancellation_error(JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)));
         }
     };
     if !output.status.success() {
@@ -27464,7 +27511,11 @@ fn download_direct_media_asset(
         )));
     }
     let probe =
-        validate_managed_mkv_output(paths, &muxing_path, &expectations_from_probe(&source_probe))?;
+        validate_managed_mkv_output(paths, &muxing_path, &expectations_from_probe(&source_probe))
+            .map_err(|err| direct_download_child_error(err, JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)))?;
+    if JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
+        return Err(EngineError::JobInterruptedByShutdown);
+    }
     std::fs::remove_file(&temp_path)?;
     output_guard.publish(&muxing_path)?;
     // Publication is the irreversible success boundary. A diagnostic sink failure after the
@@ -27912,7 +27963,7 @@ fn discover_embedded_media_urls(
 
     while let Some(page_url) = queue.pop_front() {
         if is_canceled(paths, job_id)? {
-            return Err(EngineError::InstallFailed("job canceled".to_string()));
+            return Err(direct_download_cancellation_error(JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)));
         }
         if visited.len() >= EMBED_CRAWL_MAX_PAGES || found.len() >= EMBED_CRAWL_MAX_CANDIDATES {
             break;
@@ -36698,6 +36749,100 @@ EOF
             "SELECT (SELECT COUNT(*) FROM job),(SELECT COUNT(*) FROM job_attempt),(SELECT COUNT(*) FROM downloader_outcome)", [],
             |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).expect("no manufactured lineage or failure");
         assert_eq!((jobs,attempts,outcomes), (1,0,outcome_count_before));
+    }
+
+    #[test]
+    fn direct_http_shutdown_interruption_survives_fallback_and_recovers_same_attempt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let original_params = r#"{"url":"http://127.0.0.1:53190/wp0332-active.mkv","provider":"direct_http"}"#;
+        let job = enqueue_with_type_item_and_batch_id(&paths, JobType::DownloadDirectUrl,
+            original_params.into(), None, Some("direct-http-shutdown-batch".into())).expect("enqueue");
+        let conn = db::open(&paths).expect("fixture connection");
+        conn.execute("UPDATE job SET status='running',started_at_ms=42,attempt_no=2 WHERE id=?1", [&job.id]).expect("running");
+        let counts_before: (i64, i64) = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM job_attempt),(SELECT COUNT(*) FROM downloader_outcome)", [],
+            |r| Ok((r.get(0)?, r.get(1)?))).expect("counts");
+        let error = direct_download_fallback_error("http://127.0.0.1:53190/wp0332-active.mkv",
+            EngineError::InstallFailed("not direct media".into()), direct_download_cancellation_error(true));
+        assert!(matches!(error, EngineError::JobInterruptedByShutdown));
+        assert!(preserve_shutdown_interrupted_download(&paths, &job.id, &error));
+        let before: (String, i64, String, Option<String>, String, Option<String>, Option<i64>) = conn.query_row(
+            "SELECT id,attempt_no,params_json,batch_id,status,error,finished_at_ms FROM job WHERE id=?1", [&job.id],
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).expect("canonical original");
+        assert_eq!(before, (job.id.clone(), 2, original_params.into(), Some("direct-http-shutdown-batch".into()), "running".into(), None, None));
+        assert_eq!(requeue_orphaned_running_jobs(&conn).expect("startup recovery"), 1);
+        let after: (String, i64, String, Option<String>, String) = conn.query_row(
+            "SELECT id,attempt_no,params_json,batch_id,status FROM job WHERE id=?1", [&job.id],
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).expect("recovered original");
+        assert_eq!(after, (job.id, 2, original_params.into(), Some("direct-http-shutdown-batch".into()), "queued".into()));
+        let counts_after: (i64, i64) = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM job_attempt),(SELECT COUNT(*) FROM downloader_outcome)", [],
+            |r| Ok((r.get(0)?, r.get(1)?))).expect("counts");
+        assert_eq!(counts_after, counts_before, "shutdown creates neither attempt nor provider failure");
+    }
+
+    #[test]
+    fn direct_http_user_cancel_does_not_become_shutdown_interruption() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let job = enqueue(&paths, JobType::DownloadDirectUrl, "{}".into()).expect("enqueue");
+        let conn = db::open(&paths).expect("fixture connection");
+        conn.execute("UPDATE job SET status='canceled' WHERE id=?1", [&job.id]).expect("user cancel");
+        let error = download_direct_media_asset(&paths, "http://127.0.0.1:1/never-requested.mkv", &job.id, None, None, None)
+            .expect_err("canceled before network");
+        assert!(matches!(&error, EngineError::InstallFailed(message) if message == "job canceled"));
+        assert!(!preserve_shutdown_interrupted_download(&paths, &job.id, &error));
+        assert_eq!(requeue_orphaned_running_jobs(&conn).expect("startup recovery"), 0);
+        let combined = direct_download_fallback_error("http://127.0.0.1/media.mkv",
+            EngineError::InstallFailed("http 500".into()), direct_download_cancellation_error(false));
+        assert!(matches!(&combined, EngineError::InstallFailed(message) if message.contains("http 500") && message.contains("job canceled")));
+    }
+
+    #[test]
+    fn direct_http_nonzero_response_retains_real_failure() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let job = enqueue(&paths, JobType::DownloadDirectUrl, "{}".into()).expect("enqueue");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("owned listener");
+        listener.set_nonblocking(true).expect("bounded accept");
+        let address = listener.local_addr().expect("address");
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let (mut stream, _) = loop {
+                match listener.accept() {
+                    Ok(accepted) => break accepted,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                    Err(error) => panic!("bounded fixture accept: {error}"),
+                }
+            };
+            stream.set_read_timeout(Some(Duration::from_secs(3))).expect("bounded read");
+            let mut request = [0; 4096];
+            stream.read(&mut request).expect("request headers");
+            stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("response");
+        });
+        let error = download_direct_media_asset(&paths, &format!("http://{address}/failure.mkv"), &job.id, None,
+            Some(dir.path().to_str().expect("path")), None).expect_err("real HTTP error");
+        server.join().expect("owned server joined");
+        assert!(matches!(&error, EngineError::InstallFailed(message) if message.contains("http 500")));
+        assert!(!preserve_shutdown_interrupted_download(&paths, &job.id, &error));
+    }
+
+    #[test]
+    fn direct_http_owned_child_abort_requires_shutdown_and_exact_cancellation() {
+        for tool in ["ffmpeg", "ffprobe"] {
+            let canceled = || EngineError::ExternalToolFailed { tool: tool.into(), code: None, stderr: format!("{tool} canceled") };
+            assert!(matches!(direct_download_child_error(canceled(), true), EngineError::JobInterruptedByShutdown));
+            assert!(matches!(direct_download_child_error(canceled(), false), EngineError::ExternalToolFailed { .. }));
+            let nonzero = EngineError::ExternalToolFailed { tool: tool.into(), code: Some(1), stderr: format!("{tool} canceled") };
+            assert!(matches!(direct_download_child_error(nonzero, true), EngineError::ExternalToolFailed { code: Some(1), .. }));
+            let timeout = EngineError::ExternalToolFailed { tool: tool.into(), code: None, stderr: format!("{tool} timed out") };
+            assert!(matches!(direct_download_child_error(timeout, true), EngineError::ExternalToolFailed { .. }));
+        }
     }
 
     #[test]
