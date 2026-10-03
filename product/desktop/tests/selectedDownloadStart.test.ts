@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { shouldOfferSelectedDownloadStart, selectedDownloadStartMessage } from "../src/lib/selectedDownloadStart.ts";
 import type { YoutubeGateSnapshot } from "../src/lib/youtubeGateText.ts";
 
@@ -19,4 +20,16 @@ test("selection receipts preserve pause scope and never turn held into a downloa
   assert.match(selectedDownloadStartMessage({ rest_paused: true, held: true, hold_reason: "adaptive_youtube_cooldown" }), /other queued work stays paused.*still waiting: adaptive_youtube_cooldown/);
   assert.match(selectedDownloadStartMessage({ rest_paused: false, held: false, hold_reason: null }), /queue resumes with this selection first.*pacing still applies/);
   assert.match(selectedDownloadStartMessage({ rest_paused: true, held: true, hold_reason: null, next_eligible_at_ms: 1791030621743 }), /still waiting: provider gate.*Next eligible check:/);
+});
+
+test("semantic UI and backend explicit selected decisions share hidden runner activation", () => {
+  const desktop = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  const bridge = readFileSync(new URL("../src-tauri/src/agent_control.rs", import.meta.url), "utf8");
+  const body = (name: string) => desktop.slice(desktop.indexOf(`fn ${name}(`)).split("#[tauri::command]")[0];
+  assert.match(body("jobs_start_selected_downloads"), /agent_control::ensure_explicit_headless_runner\(&state.paths\)/);
+  assert.match(body("jobs_enqueue_selected_download_batch"), /if receipt.start.is_some\(\).*ensure_explicit_headless_runner/);
+  assert.doesNotMatch(body("jobs_enqueue_download_batch"), /ensure_explicit_headless_runner/);
+  assert.match(bridge, /pub\(super\) fn ensure_explicit_headless_runner/);
+  assert.match(bridge, /state.agent_headless && !safe_mode/);
+  assert.match(bridge, /app.try_state::<AppState>\(\).is_none_or\(\|state\| state.safe_mode_enabled.load\(Ordering::SeqCst\)\)/);
 });

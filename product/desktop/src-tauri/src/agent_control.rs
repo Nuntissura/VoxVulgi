@@ -15,8 +15,12 @@ pub(super) fn stop_explicit_runner() -> bool {
     owned.is_none_or(|runner|runner.stop_and_join(jobs::JOB_RUNNER_SHUTDOWN_TIMEOUT).is_ok())
 }
 
-fn ensure_explicit_headless_runner(paths: &AppPaths) -> Result<(), String> {
-    if agent_bridge_state().lock().unwrap().agent_headless {
+pub(super) fn ensure_explicit_headless_runner(paths: &AppPaths) -> Result<(), String> {
+    let safe_mode = AGENT_APP_HANDLE.get().is_none_or(|app| app.try_state::<AppState>().is_none_or(|state| state.safe_mode_enabled.load(Ordering::SeqCst)));
+    let state = agent_bridge_state().lock().unwrap();
+    let explicit_allowed = state.agent_headless && !safe_mode;
+    drop(state);
+    if explicit_allowed {
         let mut runner = EXPLICIT_HEADLESS_RUNNER.get_or_init(Default::default).lock().unwrap();
         if runner.is_none() { *runner = Some(jobs::start_runner(paths.clone()).map_err(|e|e.to_string())?); }
     }

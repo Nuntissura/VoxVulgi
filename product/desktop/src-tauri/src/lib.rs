@@ -16225,7 +16225,9 @@ fn jobs_enqueue_download_batch(
 #[tauri::command]
 async fn jobs_start_selected_downloads(state: State<'_, AppState>, job_ids: Vec<String>, mode: String) -> Result<jobs::SelectedDownloadStartReceipt, String> {
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || jobs::start_selected_downloads(&paths, &job_ids, &mode).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
+    let receipt = tauri::async_runtime::spawn_blocking(move || jobs::start_selected_downloads(&paths, &job_ids, &mode).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())??;
+    agent_control::ensure_explicit_headless_runner(&state.paths)?;
+    Ok(receipt)
 }
 
 #[tauri::command]
@@ -16235,10 +16237,12 @@ async fn jobs_enqueue_selected_download_batch(
     preset_id: Option<String>, approved_missing_item_ids: Option<Vec<String>>, mode: String,
 ) -> Result<jobs::SelectedDownloadSubmissionReceipt, String> {
     let paths = state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || jobs::enqueue_selected_download_batch(
+    let receipt = tauri::async_runtime::spawn_blocking(move || jobs::enqueue_selected_download_batch(
         &paths, urls, auth_cookie, output_dir, use_browser_cookies, browser_cookie_source,
         preset_id, approved_missing_item_ids.unwrap_or_default(), &mode,
-    ).map_err(|e|e.to_string())).await.map_err(|e|e.to_string())?
+    ).map_err(|e|e.to_string())).await.map_err(|e|e.to_string())??;
+    if receipt.start.is_some() { agent_control::ensure_explicit_headless_runner(&state.paths)?; }
+    Ok(receipt)
 }
 
 #[tauri::command]
