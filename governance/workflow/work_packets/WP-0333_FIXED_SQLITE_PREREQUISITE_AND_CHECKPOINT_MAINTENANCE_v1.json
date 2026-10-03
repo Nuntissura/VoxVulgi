@@ -1,0 +1,369 @@
+{
+  "file_id": "WP-0333-v1",
+  "file_kind": "work_packet",
+  "updated_at": "2026-10-03",
+  "id": "WP-0333",
+  "version": 1,
+  "title": "Fixed SQLite prerequisite and checkpoint maintenance",
+  "status": "IN_PROGRESS",
+  "board": "../TASK_BOARD.md",
+  "owner": "Codex",
+  "refinement": "WP-0333_FIXED_SQLITE_PREREQUISITE_AND_CHECKPOINT_MAINTENANCE_v1_REFINEMENT.md",
+  "operator_request": "Implement all requested database repairs and retain necessary work in packets; preserve user data and the assigned desktop version",
+  "dependencies": [
+    "WP-0323",
+    "WP-0312",
+    "WP-0331"
+  ],
+  "scope": [
+    "Upgrade both engine and desktop rusqlite declarations to exact =0.40.2, preserving their bundled/backup features and updating their owning lockfiles coherently",
+    "Verify the actually linked SQLite implementation is fixed for the WAL-reset race before any concurrent checkpoint experiment",
+    "Exercise a disposable canonical-density actual-AppDatabase concurrent PASSIVE-maintenance counterfactual with durable writes and unchanged admission bounds",
+    "Select production checkpoint ownership only after independent counterpart proof and a separately reviewed authority amendment; this packet does not yet authorize production concurrent maintenance"
+  ],
+  "phase_authority": {
+    "phase_1_authorized": [
+      "Fixed SQLite dependency upgrade and minimum compatibility repairs",
+      "Owning regressions and actual linked sqlite_version proof",
+      "Disposable harness-only checkpoint-maintenance counterfactual"
+    ],
+    "phase_2_blocked_until": [
+      "Independent passing canonical-density concurrent-maintenance counterpart with WAL progress/growth and shutdown receipts",
+      "Reviewed production policy/exception/spec amendment retaining all existing bounds and atomicity"
+    ],
+    "production_solution_selected": false
+  },
+  "files": [
+    "product/engine/Cargo.toml",
+    "product/engine/Cargo.lock",
+    "product/desktop/src-tauri/Cargo.toml",
+    "product/desktop/src-tauri/Cargo.lock",
+    "product/engine/examples/wp0323_connection_churn.rs",
+    "product/engine/src/database_runtime.rs",
+    "product/engine/src/db.rs"
+  ],
+  "constraints": [
+    "Retain desktop0.1.205; no version or release-changelog changes",
+    "Keep four read executors, 64-entry read/write queues, four-second read admission, five-second strict-FIFO writer admission and ten-second database drain",
+    "No chunking or weakening atomic observation batches, no silently dropped admitted canonical writes",
+    "Database-first startup and startup-only migrations remain hard predecessors",
+    "No canonical database edits, backup replacement, foreign-process interruption or manual job/media mutation; experiments use guarded disposable copies only",
+    "No permanent auto-checkpoint disable without demonstrated bounded WAL maintenance; no synchronous OFF or undocumented durability weakening",
+    "PASSIVE does not provide a hard filesystem-sync execution deadline; report actual late/busy/partial/error state",
+    "Root batches builds/tests in canonical warm paths; child agents do not run Cargo independently"
+  ],
+  "research_basis": {
+    "sources": [
+      "https://www.sqlite.org/wal.html",
+      "https://www.sqlite.org/c3ref/wal_checkpoint_v2.html",
+      "https://www.sqlite.org/pragma.html#pragma_synchronous",
+      "https://github.com/rusqlite/rusqlite/releases/tag/v0.40.2",
+      "https://raw.githubusercontent.com/rusqlite/rusqlite/v0.40.2/Cargo.toml",
+      "https://raw.githubusercontent.com/rusqlite/rusqlite/v0.40.2/libsqlite3-sys/Cargo.toml",
+      "https://raw.githubusercontent.com/rusqlite/rusqlite/v0.40.2/libsqlite3-sys/sqlite3/sqlite3.h"
+    ],
+    "verified_prerequisite": "SQLite WAL-reset race affects3.7.0 through3.51.2;3.51.3 and later are fixed. Existing bundled3.46.0 is affected by the documented range, not proven corrupt. Tagged rusqlite0.40.2 declares native libsqlite3-sys0.38.2 and sqlite3.h143-145 identifies bundled3.53.2,3053002,sourceID dated2026-06-03. Release MSRV1.88 is supported by root-verified currentrustc1.91.1. Actual linked implementation identity must still be measured, not inferred from dependency labels.",
+    "repo_anchors": [
+      "product/engine/Cargo.toml:12",
+      "product/desktop/src-tauri/Cargo.toml:34",
+      "product/engine/src/database_runtime.rs:14-29 admission/checkpoint policy",
+      "product/engine/src/database_runtime.rs:1637 checkpoint_passive owns FIFO writer",
+      "product/engine/src/database_runtime.rs:1712 shutdown_and_drain",
+      "product/engine/src/db.rs:282-311 raw connection setup",
+      "governance/spec/TECHNICAL_DESIGN.md:59-61",
+      "WP-0312 acceptance: frozen checkpoint/read-pool/no-starvation policy",
+      "WP-0323 acceptance: own-runtime RED/GREEN plus normal30-minute/export proof"
+    ],
+    "patterns": [
+      "SQLite supports separate PASSIVE checkpoint owners; long readers can prevent completion",
+      "FULL synchronizes committed WAL; NORMAL relocation of checkpoint barriers changes the power-loss durability window",
+      "Keeper/pooling may reduce connection churn but does not eliminate1000-frame writer-thread autocheckpoint",
+      "PERSIST_WAL is evaluated after last-close checkpoint and is not a sync cure"
+    ],
+    "selected_approach": "Exact fixed SQLite prerequisite upgrade, then harness-only concurrent maintenance measurement. No production policy solution is selected.",
+    "rejected": [
+      "FULL+NO_CKPT+auto0 without maintenance: observed GREEN but WAL grew to1735frames",
+      "Keeper alone: proven automatic-checkpoint sync remains",
+      "PERSIST_WAL: checkpoint precedes persistence handling",
+      "Concurrent checkpoint on pinned3.46.0: documented WAL-reset race",
+      "Higher admission timeouts or weakened atomicity: conceal rather than establish repair"
+    ]
+  },
+  "recorded_evidence": {
+    "red": "../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0323/20261003/churn_sync_file_kind_summary.json",
+    "independent_attribution": "../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0323/20261003/churn_sync_file_kind_independent_attribution.json",
+    "harness_green_only": "../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0323/20261003/churn_full_no_auto_checkpoint_summary.json",
+    "observed": "No-close-checkpoint/NORMAL/auto1000 produced4 writer-admission failures with measured post-open WAL+MAIN_DB syncs. Harness FULL/no-close-checkpoint/auto0 produced81canonical writes,0failures in31636ms, but WAL7148232bytes/1735frames and no maintenance proof. These do not prove live closure."
+  },
+  "risks_and_controls": [
+    {
+      "risk": "Rust/FFI/default-feature or native SQLite API incompatibility",
+      "control": "Inspect tagged API deltas; minimal compiler-driven compatibility repairs, owning runtime/VFS/backup/schema regressions and actual runtime SQLite version/source identity"
+    },
+    {
+      "risk": "Concurrent checkpoint/write WAL-reset corruption",
+      "control": "Fixed linked SQLite is a hard prerequisite; no old-pin concurrent maintenance"
+    },
+    {
+      "risk": "Long readers or sustained writes leave unbounded WAL",
+      "control": "Measure frames/bytes and partial/busy progress under sustained writes and pinned readers; define growth/maintenance policy only from counterpart proof"
+    },
+    {
+      "risk": "PASSIVE sync stalls or shared disk contention still exhaust admission",
+      "control": "Correlate actual callback kinds/durations, FIFO/read admission and every canonical write; do not claim lock nonwaiting bounds filesystem I/O"
+    },
+    {
+      "risk": "Maintenance owner escapes startup/shutdown accounting",
+      "control": "Single attributable owner inside AppDatabase after readiness; explicit stop/join/drain receipts required before production amendment"
+    },
+    {
+      "risk": "Suppressed close checkpoint weakens durable completion",
+      "control": "FULL readback per writer and independent crash/reopen recovery of acknowledged canonical commits; do not use graceful close alone as crash proof"
+    }
+  ],
+  "acceptance": [
+    "Both manifests and lockfiles resolve the selected exact rusqlite0.40.2 without duplicate/incompatible native sqlite owners; required features preserved",
+    "Actual sqlite_version() is at least3.51.3 and linked source identity is fixed; declaration-only proof is insufficient",
+    "Owning runtime/admission/atomicity/VFS/backup/schema and desktop database-contract tests pass on final inputs",
+    "Canonical-density actual-runtime maintenance counterpart reconciles every admitted write and shows checkpoint progress, observed WAL growth limits, partial/busy/reader-starvation recovery and no admission failures",
+    "Durable crash/reopen proof retains acknowledged canonical writes and protected subscriptions/playlists/library metadata without manual repair",
+    "Any production policy change waits for independent counterpart proof plus reviewed authority/spec/exception amendment; preserves original4/5-second FIFO bounds",
+    "Final packaged normal installed30-minute downloads/reads have no admission/lock errors, export succeeds first try, and active-runner/checkpointer/database shutdown reconciles",
+    "Independent review and PROOF_STANDARD summary/evidence pass before DONE; WP-0323 is not closed by harness GREEN alone"
+  ],
+  "verification": [
+    "Root-controlled focused compatibility/runtime tests",
+    "Actual linked SQLite identity query",
+    "Disposable canonical-density maintenance/crash counterpart",
+    "Independent canonical reconciliation and adversarial review",
+    "Final packaged normal30-minute/export/shutdown proof"
+  ],
+  "proof_root": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/<run-id>",
+  "status_update_requirements": [
+    "Root updates TASK_BOARD after contract review",
+    "Record exact RED/GREEN identity and every remaining hard gate",
+    "Retain IN_PROGRESS until all acceptance passes; never equate candidate policy with a proven production solution"
+  ],
+  "status_updates": [
+    {
+      "date": "2026-10-03",
+      "note": "Opened as exact WP-0323 remediation prerequisite from automatic-checkpoint sync attribution and documented old-pin concurrent-checkpoint risk. Phase1 fixed dependency/harness work authorized; production concurrent-maintenance amendment remains gated."
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Phase1 actual linked identity test passed1/1: SQLite3.53.2/3053002 and exact sourceID matched independent SQL queries. Both owning lockfiles resolve rusqlite0.40.2/libsqlite3-sys0.38.2. Shared runtime owning regressions passed17/17 on upgraded inputs (63.02s). Focused migration/backup/cache/shutdown compatibility batch and disposable maintenance proof remain pending; production checkpoint policy unchanged; WP-0323 live closure unproven.",
+      "logs": [
+        "product/desktop/build_target/logs/wp0333_linked_identity_exact_test.log",
+        "product/desktop/build_target/logs/wp0333_database_runtime_regressions.log"
+      ]
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Ten focused native SQLite compatibility checks passed1/1 each: current/legacy migrations, schema60 JSON index, projection triggers, backup re-open integrity, selective rollback, queue backup-state guard, canonical MP4 prepared-cache lookup, shutdown interruption recovery and workerjoin-before-drain. Total owning proof28tests passed (identity1/runtime17/compat10). Disposable concurrent maintenance and packaged/live acceptance remain outstanding; no production checkpoint change."
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Four desktop SQLite/startup regressions passed1/1 each after upgraded native compilation (32 selected tests total). Independent harness review rejected earlier recovery replacing final checkpoint and empty-write success; both gates corrected. First fresh maintenance run stopped before workers because unchanged seed UPDATE produced no committed WAL frame. Guard preserved; disposable-only actual changed-value/readback seed repair awaits reviewed retry in a new absent root. No production behavior or live data changed.",
+      "log": "product/desktop/build_target/logs/wp0333_fresh_maintenance.log"
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Changed-value seed retry passed fresh disposable maintenance:12canonicalcommits,0failures/panics,actualSQLite3.53.2,partialcheckpointduringpin,recoveryafterrelease,final193/193frames,busy0,645msownedjoin,drain0ms. Actual fixed-SQLite canonical-density baseline then failed:10total errors=fivewriter_admission_timeout+fivelockingprotocol;24commits independently match;35904msworkload/drain1ms. Upgrade alone is not a repair. Same-input large maintenance counterpart now running; production solution remains unselected.",
+      "evidence": [
+        "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/fresh_maintenance_summary.json",
+        "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/canonical_fixed_baseline_summary.json"
+      ],
+      "executable_sha256": "8807A8BFB9F0EC7DAC8B034D5F184DADD5C036EE97765316897B464593A528DF",
+      "example_sha256": "4E51D187F018069B76EC2A61B61E4AFF7C4F4FE031919C77AA36E8729FBE052F"
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Canonical maintenance counterpart and fresh owner diagnostic remain RED. Earlier recovery and later fresh reopen cannot replace original final-checkpoint failure.32 focused tests remain GREEN; production policy unchanged/live closure not proven.",
+      "canonical_maintenance": {
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/canonical_maintenance_summary.json",
+        "summary_sha256": "FD85811533F0D7C05A85FF5FA0DE39783BA198192A5CBB8DE59E0711E7AC8123",
+        "verdict": "RED",
+        "worker_failures": 1,
+        "failures_by_kind": {
+          "writer_admission_timeout": 1
+        },
+        "reconciled_commits": 69,
+        "canonical_counter_matches": true,
+        "final_checkpoint": {
+          "log_frames": 1048,
+          "checkpointed_frames": 0,
+          "busy": 0
+        },
+        "final_checkpoint_complete": false
+      },
+      "fresh_owner_diagnostic": {
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/fresh_owner_diagnostic_summary.json",
+        "source_summary": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_fresh_diagnostic_v1\\churn_summary.json",
+        "summary_sha256": "17AC3FC403098BD38BEB8C83BEB557FC81617007B4BC0FF166A400773F43F7B6",
+        "exact_copy_verified": true,
+        "verdict": "RED",
+        "worker_failures": 0,
+        "reconciled_commits": 8,
+        "canonical_counter_matches": true,
+        "original_final_checkpoint": {
+          "log_frames": 129,
+          "checkpointed_frames": 81,
+          "busy": 0
+        },
+        "final_checkpoint_complete": false,
+        "owner_before_final_checkpoint": {
+          "actual_vfs": "win32",
+          "busy_statement_count": 0,
+          "is_autocommit": true,
+          "main_txn_state": 0,
+          "statement_count": 0,
+          "statement_count_overflow": false,
+          "vfs_name_rc": 0
+        },
+        "runtime_after_workers_join": {
+          "active_operations": [],
+          "active_readers": 0,
+          "waiting_readers": 0,
+          "waiting_writers": 0,
+          "writer_active": false
+        },
+        "post_owner_close_default_passive": {
+          "busy": 0,
+          "checkpointed_frames": 129,
+          "log_frames": 129
+        },
+        "subsequent_registered_vfs_passive": {
+          "busy": 0,
+          "checkpointed_frames": 129,
+          "log_frames": 129
+        },
+        "probe_order_constraint": "default PASSIVE then exact registered VFS PASSIVE; the first can change checkpoint state seen by the second",
+        "fresh_diagnostics_override_original_verdict": false,
+        "executable_sha256": "E8EB156E7082A34F421754642978B1A05AD448CA85BBC44E60711AD8CBF38FB2",
+        "executable_path": "product/desktop/build_target/cargo_cache/debug/examples/wp0323_connection_churn.exe",
+        "current_working_example_sha256": "914E0D2171BB9EE696A04A6E32510B329C2B3CBD8B7F6EA001132410B27EB86E",
+        "current_working_source_matches_probe_source": false,
+        "run_example_sha256": "E22BB330C662F89A2B8844A40A2AFED3B230C895E79B81EB917B0972E685E58A",
+        "run_identity_basis": "Independent pre-edit source hash inspection; root confirms exact64260 compile/run used this source and current E8EB156 executable.",
+        "current_working_source_state": "Concurrent opt-in owner-reopen changes unbuilt; not bound to retained diagnostic."
+      },
+      "focused_tests_passed": 32,
+      "production_policy_changed": false,
+      "live_closure_proven": false,
+      "remaining_gates": [
+        "Canonical-density maintenance without admission failures and with complete final checkpoint",
+        "Durable crash/reopen preservation",
+        "Production policy requires independently passing counterpart and reviewed authority/spec amendment",
+        "Final packaged normal installed30-minute downloads/reads/export/shutdown proof",
+        "Independent review and PROOF_STANDARD closure"
+      ]
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Fresh opt-in owner reopen is RED; partial checkpoint and recovery do not replace failed reopen or unattempted original final checkpoint. No production promotion or larger canonical retry from this failed counterpart.32 prior focused tests reused; all requirements remain open as applicable.",
+      "fresh_owner_reopen": {
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/fresh_owner_reopen_summary.json",
+        "source_summary": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_fresh_reopen_v1\\churn_summary.json",
+        "summary_sha256": "086F594C007B8B8A59AFB8FE7A37C2DA2E545195E53841142F13410E19A8BB54",
+        "exact_copy_verified": true,
+        "example_sha256": "1B1A62015A35BBCCF28A09E78DF099DBEAE487B89DA91DF969569361A45B1DF6",
+        "executable_sha256": "5183866B59894EFC3935AD794E44BCBA7EC9A3BC365919B7C2E4D64888E52E2D",
+        "executable_path": "product/desktop/build_target/cargo_cache/debug/examples/wp0323_connection_churn.exe",
+        "verdict": "RED",
+        "worker_failures": 7,
+        "reconciled_commits": 18,
+        "canonical_counter_matches": true,
+        "elapsed_ms": 18513,
+        "partial_during_pin": true,
+        "recovered_after_pin": true,
+        "maintenance_reopen_error": "database error: locking protocol",
+        "maintenance_reopen_ms": 11070,
+        "original_final_checkpoint_attempted": false,
+        "final_checkpoint_complete": false,
+        "stop_observed": false,
+        "error_exit": true,
+        "runtime_after_workers_join": {
+          "active_operations": [],
+          "active_readers": 0,
+          "waiting_readers": 0,
+          "waiting_writers": 0,
+          "writer_active": false
+        },
+        "subsequent_reopen_diagnostics_override_original_verdict": false
+      },
+      "negative_guard": {
+        "log": "product/desktop/build_target/logs/wp0333_reopen_requires_maintenance.log",
+        "log_sha256": "1DE398EFA62D4DC16D4FFE138D653E48D00AF674152F67A53BC5412EF80E6E3A",
+        "exact_error": "Owner reopen requires maintenance",
+        "fixture_root": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_reopen_invalid_v1",
+        "fixture_exists_after": false,
+        "before_absence_basis": "Root observed absent before command; independently absent after command",
+        "source_guard": "product/engine/examples/wp0323_connection_churn.rs:149; returns before root resolution/setup"
+      },
+      "focused_tests_passed_reused": 32,
+      "production_policy_changed": false,
+      "production_promotion_authorized": false,
+      "larger_canonical_retry_justified_by_this_result": false,
+      "live_closure_proven": false
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Latest staged fresh owner reopen is RED despite0worker failures/24reconciledcommits. Preparation failed synchronous_set with BUSY_RECOVERY after native open and NOCKPT setup succeeded. This identifies only this run, not the earlier locking-protocol failure stage.32focused tests reused; production policy unchanged/live closure unproven.",
+      "fresh_owner_stage": {
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/fresh_owner_stage_summary.json",
+        "source_summary": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_fresh_stage_v1\\churn_summary.json",
+        "summary_sha256": "E8B309D92696E2C0D95924B581072B858FE231BFEC668E29B9C0B69B4D0D06B6",
+        "exact_copy_verified": true,
+        "frozen_example": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/fixed_sqlite_owner_stage_source.rs",
+        "example_sha256": "4D273A9D2D75EE519BBF985818DCD388D7B64514BC98F0AB64F068E6AFF7820F",
+        "executable_sha256": "C7B2448006FEFB51C25B4615E4AA771C4C72338B957EFF0AC9232FC439779714",
+        "executable_path": "product/desktop/build_target/cargo_cache/debug/examples/wp0323_connection_churn.exe",
+        "verdict": "RED",
+        "worker_failures": 0,
+        "reconciled_commits": 24,
+        "canonical_counter_matches": true,
+        "elapsed_ms": 8044,
+        "partial_during_pin": true,
+        "recovered_after_pin": true,
+        "maintenance_preparation_failure": {
+          "completed_stages": [
+            {
+              "completed": true,
+              "elapsed_ms": 313,
+              "stage": "native_connection_open"
+            },
+            {
+              "completed": true,
+              "elapsed_ms": 0,
+              "stage": "busy_timeout"
+            },
+            {
+              "completed": true,
+              "elapsed_ms": 0,
+              "stage": "no_checkpoint_on_close_set"
+            }
+          ],
+          "error_class": "stage_failed_no_SQL_or_secret_text",
+          "failed_stage": "synchronous_set",
+          "failed_stage_elapsed_ms": 8,
+          "sqlite_error_codes": {
+            "classification": "DatabaseBusy",
+            "extended": 261,
+            "primary": 5
+          }
+        },
+        "sqlite_extended_code_name": "SQLITE_BUSY_RECOVERY",
+        "original_final_checkpoint_attempted": false,
+        "stop_observed": false,
+        "error_exit": true,
+        "final_checkpoint_complete": false,
+        "earlier_protocol_failure_stage_identified": false,
+        "later_fresh_diagnostics_override_original_verdict": false
+      },
+      "focused_tests_passed_reused": 32,
+      "production_policy_changed": false,
+      "production_promotion_authorized": false,
+      "live_closure_proven": false
+    }
+  ]
+}

@@ -191,6 +191,9 @@ pub struct DatabaseOperationReceipt {
 #[derive(Debug, Clone, Serialize)]
 pub struct DatabaseRuntimeSnapshot {
     pub database_path: PathBuf,
+    pub sqlite_version: String,
+    pub sqlite_version_number: i32,
+    pub sqlite_source_id: String,
     pub writer_capacity: usize,
     pub waiting_writers: usize,
     pub writer_active: bool,
@@ -1555,6 +1558,13 @@ impl AppDatabase {
     }
 
     pub fn snapshot(&self) -> DatabaseRuntimeSnapshot {
+        // These static linked-library getters open no database and reserve no admission slot.
+        let sqlite_version = rusqlite::version().to_owned();
+        let sqlite_version_number = rusqlite::version_number();
+        // SAFETY: SQLite guarantees a static NUL-terminated source identity string.
+        let sqlite_source_id = unsafe {
+            std::ffi::CStr::from_ptr(rusqlite::ffi::sqlite3_sourceid())
+        }.to_string_lossy().into_owned();
         let admission = self
             .inner
             .admission
@@ -1567,6 +1577,9 @@ impl AppDatabase {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         DatabaseRuntimeSnapshot {
             database_path: self.inner.database_path.clone(),
+            sqlite_version,
+            sqlite_version_number,
+            sqlite_source_id,
             writer_capacity: WRITER_QUEUE_CAPACITY,
             waiting_writers: admission.waiting_writers.len(),
             writer_active: admission.writer_active,
@@ -2199,6 +2212,23 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
             vec![0, 1, 2, 3]
         );
+    }
+
+    #[test]
+    fn linked_sqlite_identity_matches_sql_and_fixed_bundled_release() {
+        let _serial = serial_test_guard();
+        let (_directory, _paths, database) = fixture();
+        let identity = database.snapshot();
+        let sql_identity = database.read(DatabaseOperationContext::new("test", "sqlite_identity"), |connection| {
+            Ok(connection.query_row("SELECT sqlite_version(), sqlite_source_id()", [], |row|
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?)
+        }).expect("actual linked SQL identity");
+        assert_eq!(identity.sqlite_version, sql_identity.0);
+        assert_eq!(identity.sqlite_source_id, sql_identity.1);
+        assert!(identity.sqlite_version_number >= 3_051_003, "WAL-reset fix is a hard prerequisite");
+        assert_eq!(identity.sqlite_version_number, 3_053_002);
+        assert_eq!(identity.sqlite_version, "3.53.2");
+        assert_eq!(identity.sqlite_source_id, "2026-06-03 19:12:13 d6e03d8c777cfa2d35e3b60d8ec3e0187f3e9f99d8e2ee9cac695fd6fcdf1a24");
     }
 
     #[test]

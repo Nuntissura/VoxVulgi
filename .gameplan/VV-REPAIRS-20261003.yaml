@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: batch
 assignment: VV-REPAIRS-20261003
 parent: null
-generation: 30
+generation: 40
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -52,3 +52,12 @@ steps:
 - {id: GP-036, role: any, at: before_round, do: require distinct residual-close hypothesis after NO_CKPT failed, check: {type: confirm}, source: 'counterfactual failure: writerclose1ms butreaderclose5393ms and5admissiontimeouts', state: active}
 - {id: GP-037, role: any, at: before_round, do: require exact test names verified from registered --list output, check: {type: confirm}, source: 'wasted test: database_runtime prefix omitted owning db module; zero tests ran', state: active}
 - {id: GP-038, role: any, at: before_round, do: require artifact searches target owning proof or logs directory; exclude cargo_cache, check: {type: confirm}, source: 'wasted search: recursive build_target inventory traversed compiler cache', state: active}
+- {id: GP-039, role: any, at: before_round, do: require known WAL and MAIN_DB sync RED before FULL without automatic checkpoint counterfactual, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0323/20261003/churn_sync_file_kind_summary.json, contains: xSyncMainDb}, source: 'expected RED: automatic checkpoint WAL and MAIN_DB sync exceeded writer admission', state: active}
+- {id: GP-040, role: any, at: before_round, do: require WAL seed changes stored value before pinning, check: {type: confirm}, source: 'failure: unchanged UPDATE generated no committed WAL frame before reader pin', state: active}
+- {id: GP-041, role: any, at: before_round, do: require upgraded SQLite canonical baseline RED before maintenance counterpart, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/canonical_fixed_baseline_summary.json, contains: writer_admission_timeout}, source: 'expected RED: SQLite3.53.2 baseline retained ten canonical admission failures', state: retired}
+- {id: GP-042, role: any, at: before_round, do: require upgraded SQLite canonical baseline RED before maintenance counterpart, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/canonical_fixed_baseline_summary.json, contains: writer_admission_timeout}, source: 'expected RED: SQLite3.53.2 has five writer-admission and five locking-protocol failures', state: active}
+- {id: GP-043, role: any, at: before_round, do: require original failed maintenance final checkpoint retained before owner diagnostic, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/canonical_maintenance_summary.json, contains: '"final_checkpoint_complete": false'}, source: 'failure: post-reset maintenance backfill stayed zero; one FULL WAL-sync writer timeout', state: active}
+- {id: GP-044, role: any, at: before_round, do: require idle-owner final checkpoint RED before owner-reopen counterfactual, check: {type: confirm}, source: 'failure: original129/81 after joined workers; fresh default reopen129/129; short pin missed partial evidence', state: active}
+- {id: GP-045, role: any, at: on_resume, do: require board status column verified before recount, check: {type: confirm}, source: 'mistake: split column2 is WP title; status is column3', state: active}
+- {id: GP-046, role: any, at: before_round, do: require fresh owner-reopen locking-protocol RED before new counterfactual, check: {type: confirm}, source: 'failure: guarded owner reopen11070ms protocol error;7workerfailures;18canonicalcommits', state: active}
+- {id: GP-047, role: any, at: before_round, do: require synchronous-set BUSY_RECOVERY stage retained before maintenance retry policy, check: {type: confirm}, source: 'failure: nativeopen313ms succeeds; synchronous_set8ms returns primary5 extended261', state: active}
