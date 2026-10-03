@@ -1243,6 +1243,123 @@
       "production_policy_changed": false,
       "production_fix_proven": false,
       "live_closure_proven": false
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Independent filename-counterpart-only PASS: actual canonical-density AppDatabase production adapter with fixture TLS OFF,69 independently reconciled writer acknowledgements,359 successful reads,0 failures/panics; original final1487/1487 checkpoint16ms,pin recovery/stop/drain4ms. Earlier two-timeout RED variance remains unexplained. Automatic checkpoint production policy, crash/reopen and packaged/live acceptance remain pending; all8 acceptance criteria and IN_PROGRESS retained.",
+      "canonical_production_filename": {
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/canonical_production_filename_summary.json",
+        "summary_sha256": "2CFC4F099C1124FDED02F062303189FF1E1CCDB9033DEF006934EDBDED5806D6",
+        "verdict": "PASS_DISPOSABLE_TLS_OFF_FILENAME_COUNTERPART_ONLY",
+        "frozen_artifacts": {
+          "runtime": {
+            "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/production_filename_runtime.rs",
+            "sha256": "2E6120911D0D86A66C630103548F918B13330BB9EFEF9BF3B0A69A18B1F3C7BB"
+          },
+          "example": {
+            "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/production_filename_example.rs",
+            "sha256": "471B76785907787DDA03A2D57BC33C6AD69D348047D48F1FF0B032DABD3C21DA"
+          },
+          "executable": {
+            "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/production_filename_example.exe",
+            "sha256": "AAEBBD68ED22584B239E0FA0E3251D828750FA65F9A8806C6FE34BEF56424E76"
+          }
+        },
+        "fixture_tls_enabled": false,
+        "elapsed_ms": 31235,
+        "reconciled_commits": 69,
+        "successful_reads": 359,
+        "writer_acknowledgements_each": [
+          23,
+          23,
+          23
+        ],
+        "reader_successes_each": [
+          91,
+          90,
+          89,
+          89
+        ],
+        "worker_failures": 0,
+        "worker_panics": 0,
+        "original_final_checkpoint": {
+          "log_frames": 1487,
+          "checkpointed_frames": 1487,
+          "checkpoint_ms": 16,
+          "busy": 0,
+          "pin_active": false
+        },
+        "max_sampled_wal_bytes": 6126472,
+        "partial_during_pin": true,
+        "recovered_after_pin": true,
+        "stop_observed": true,
+        "owner_close_error": null,
+        "database_drain": {
+          "elapsed_ms": 4,
+          "error": null
+        },
+        "filename_boundary": {
+          "active": true,
+          "all_observed_owner_names_agree": true,
+          "expected_native_filename_sha256": "88e3f5ace3c210a07be0619d0ca1c625244ba892c296083c72d506cf789f66d3",
+          "fixture_tls_enabled": false,
+          "limits": "Additional filename observation only; original worker/maintenance/acknowledgement/drain verdict is unchanged. Require lock-probe coverage with fixture TLS off for a natural production-path boundary. Immutable standalone backup URI is excluded.",
+          "native_owner_observations": 69,
+          "tls_off_boundary_proven": true
+        },
+        "independent_canonical_reread": {
+          "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/production_filename_independent_read.json",
+          "sha256": "898460A0071CFCEECCD3F7AD88ECA05388BDE56858039540E1747BC91AC07777",
+          "policy": "URI mode=ro; query_only ON; original spelling/no engine adapter; WAL honored",
+          "persisted_jobs": 69,
+          "acknowledged_writes": 69,
+          "schema": 60,
+          "reconciled": true
+        },
+        "independent_native_identity": {
+          "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/production_filename_native_identity.json",
+          "sha256": "D6FBDC972B9677210B1CA2D665E7BE6B0A16ECB905B0627BED83B106546851A8",
+          "api": "External Win32 FileIdInfo and GetFinalPathNameByHandleW",
+          "three_spellings_same_volume_file_id": true,
+          "os_derived_plain_sha256": "88e3f5ace3c210a07be0619d0ca1c625244ba892c296083c72d506cf789f66d3",
+          "matches_all_69_native_owner_observations": true
+        }
+      },
+      "focused_validation": [
+        {
+          "log": "product/desktop/build_target/logs/wp0333_production_filename_owning_tests.log",
+          "sha256": "EA2476D3E85E05075B49B6C54278F1DA7C405B14C2559FA8B32B2F74388D6D2C",
+          "passed": 4
+        },
+        {
+          "log": "product/desktop/build_target/logs/wp0333_production_filename_runtime_regressions.log",
+          "sha256": "D0252257D868EF4CAF9777B60F09994124F80B23A163E5F8DC2938CA3D31A1CC",
+          "passed": 23
+        },
+        {
+          "log": "product/desktop/build_target/logs/wp0333_production_filename_exception_registry.log",
+          "sha256": "9C36C41968F9FB685EFDC2780E2B239DDB25789DBF2CEEF8ED9B02D788BABF71",
+          "passed": 1
+        }
+      ],
+      "boundary_build": {
+        "log": "product/desktop/build_target/logs/wp0333_production_filename_boundary_build.log",
+        "sha256": "753F2D9E0E5FE2F70FF5A78255F8FD0E1FE52D00B3C49B3AE37E7FE7E39E77D8",
+        "targets": [
+          "wp0323_connection_churn",
+          "voxvulgi_imported_identity_enrich",
+          "voxvulgi_provider_title_repair"
+        ],
+        "result": "GREEN_SHARED_WARM_BUILD"
+      },
+      "observer_attempt_limits": "Earlier rejected argv attempts exited before fixture creation; PS7 automatic date conversion lost UTC during observer identity checking. Corrected DateKindString/native observation used. No PID reuse established; no process disrupted. Natural owned probe258592 exited0.",
+      "previous_red_variance_preserved": true,
+      "variance_cause_proven": false,
+      "production_filename_policy_selected": true,
+      "production_checkpoint_policy_selected": false,
+      "production_fix_proven": false,
+      "live_closure_proven": false,
+      "phase2_status": "AUTOMATIC_CHECKPOINT_AUTHORITY_AND_CRASH_PACKAGED_LIVE_GATES_PENDING"
     }
   ]
 }

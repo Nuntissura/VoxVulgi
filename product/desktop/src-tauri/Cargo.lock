@@ -4916,6 +4916,7 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "csv",
+ "dunce",
  "ffmpeg-sidecar",
  "hex",
  "hound",

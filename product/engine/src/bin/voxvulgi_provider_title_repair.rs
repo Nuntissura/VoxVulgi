@@ -286,14 +286,15 @@ fn verify_backup(live_path: &Path, backup_path: &Path) -> Result<BackupVerificat
         return Err(format!("backup quick_check failed: {quick_check}"));
     }
     drop(conn);
-    let (live_jobs, live_download_jobs) = readonly_counts(live_path)?;
+    let live_filename = voxvulgi_engine::db::AppDatabase::sqlite_open_filename(live_path);
+    let (live_jobs, live_download_jobs) = readonly_counts(live_filename.as_ref())?;
     let (backup_jobs, backup_download_jobs) = readonly_counts(backup_path)?;
     if (live_jobs, live_download_jobs) != (backup_jobs, backup_download_jobs) {
         return Err(format!(
             "backup preimage mismatch: live jobs/downloads={live_jobs}/{live_download_jobs}, backup={backup_jobs}/{backup_download_jobs}"
         ));
     }
-    let (live_logical_sha256, live_table_count) = readonly_logical_fingerprint(live_path)?;
+    let (live_logical_sha256, live_table_count) = readonly_logical_fingerprint(live_filename.as_ref())?;
     let (backup_logical_sha256, backup_table_count) = readonly_logical_fingerprint(backup_path)?;
     if (live_table_count, &live_logical_sha256) != (backup_table_count, &backup_logical_sha256) {
         return Err(format!(

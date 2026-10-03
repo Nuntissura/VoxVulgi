@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: batch
 assignment: VV-REPAIRS-20261003
 parent: null
-generation: 53
+generation: 59
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -19,7 +19,7 @@ steps:
 - {id: GP-003, role: any, at: before_round, do: confirm heavy build|test processes on target disk == 0, check: {type: confirm}, source: 'preset:build-round', state: active}
 - {id: GP-004, role: any, at: before_round, do: verify free disk(CARGO_TARGET_DIR or repo) >= 50 GiB, check: {type: cmd, argv: [python, -c, 'import os,shutil,sys;g=shutil.disk_usage(os.environ.get(''CARGO_TARGET_DIR'') or ''.'').free/2**30;print(round(g,1),''GiB free'');sys.exit(0 if g>=float(''50'') else 1)'], expect_exit: 0, timeout_seconds: 15}, source: 'preset:build-round', state: active}
 - {id: GP-005, role: any, at: before_round, do: confirm deepest generated path < 260 chars or long paths enabled, check: {type: confirm}, source: 'preset:build-round', state: active}
-- {id: GP-006, role: any, at: before_round, do: confirm test entrypoint + config unchanged since last green round, check: {type: confirm}, source: 'preset:build-round', state: active}
+- {id: GP-006, role: any, at: before_round, do: confirm test entrypoint + config unchanged since last green round, check: {type: confirm}, source: 'preset:build-round', state: retired}
 - {id: GP-007, role: any, at: before_round, do: forbid timeout wrapper around test entrypoint, check: {type: file, path: governance/scripts/build_desktop_target.ps1, not_contains: 'timeout '}, source: 'preset:build-round', state: active}
 - {id: GP-008, role: any, at: before_round, do: record candidate SHA = pushed HEAD; later pushes -> next round, check: {type: confirm}, source: 'preset:build-round', state: active}
 - {id: GP-009, role: any, at: before_round, do: confirm env vars|config files read by changed code set for test run, check: {type: confirm}, source: 'preset:build-round', state: active}
@@ -74,3 +74,8 @@ steps:
 - {id: GP-058, role: any, at: before_round, do: require disposable filename probe rejects existing database entries including dangling links, check: {type: file, path: product/engine/src/database_runtime.rs, contains: 'std::fs::symlink_metadata(path)'}, source: 'HIGH review: parent-only canonicalization allowed pre-existing linked database target', state: active}
 - {id: GP-059, role: any, at: before_round, do: require independent SQLite canonical read opens URI with uri=True, check: {type: confirm}, source: 'read proof failure: sqlite3.connect URI string omitted uri=True', state: active}
 - {id: GP-060, role: any, at: before_round, do: require plain-local complete checkpoint plus two FIFO timeouts before distinct storage hypothesis, check: {type: confirm}, source: 'counterpart RED:48canonicalwrites;CP1011of1011;nativeplaincoverage;2writeradmissiontimeouts', state: active}
+- {id: GP-061, role: any, at: before_round, do: require production filename probe TLS off and all live owner opens mapped; preserve original verdict, check: {type: confirm}, source: 'risk: fixture mapper or mixed SQLite owner spellings could counterfeit production filename proof', state: active}
+- {id: GP-062, role: any, at: before_round, do: require cached dependency searches target exact package source; forbid whole registry content scan, check: {type: confirm}, source: 'wasted read: COM0 search scanned all registry lib.rs files after exact dunce location was already known', state: active}
+- {id: GP-063, role: any, at: before_round, do: require changed Windows dependency and lockfiles reviewed; test entrypoint stable; owning checks mapped, check: {type: confirm}, source: 'authority: WP0333 filename amendment intentionally changes manifest inputs; unchanged-config preset conflicts', state: active}
+- {id: GP-064, role: any, at: before_round, do: require every churn argument matched to current parser; reader-count writer-count reader-pin-ms; booleans0/1, check: {type: confirm}, source: 'wasted probe: invented readers/writers/pin names and true/false were refused before database creation', state: active}
+- {id: GP-065, role: any, at: before_round, do: require JSON UTC timestamps kept as strings before DateTimeOffset parsing; compare native UTC creation, check: {type: confirm}, source: 'observer mistake: PS7 auto-converted JSON date then string coercion lost UTC; PID reuse was not established', state: active}

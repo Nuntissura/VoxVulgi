@@ -105,7 +105,8 @@ fn verify_backup(
 
 fn live_counts(base_dir: &Path) -> Result<CanonicalCounts, String> {
     let db_path = base_dir.join("db").join("app.sqlite");
-    let conn = open_readonly(&db_path)?;
+    let filename = voxvulgi_engine::db::AppDatabase::sqlite_open_filename(&db_path);
+    let conn = open_readonly(filename.as_ref())?;
     read_counts(&conn)
 }
 

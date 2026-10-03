@@ -155,10 +155,10 @@ impl WorkerReport {
 }
 
 #[derive(Serialize)]
-struct NativeFilenameObservation { prefix_class: &'static str, byte_length: usize, utf8: bool, coverage_proven: bool }
+struct NativeFilenameObservation { prefix_class: &'static str, byte_length: usize, utf8: bool, coverage_proven: bool, sha256: Option<String> }
 fn native_filename_observation(connection: &Connection) -> NativeFilenameObservation {
     let filename = unsafe { rusqlite::ffi::sqlite3_db_filename(connection.handle(), c"main".as_ptr()) };
-    if filename.is_null() { return NativeFilenameObservation { prefix_class: "null", byte_length: 0, utf8: false, coverage_proven: false }; }
+    if filename.is_null() { return NativeFilenameObservation { prefix_class: "null", byte_length: 0, utf8: false, coverage_proven: false, sha256: None }; }
     let bytes = unsafe { std::ffi::CStr::from_ptr(filename) }.to_bytes();
     let prefix_class = if bytes.get(..8).is_some_and(|prefix|prefix.eq_ignore_ascii_case(b"\\\\?\\UNC\\")) { "extended_UNC" }
         else if bytes.starts_with(b"\\\\?\\") && bytes.get(4).is_some_and(u8::is_ascii_alphabetic) && bytes.get(5) == Some(&b':') { "extended_local" }
@@ -167,7 +167,7 @@ fn native_filename_observation(connection: &Connection) -> NativeFilenameObserva
         else if bytes.get(0).is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':') { "plain_local" }
         else { "unknown" };
     let utf8 = std::str::from_utf8(bytes).is_ok();
-    NativeFilenameObservation { prefix_class, byte_length: bytes.len(), utf8,
+    NativeFilenameObservation { prefix_class, byte_length: bytes.len(), utf8, sha256: Some(hex::encode(Sha256::digest(bytes))),
         coverage_proven: utf8 && prefix_class != "unknown" && (!db::AppDatabase::disposable_filename_probe_enabled() || prefix_class == "plain_local") }
 }
 
@@ -345,6 +345,18 @@ fn plain_native_filename_coverage(value: &serde_json::Value) -> (u64, bool) {
     }
 }
 
+fn native_filename_identity_coverage(value: &serde_json::Value, expected_sha256: &str) -> (u64, bool) {
+    match value {
+        serde_json::Value::Object(object) if object.contains_key("prefix_class") && object.contains_key("byte_length") =>
+            (1, value["sha256"].as_str() == Some(expected_sha256) && value["coverage_proven"].as_bool() == Some(true)),
+        serde_json::Value::Object(object) => object.values().map(|value| native_filename_identity_coverage(value, expected_sha256))
+            .fold((0,true), |(n,ok),(m,valid)|(n+m,ok&&valid)),
+        serde_json::Value::Array(array) => array.iter().map(|value| native_filename_identity_coverage(value, expected_sha256))
+            .fold((0,true), |(n,ok),(m,valid)|(n+m,ok&&valid)),
+        _ => (0,true),
+    }
+}
+
 struct LockCapture(bool);
 impl LockCapture {
     fn begin(enabled: bool) -> Self { if enabled { db::AppDatabase::begin_shm_lock_probe(); } Self(enabled) }
@@ -409,8 +421,8 @@ fn reopen_maintenance_owner_with_vfs(path: &Path, counted: bool) -> ProbeResult<
     }
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
     let connection = stage!(stages, "native_connection_open", if counted {
-        Connection::open_with_flags_and_vfs(db::AppDatabase::disposable_open_filename(path)?, flags, "voxvulgi_read_counting")
-    } else { Connection::open_with_flags(db::AppDatabase::disposable_open_filename(path)?, flags) });
+        Connection::open_with_flags_and_vfs(db::AppDatabase::sqlite_open_filename(&db::AppDatabase::disposable_open_filename(path)?), flags, "voxvulgi_read_counting")
+    } else { Connection::open_with_flags(db::AppDatabase::sqlite_open_filename(&db::AppDatabase::disposable_open_filename(path)?), flags) });
     stage!(stages, "busy_timeout", connection.busy_timeout(Duration::ZERO));
     let policy = staged_maintenance_policy(&connection, &mut stages, "")?;
     let version: String = stage!(stages, "sqlite_version", connection.query_row("SELECT sqlite_version()", [], |row| row.get(0)));
@@ -433,7 +445,7 @@ fn reopen_maintenance_owner_with_vfs(path: &Path, counted: bool) -> ProbeResult<
 fn prepare_maintenance(path: &Path) -> ProbeResult<(Connection, Connection, serde_json::Value)> {
     reject_protected(path)?;
     let mut stages = StageRecorder::default();
-    let connection = stage!(stages, "native_connection_open", Connection::open_with_flags(db::AppDatabase::disposable_open_filename(path)?,
+    let connection = stage!(stages, "native_connection_open", Connection::open_with_flags(db::AppDatabase::sqlite_open_filename(&db::AppDatabase::disposable_open_filename(path)?),
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_FULL_MUTEX));
     stage!(stages, "busy_timeout", connection.busy_timeout(Duration::ZERO));
     let policy = staged_maintenance_policy(&connection, &mut stages, "")?;
@@ -456,7 +468,7 @@ fn prepare_maintenance(path: &Path) -> ProbeResult<(Connection, Connection, serd
     let seed_wal_bytes = stages.run("seed_wal_size", || Ok(std::fs::metadata(PathBuf::from(format!("{}-wal", path.display())))?.len()))?;
     stages.run("seed_wal_verify", || if seed_wal_bytes > 32 { Ok(()) } else { Err("Committed frame missing".into()) })?;
     reject_protected(path)?;
-    let pin = stage!(stages, "pin_native_connection_open", Connection::open_with_flags(db::AppDatabase::disposable_open_filename(path)?,
+    let pin = stage!(stages, "pin_native_connection_open", Connection::open_with_flags(db::AppDatabase::sqlite_open_filename(&db::AppDatabase::disposable_open_filename(path)?),
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_FULL_MUTEX));
     stage!(stages, "pin_busy_timeout", pin.busy_timeout(Duration::ZERO));
     stage!(stages, "pin_query_only_set", pin.pragma_update(None, "query_only", "ON"));
@@ -517,8 +529,8 @@ fn fresh_checkpoint_diagnostic(path: &Path, requested_vfs: Option<&str>, lock_pr
         }
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
         let connection = match requested_vfs {
-            Some(name) => Connection::open_with_flags_and_vfs(db::AppDatabase::disposable_open_filename(path)?, flags, name)?,
-            None => Connection::open_with_flags(db::AppDatabase::disposable_open_filename(path)?, flags)?,
+            Some(name) => Connection::open_with_flags_and_vfs(db::AppDatabase::sqlite_open_filename(&db::AppDatabase::disposable_open_filename(path)?), flags, name)?,
+            None => Connection::open_with_flags(db::AppDatabase::sqlite_open_filename(&db::AppDatabase::disposable_open_filename(path)?), flags)?,
         };
         connection.busy_timeout(Duration::ZERO)?;
         let policy = apply_policy(&connection, ConnectionPolicy::NoCloseCheckpointFullNoAutoCheckpoint)?;
@@ -910,7 +922,7 @@ fn main() -> ProbeResult<()> {
         }
     }
     // Startup-only disposable schema initialization, before runtime admission/workers.
-    let setup = Connection::open(db::AppDatabase::disposable_open_filename(&database_path)?)?;
+    let setup = Connection::open(db::AppDatabase::sqlite_open_filename(&db::AppDatabase::disposable_open_filename(&database_path)?))?;
     setup.pragma_update(None, "journal_mode", "WAL")?;
     setup.pragma_update(None, "synchronous", "NORMAL")?;
     setup.pragma_update(None, "foreign_keys", "ON")?;
@@ -1084,6 +1096,16 @@ fn main() -> ProbeResult<()> {
         "native_observations":native_filename_observations,"all_plain_local":all_plain,
         "every_worker_plain_local":worker_plain,"proven":filename_proven,
         "limits":"Exact validated disposable identity only; immutable standalone inspection URIs are excluded. Native filename coverage does not select a production path or policy solution."});
+    let production_filename = db::AppDatabase::sqlite_open_filename(&database_path);
+    let expected_filename_sha256 = production_filename.to_str().map(|text|hex::encode(Sha256::digest(text.as_bytes())));
+    let (owner_observations, all_owner_names_agree) = expected_filename_sha256.as_deref()
+        .map(|expected|native_filename_identity_coverage(&summary, expected)).unwrap_or((0,false));
+    summary["production_filename_policy"] = json!({"active":true,"fixture_tls_enabled":plain_local_probe,
+        "expected_native_filename_sha256":expected_filename_sha256,"native_owner_observations":owner_observations,
+        "all_observed_owner_names_agree":all_owner_names_agree,
+        "tls_off_boundary_proven":!plain_local_probe && lock_probe && owner_observations > (reader_count+writer_count) as u64
+            && all_owner_names_agree && all_plain && worker_plain,
+        "limits":"Additional filename observation only; original worker/maintenance/acknowledgement/drain verdict is unchanged. Require lock-probe coverage with fixture TLS off for a natural production-path boundary. Immutable standalone backup URI is excluded."});
     std::fs::write(root.join("churn_summary.json"), serde_json::to_vec_pretty(&summary)?)?;
     println!("{}", summary);
     if failures != 0 || panics != 0 || !canonical_counter_matches || !connection_policy_proven || !vfs_file_kind_proven || !maintenance_proven || !filename_proven || drain.is_err() { return Err("Probe failed; inspect churn_summary.json".into()); }

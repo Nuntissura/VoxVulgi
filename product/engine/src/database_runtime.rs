@@ -1280,6 +1280,7 @@ pub(super) fn open_counted_connection(
     flags: rusqlite::OpenFlags,
 ) -> rusqlite::Result<Connection> {
     let path = AppDatabase::disposable_open_filename(path)?;
+    let path = AppDatabase::sqlite_open_filename(path.as_ref());
     match read_counting_vfs_name() {
         Some(vfs) => Connection::open_with_flags_and_vfs(path, flags, vfs),
         None => Connection::open_with_flags(path, flags),
@@ -1404,6 +1405,43 @@ pub struct AppDatabase {
 pub type DatabaseRuntime = AppDatabase;
 
 impl AppDatabase {
+    /// SQLite filename spelling only; canonical runtime identity remains unchanged.
+    /// Pure lexical checks: no filesystem work is performed inside admission.
+    #[doc(hidden)]
+    pub fn sqlite_open_filename(path: &Path) -> std::borrow::Cow<'_, Path> {
+        #[cfg(windows)]
+        {
+            let Some(text) = path.to_str() else { return std::borrow::Cow::Borrowed(path); };
+            let bytes = text.as_bytes();
+            if !bytes.starts_with(b"\\\\?\\")
+                || !bytes.get(4).is_some_and(u8::is_ascii_alphabetic)
+                || bytes.get(5) != Some(&b':') || bytes.get(6) != Some(&b'\\') {
+                return std::borrow::Cow::Borrowed(path);
+            }
+            let plain_units = text[4..].encode_utf16().count();
+            if plain_units >= 248 || plain_units.checked_add(8).is_none_or(|units| units >= 260) {
+                return std::borrow::Cow::Borrowed(path);
+            }
+            for component in text[7..].split('\\') {
+                if component.is_empty() || component.ends_with(['.', ' '])
+                    || component.chars().any(|character| character <= '\u{1f}'
+                        || matches!(character, '<' | '>' | ':' | '"' | '/' | '|' | '?' | '*')) {
+                    return std::borrow::Cow::Borrowed(path);
+                }
+                // DOS device recognition uses the first extension, not file_stem's last one.
+                let base = component.split('.').next().unwrap_or("").trim_end_matches(['.', ' ']).to_ascii_uppercase();
+                let numbered_device = base.strip_prefix("COM").or_else(|| base.strip_prefix("LPT"))
+                    .is_some_and(|number| matches!(number, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "¹" | "²" | "³"));
+                if matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$") || numbered_device {
+                    return std::borrow::Cow::Borrowed(path);
+                }
+            }
+            return std::borrow::Cow::Borrowed(dunce::simplified(path));
+        }
+        #[cfg(not(windows))]
+        std::borrow::Cow::Borrowed(path)
+    }
+
     /// Validate once outside admission; only the harness marker's exact root/db/app.sqlite is eligible.
     #[doc(hidden)]
     pub fn prepare_disposable_filename_probe(root: &Path, path: &Path) -> rusqlite::Result<DisposableFilenameProbe> {
@@ -2422,6 +2460,133 @@ mod tests {
         assert_eq!(identity.sqlite_version_number, 3_053_002);
         assert_eq!(identity.sqlite_version, "3.53.2");
         assert_eq!(identity.sqlite_source_id, "2026-06-03 19:12:13 d6e03d8c777cfa2d35e3b60d8ec3e0187f3e9f99d8e2ee9cac695fd6fcdf1a24");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn sqlite_open_filename_preserves_windows_namespace_hazards() {
+        for text in [
+            r"\\server\share\app.sqlite", r"\\?\UNC\server\share\app.sqlite",
+            r"\\.\C:\app.sqlite", r"\\?\GLOBALROOT\Device\app.sqlite",
+            r"\\?\Volume{a}\app.sqlite", r"C:\app.sqlite", r"\\?\C:relative",
+            r"\\?\C:\", r"\\?\C:\dir\\app.sqlite", r"\\?\C:\dir\app.sqlite\",
+            r"\\?\C:\dir\.\app.sqlite", r"\\?\C:\dir\..\app.sqlite",
+            r"\\?\C:\dir/app.sqlite", r"\\?\C:\dir.\app.sqlite",
+            r"\\?\C:\dir \app.sqlite", r"\\?\C:\dir\app.sqlite.",
+            r"\\?\C:\dir\app.sqlite ", r"\\?\C:\dir\app.sqlite:stream",
+            r"\\?\C:\dir\NUL.tar.gz", r"\\?\C:\con.any.more\app.sqlite",
+            r"\\?\C:\Con .txt\app.sqlite", r"\\?\C:\dir\COM¹.txt",
+            r"\\?\C:\COM1 .txt\app.sqlite", r"\\?\C:\CON..foo\app.sqlite",
+            r"\\?\C:\LPT²\app.sqlite", r"\\?\C:\dir\CONIN$",
+            r"\\?\C:\CONOUT$.txt\app.sqlite", r"\\?\C:\dir\app?.sqlite",
+            r"\\?\C:\dir\app*.sqlite", r"\\?\C:\dir\app|.sqlite",
+            r"\\?\C:\dir\app<.sqlite", r"\\?\C:\dir\app>.sqlite",
+            "\\\\?\\C:\\dir\\app\".sqlite", "\\\\?\\C:\\dir\\app\u{1f}.sqlite",
+            "\\\\?\\C:\\dir\\app\0.sqlite",
+        ] {
+            let path = Path::new(text);
+            assert_eq!(AppDatabase::sqlite_open_filename(path).as_ref().as_os_str(), path.as_os_str(), "altered {text:?}");
+        }
+        for base in ["CON", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9", "COM²", "COM³", "LPT¹", "LPT³"] {
+            let path = PathBuf::from(format!(r"\\?\C:\{base}.one.two\app.sqlite"));
+            assert_eq!(AppDatabase::sqlite_open_filename(&path).as_ref().as_os_str(), path.as_os_str());
+        }
+        use std::os::windows::ffi::OsStringExt;
+        let mut units: Vec<u16> = r"\\?\C:\dir\".encode_utf16().collect();
+        units.extend([0xd800, b'x' as u16]);
+        let path = PathBuf::from(std::ffi::OsString::from_wide(&units));
+        assert_eq!(AppDatabase::sqlite_open_filename(&path).as_ref().as_os_str(), path.as_os_str());
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn sqlite_open_filename_short_unicode_and_sidecar_boundaries() {
+        for text in [r"\\?\C:\fixture\db\app.sqlite", r"\\?\d:\Ilja Smets\日本語\😀\app.sqlite", r"\\?\C:\COM0\not.NUL\app.sqlite"] {
+            assert_eq!(AppDatabase::sqlite_open_filename(Path::new(text)).as_ref(), Path::new(&text[4..]));
+        }
+        // Supplementary characters occupy two UTF16 units; UTF8 byte counts are irrelevant.
+        let short = format!(r"\\?\C:\{}", "😀".repeat(122));
+        let boundary = format!(r"\\?\C:\{}x", "😀".repeat(122));
+        assert_eq!(short[4..].encode_utf16().count(), 247);
+        assert_eq!(boundary[4..].encode_utf16().count(), 248);
+        assert_eq!(AppDatabase::sqlite_open_filename(Path::new(&short)).as_ref(), Path::new(&short[4..]));
+        for text in [boundary, format!(r"\\?\C:\{}", "x".repeat(260))] {
+            assert_eq!(AppDatabase::sqlite_open_filename(Path::new(&text)).as_ref().as_os_str(), Path::new(&text).as_os_str());
+        }
+        for suffix in ["-journal", "-wal", "-shm"] {
+            assert!(format!("{}{suffix}", &short[4..]).encode_utf16().count() < 260);
+        }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn sqlite_open_filename_non_windows_is_unchanged() {
+        for text in ["/tmp/app.sqlite", r"\\?\C:\db\app.sqlite", r"\\server\share\app.sqlite"] {
+            assert_eq!(AppDatabase::sqlite_open_filename(Path::new(text)).as_ref(), Path::new(text));
+        }
+    }
+
+    #[cfg(windows)]
+    fn independent_windows_file_id(path: &Path) -> (u64, [u8; 16]) {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Storage::FileSystem::{FileIdInfo, GetFileInformationByHandleEx, FILE_ID_INFO};
+        let file = std::fs::File::open(path).expect("independent native file open");
+        let mut id = std::mem::MaybeUninit::<FILE_ID_INFO>::zeroed();
+        let ok = unsafe { GetFileInformationByHandleEx(file.as_raw_handle(), FileIdInfo, id.as_mut_ptr().cast(), std::mem::size_of::<FILE_ID_INFO>() as u32) };
+        assert_ne!(ok, 0, "native FileIdInfo failed: {}", std::io::Error::last_os_error());
+        let id = unsafe { id.assume_init() };
+        (id.VolumeSerialNumber, id.FileId.Identifier)
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn sqlite_open_filename_preserved_special_and_long_paths_keep_native_identity() {
+        let directory = tempfile::tempdir().expect("tempdir");
+        let root = directory.path().canonicalize().expect("canonical disposable root");
+        let long_parent = root.join("a".repeat(100)).join("b".repeat(100)).join("c".repeat(100));
+        let trailing_parent = root.join("trailing.");
+        std::fs::create_dir_all(&long_parent).expect("create long verbatim directories");
+        std::fs::create_dir_all(&trailing_parent).expect("create special verbatim directories");
+        for path in [long_parent.join("app.sqlite"), trailing_parent.join("app.sqlite"), root.join("NUL.tar.gz"), root.join("COM¹.txt")] {
+            std::fs::write(&path, b"owned filename identity sentinel").expect("create exact verbatim file");
+            let adapted = AppDatabase::sqlite_open_filename(&path);
+            assert_eq!(adapted.as_ref().as_os_str(), path.as_os_str());
+            assert_eq!(independent_windows_file_id(&path), independent_windows_file_id(adapted.as_ref()));
+        }
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn sqlite_open_filename_actual_runtime_tls_off_keeps_registry_and_physical_identity() {
+        let _serial = serial_test_guard();
+        AppDatabase::end_disposable_filename_probe();
+        let (_directory, paths, database) = fixture();
+        assert!(!AppDatabase::disposable_filename_probe_enabled());
+        let canonical = database.database_path().to_path_buf();
+        let plain = AppDatabase::sqlite_open_filename(&canonical).into_owned();
+        assert_ne!(canonical.as_os_str(), plain.as_os_str(), "fixture must exercise conversion");
+        assert_eq!(database.database_path(), canonical.as_path());
+        assert_eq!(independent_windows_file_id(&canonical), independent_windows_file_id(&plain));
+        let alias_root = AppDatabase::sqlite_open_filename(&paths.base_dir).into_owned();
+        let alias = AppDatabase::for_paths(&AppPaths::new(alias_root)).expect("plain alias runtime");
+        assert!(Arc::ptr_eq(&database.inner, &alias.inner));
+        let reader = database.read_context(DatabaseOperationContext::new("test", "production_filename_read")).expect("runtime reader");
+        let filename = unsafe { std::ffi::CStr::from_ptr(rusqlite::ffi::sqlite3_db_filename(reader.handle(), c"main".as_ptr())) };
+        assert_eq!(filename.to_bytes(), plain.to_str().expect("Unicode fixture").as_bytes());
+        drop(reader);
+        database.write(DatabaseOperationContext::new("test", "production_filename_write"), TransactionBehavior::Immediate, |transaction| {
+            let filename = unsafe { std::ffi::CStr::from_ptr(rusqlite::ffi::sqlite3_db_filename(transaction.handle(), c"main".as_ptr())) };
+            assert_eq!(filename.to_bytes(), plain.to_str().expect("Unicode fixture").as_bytes());
+            transaction.execute("INSERT INTO meta(key,value) VALUES('filename_identity','acknowledged')", [])?;
+            Ok(())
+        }).expect("acknowledged write");
+        database.shutdown_and_drain(SHUTDOWN_DRAIN_TIMEOUT).expect("drain");
+        // Independent original-spelling connection does not call either filename adapter.
+        let independent = Connection::open_with_flags(&canonical, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).expect("independent canonical reopen");
+        let value: String = independent.query_row("SELECT value FROM meta WHERE key='filename_identity'", [], |row| row.get(0)).expect("reconcile acknowledgement");
+        assert_eq!(value, "acknowledged");
+        assert_eq!(independent_windows_file_id(&canonical), independent_windows_file_id(&plain));
+        assert!(!AppDatabase::disposable_filename_probe_enabled());
     }
 
     #[test]
