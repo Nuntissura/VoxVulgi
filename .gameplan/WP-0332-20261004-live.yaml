@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: batch
 assignment: WP-0332-20261004-live
 parent: null
-generation: 13
+generation: 14
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -36,3 +36,4 @@ steps:
 - {id: GP-020, role: any, at: before_round, do: require captured native close helper stderr and exit receipt before classifying close outcome, check: {type: confirm}, source: 'infra: WMI PowerShell helper exited without normal close receipt', state: active}
 - {id: GP-021, role: any, at: before_submit, do: require atomic native active-transfer check and close dispatch with no model or tool gap, check: {type: confirm}, source: 'failure: separate checks and WMI dispatch missed active transfer timing', state: active}
 - {id: GP-022, role: any, at: before_round, do: require direct HTTP shutdown interruption typed propagation regression before rebuilt active test, check: {type: confirm}, source: 'RED: active HTTP shutdown wrote false failed job canceled instead of retaining running original', state: active}
+- {id: GP-023, role: any, at: before_round, do: 'require custom build log filename matches build_desktop_target_release_[A-Za-z0-9_-]+.log', check: {type: confirm}, source: 'infra: managed build rejected nonconforming custom log name before creating transcript', state: active}
