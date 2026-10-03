@@ -27,3 +27,9 @@ Execution: phase1 upgrades fixed SQLite and makes minimum compatibility repairs,
 Acceptance: actual fixed linked version; owning regressions; canonical-density maintenance progress/growth/starvation/admission/shutdown proof; durable crash/reopen reconciliation; final installed normal30-minute downloads/reads/export and active-runner close. Required proof summary/evidence and independent review precede DONE. Update root-owned board after contract review; retain IN_PROGRESS and all WP-0323 remaining gates.
 
 </topic>
+
+<topic id="production-filename-policy" status="active" wp="WP-0333" updated_at="2026-10-03">
+
+Independent canonical counterpart review permits selecting the conservative filename adapter separately from checkpoint policy. Exact scope, primary research, rejected options, hazards and owning/boundary validation are recorded in the JSON phase_authority.production_filename_policy and research_basis.production_filename_policy_2026_10_03. The common factory preserves canonical registry identity and uses I/O-free guarded dunce1.0.5 only for safe short local verbatim-drive paths; every uncertain or unsupported spelling is retained. No new raw-open exception, fixture TLS promotion, maintenance/durability change or live closure is selected. Latest101-write GREEN and earlier48-write/two-timeout RED both remain evidence; their variance is unexplained. Independent amendment review precedes implementation.
+
+</topic>

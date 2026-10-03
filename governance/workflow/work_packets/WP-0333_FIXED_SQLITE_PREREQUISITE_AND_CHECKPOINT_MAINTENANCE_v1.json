@@ -31,7 +31,40 @@
       "Independent passing canonical-density concurrent-maintenance counterpart with WAL progress/growth and shutdown receipts",
       "Reviewed production policy/exception/spec amendment retaining all existing bounds and atomicity"
     ],
-    "production_solution_selected": false
+    "production_solution_selected": false,
+    "production_filename_policy_selected": true,
+    "production_checkpoint_policy_selected": false,
+    "production_filename_policy": {
+      "scope": "Independent filename spelling amendment only; whole production maintenance solution remains unselected and operator policy approval pending",
+      "implementation_gate": "Independent review of this amendment before product edits; no new raw-open exception because existing common counted/default factory and registry remain authoritative",
+      "policy": "Apply one deterministic I/O-free Windows filename adapter at every SQLite app-database owner open. Supplement exact dunce1.0.5 simplified with strict lexical guards. Only rooted verbatim-drive valid-Unicode safe components and plain UTF16 length<248 may simplify; preserve all other paths byte-for-byte. Preserve absolute_key/runtime identity, startup, durability, admission, atomicity and shutdown",
+      "hazards_preserved": [
+        "UNC/extendedUNC",
+        "device/GLOBALROOT/VolumeGUID",
+        "invalid Unicode/unpaired surrogates",
+        "dot/dotdot/empty/repeated separators/forward slash",
+        "ADS and reserved characters/control codes",
+        "trailing dots/spaces in any component",
+        "reserved base before FIRST period incl mixed case/multiple extensions and COM/LPT superscript123",
+        "CONIN$/CONOUT$",
+        "long paths and insufficient -journal/-wal/-shm headroom"
+      ],
+      "forbidden": [
+        "Production fixture TLS adapter",
+        "Filesystem/canonicalize/hash queries inside admission",
+        "Checkpoint or synchronous policy changes",
+        "New raw SQLite exception",
+        "Canonical user database mutation during experiment",
+        "Claiming earlier RED variance explained"
+      ],
+      "validation": [
+        "Owning lexical boundary/negative tests and unchanged alias registry/admission regressions",
+        "Actual disposable AppDatabase with fixture TLS OFF; all native owner names agree",
+        "Independent Windows volume/file-ID equality for canonical/plain local spellings and preserved long/special paths",
+        "Independent canonical reopen reconciles every acknowledged fixture write",
+        "Existing crash/reopen and packaged normal30minute/download/export/shutdown acceptance remains open"
+      ]
+    }
   },
   "files": [
     "product/engine/Cargo.toml",
@@ -211,6 +244,35 @@
       "production_cause_proven": false,
       "production_policy_selected": false,
       "phase2_blocked": true
+    },
+    "production_filename_policy_2026_10_03": {
+      "recorded_before_implementation": true,
+      "sources_checked": [
+        "https://docs.rs/dunce/1.0.5/dunce/fn.simplified.html",
+        "https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file",
+        "https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew",
+        "Cached exact dunce1.0.5 source SHA E401BAA38D5F10FA7FC5F58E9DD96818A5278EF4CB083E50B507D357F66A2F00",
+        "Pinned SQLite3.53.2 winIsUNCPath53024-53028 and bUseSharedLockHandle53056/53122"
+      ],
+      "patterns": "Dunce simplified is I/O-free; its reserved detector alone misses documented multiple-extension and superscript device names. SQLite leading-double-backslash branch includes extended-local names. Canonical registry identity need not change to select safe equivalent open spelling",
+      "reuse": "Existing common open_counted_connection and db.rs raw startup/read/write factories; keep absolute_key unchanged. Exact dunce already present in desktop lockfile",
+      "rejected": [
+        "Standalone dunce guard",
+        "Blind prefix removal/disposable adapter in production",
+        "Replacing canonical registry key",
+        "Canonicalization inside admission",
+        "Long/network/device-path simplification",
+        "Treating latest GREEN as explanation of previous two-timeout RED"
+      ],
+      "selected": "Conservative common adapter with strict lexical guards, short local only, UTF16<248 and at least8 sidecar units; unchanged spelling on doubt",
+      "risks_and_controls": "Misaddressing data/splitting shared owner identities: deterministic common boundary for all live owners plus independent physical file IDs. Native path semantic drift: explicit unsafe-name negative cases and preserved long/special identity. Missing raw owner: audit current exception registry and harness owner opens. No maintenance or live closure claim",
+      "validation_plan": [
+        "Owning lexical boundary/negative tests and unchanged alias registry/admission regressions",
+        "Actual disposable AppDatabase with fixture TLS OFF; all native owner names agree",
+        "Independent Windows volume/file-ID equality for canonical/plain local spellings and preserved long/special paths",
+        "Independent canonical reopen reconciles every acknowledged fixture write",
+        "Existing crash/reopen and packaged normal30minute/download/export/shutdown acceptance remains open"
+      ]
     }
   },
   "recorded_evidence": {
