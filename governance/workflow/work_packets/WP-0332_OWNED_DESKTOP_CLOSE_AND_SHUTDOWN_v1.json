@@ -132,6 +132,44 @@
     "status_retained": "IN_PROGRESS",
     "remaining_gate": "Minimal typed direct-HTTP remediation, owning regression proof, rebuilt exact normal active-download close/restart and independent canonical/protected-data reconciliation; no whole acceptance completion claim"
   },
+  "remediation_validation_20261004": {
+    "record_id": "WP-0332-DIRECT-HTTP-REMEDIATION-20261004-01",
+    "date": "2026-10-04",
+    "source_commit": "2f59be81031042a5a7871f3710437647c3dd0612",
+    "focused_tests": {"result": "GREEN", "passed": 5, "failed": 0, "log": "product/desktop/build_target/logs/wp0332_direct_http_regressions_20261004.log"},
+    "desktop_version": "0.1.205",
+    "release_changelog_unchanged": true,
+    "build_log": "product/desktop/build_target/logs/build_desktop_target_release_wp0332_2f59be8_20261004.log",
+    "installer_sha256": "f9a536dd48a0288468ff568bf20c3eeb81293a66ff10c16b90c96f4815bcfd1a",
+    "installed_sha256": "edca10148fab91904e5a963a0290485208183bcd4f05832078056ceeeb4c3268",
+    "native_update_independent_preservation": {
+      "verdict": "PASS_INSTALLED_BYTES_AND_PROTECTED_DATA_ONLY",
+      "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0334/20261003/native_update_2d53120/independent_native_update_review.json",
+      "unpackaged_context": true,
+      "unique_installed_marker_equivalence": true,
+      "protected_table_count": 14,
+      "independent_canonical_tables_equal_before_and_after": true,
+      "does_not_clear_case_B_runtime_red": true
+    },
+    "case_C": {
+      "verdict": "HARNESS_PRECONDITION_REFUSED_NO_CLOSE_NOT_PRODUCT_RED",
+      "original_job_id": "adea9f02-9533-4833-9eb8-7d318bb02161",
+      "attempt_no": 1,
+      "batch_id": "b59e733a-b7a5-4622-83de-69fdd095dbec",
+      "app_pid_left_alive": 245772,
+      "precondition_error": "Require recent server progress",
+      "precondition_refused_at_ms": 1791071330977,
+      "error_receipt": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261004/controlled_live_03/active_close_run_error.json",
+      "stderr": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261004/controlled_live_03/active_before_close.stderr.txt",
+      "wm_close_sent": false,
+      "forced": false,
+      "canonical_download_terminal_fresh_read": "PENDING",
+      "recorded_harness_remediation": "GP025: bounded fresh same-request progress wait before canonical active-close precondition; retain original request identity and refuse unless fresh actual transfer remains"
+    },
+    "prior_case_B_runtime_red_retained": true,
+    "status_retained": "IN_PROGRESS",
+    "rebuilt_active_close_restart_gate_passed": false
+  },
   "session_review_20261003": {
     "record_id": "WP-0332-REVIEW-20261003-01",
     "date": "2026-10-03",
