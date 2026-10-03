@@ -234,13 +234,14 @@
     },
     {
       "name": "downloads.enqueue",
-      "description": "Submit URLs through the normal queue, deduplication and MKV download path.",
+      "description": "Submit URLs through the normal queue, deduplication and MKV download path. Optional mode only or continue_all atomically publishes exactly the submitted canonical jobs and their selected-start decision; omitted mode queues only. only keeps other queued work paused; continue_all resumes queued work with the new selection first. Provider cooldown and Safe Mode remain enforced.",
       "read_only": false,
       "effect": "reversible_state_change",
       "input": {
         "urls": "1-25 URLs",
         "output_dir": "optional existing configured destination",
-        "preset_id": "optional preset"
+        "preset_id": "optional preset",
+        "mode": "optional only or continue_all; omit for queue-only submission"
       },
       "input_schema": {
         "type": "object",
@@ -263,6 +264,7 @@
           "command": {
             "const": "downloads.enqueue"
           },
+          "mode": { "type": "string", "enum": ["only", "continue_all"] },
           "urls": {
             "description": "1-25 URLs",
             "type": "array",
@@ -286,6 +288,44 @@
             "minLength": 1,
             "maxLength": 80
           }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "downloads.start_selected",
+      "description": "Start exactly these queued foreground download jobs. only leaves all other queued work paused; continue_all resumes queued work and puts this selection first. Safe Mode, provider cooldown, normal pacing and storage/authentication checks remain enforced. Read the result and canonical jobs; held is not a completed download.",
+      "read_only": false,
+      "effect": "reversible_state_change",
+      "input": { "job_ids": "1-1500 exact canonical IDs", "mode": "only or continue_all" },
+      "input_schema": {
+        "type": "object",
+        "required": ["bridge_token", "actor_id", "command", "job_ids", "mode", "operation_id"],
+        "properties": {
+          "bridge_token": { "type": "string" },
+          "actor_id": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "command": { "const": "downloads.start_selected" },
+          "job_ids": { "type": "array", "minItems": 1, "maxItems": 1500, "uniqueItems": true, "items": { "type": "string" } },
+          "mode": { "type": "string", "enum": ["only", "continue_all"] },
+          "operation_id": { "type": "string", "minLength": 1, "maxLength": 80 }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "downloads.batch_members",
+      "description": "Read the whole canonical queued foreground download membership of a batch, not the rendered or paginated activity subset. Refuses batches over 1500; selection is revalidated when starting.",
+      "read_only": true,
+      "effect": "read_only",
+      "input": { "batch_id": "exact canonical batch ID" },
+      "input_schema": {
+        "type": "object",
+        "required": ["bridge_token", "actor_id", "command", "batch_id"],
+        "properties": {
+          "bridge_token": { "type": "string" },
+          "actor_id": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "command": { "const": "downloads.batch_members" },
+          "batch_id": { "type": "string" }
         },
         "additionalProperties": false
       }
@@ -616,6 +656,24 @@
             "minimum": 1,
             "maximum": 200
           }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "queue.pause",
+      "description": "Pause all new dispatch and revoke selected-start permissions. Existing running jobs are not cancelled. Safe Mode is unchanged. Independently inspect canonical queue and running jobs.",
+      "read_only": false,
+      "effect": "reversible_state_change",
+      "input": {},
+      "input_schema": {
+        "type": "object",
+        "required": ["bridge_token", "actor_id", "command", "operation_id"],
+        "properties": {
+          "bridge_token": { "type": "string" },
+          "actor_id": { "type": "string", "minLength": 1, "maxLength": 80 },
+          "command": { "const": "queue.pause" },
+          "operation_id": { "type": "string", "minLength": 1, "maxLength": 80 }
         },
         "additionalProperties": false
       }

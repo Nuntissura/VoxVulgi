@@ -23,6 +23,14 @@ use url::Url;
 use uuid::Uuid;
 
 static JOB_RUNNER_SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+static JOB_RUNNER_SAFE_MODE: AtomicBool = AtomicBool::new(false);
+static SELECTED_DOWNLOAD_PUBLICATION: Mutex<()> = Mutex::new(());
+
+/// Publish this absolute barrier before desktop queue changes.
+pub fn set_runner_safe_mode(enabled: bool) {
+    let _publication = SELECTED_DOWNLOAD_PUBLICATION.lock().unwrap_or_else(|e| e.into_inner());
+    JOB_RUNNER_SAFE_MODE.store(enabled, Ordering::SeqCst);
+}
 
 struct CurrentJobExecutionContext {
     paths: AppPaths,
@@ -7075,11 +7083,178 @@ pub fn set_runtime_max_concurrency(
     Ok(JobRuntimeSettings { max_concurrency })
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SelectedDownloadSubmissionReceipt {
+    pub jobs: Vec<JobRow>,
+    pub start: Option<SelectedDownloadStartReceipt>,
+    pub submission_error: Option<String>,
+}
+
+/// Prevent claims between canonical enqueue and exact-attempt admission publication.
+pub fn enqueue_selected_download_batch(
+    paths: &AppPaths,
+    urls: Vec<String>,
+    auth_cookie: Option<String>,
+    output_dir: Option<String>,
+    use_browser_cookies: Option<bool>,
+    browser_cookie_source: Option<String>,
+    preset_id: Option<String>,
+    approved_missing_item_ids: Vec<String>,
+    mode: &str,
+) -> Result<SelectedDownloadSubmissionReceipt> {
+    let _publication = SELECTED_DOWNLOAD_PUBLICATION.lock().unwrap_or_else(|e| e.into_inner());
+    if JOB_RUNNER_SAFE_MODE.load(Ordering::SeqCst) || !matches!(mode, "only" | "continue_all") {
+        return Err(EngineError::InstallFailed("selected submission requires valid mode and Safe Mode off".into()));
+    }
+    if urls.is_empty() || urls.len() > 1500 || urls.iter().any(|url| normalize_direct_url(url).is_err()) {
+        return Err(EngineError::InstallFailed("selected submission requires 1-1500 valid video URLs".into()));
+    }
+    let jobs = enqueue_download_direct_url_batch_with_repairs(paths, urls, auth_cookie, output_dir,
+        use_browser_cookies, browser_cookie_source, preset_id, approved_missing_item_ids)?;
+    if jobs.is_empty() {
+        return Ok(SelectedDownloadSubmissionReceipt { jobs, start: None, submission_error: None });
+    }
+    let ids = jobs.iter().map(|job| job.id.clone()).collect::<Vec<_>>();
+    match start_selected_downloads_inner(paths, &ids, mode) {
+        Ok(start) => Ok(SelectedDownloadSubmissionReceipt { jobs, start: Some(start), submission_error: None }),
+        Err(error) => {
+            // Preserve every created original and prevent unacknowledged dispatch on publication failure.
+            let conn = db::write_context(paths)?;
+            conn.execute("INSERT INTO meta(key,value) VALUES(?1,'1') ON CONFLICT(key) DO UPDATE SET value='1'",
+                [META_KEY_JOBS_QUEUE_PAUSED])?;
+            conn.execute("DELETE FROM job_selected_download", [])?;
+            Ok(SelectedDownloadSubmissionReceipt { jobs, start: None, submission_error: Some(error.to_string()) })
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SelectedDownloadStartReceipt {
+    pub mode: String,
+    pub job_ids: Vec<String>,
+    pub paused: bool,
+    pub rest_paused: bool,
+    pub held: bool,
+    pub hold_reason: Option<String>,
+    pub next_eligible_at_ms: Option<i64>,
+}
+
+pub fn queued_foreground_download_batch_ids(paths: &AppPaths, batch_id: &str) -> Result<Vec<String>> {
+    if batch_id.trim().is_empty() {
+        return Err(EngineError::InstallFailed("batch_id is required".into()));
+    }
+    let conn = db::open_readonly(paths)?;
+    let mut stmt = conn.prepare("SELECT id FROM job WHERE batch_id=?1 AND status='queued'
+        AND type='download_direct_url' AND track IN ('youtube_single','other_video') AND json_extract(params_json,'$.subscription_id') IS NULL ORDER BY created_at_ms,id LIMIT 1501")?;
+    let ids = stmt.query_map([batch_id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if ids.is_empty() || ids.len() > 1500 {
+        return Err(EngineError::InstallFailed("batch must contain 1-1500 queued foreground downloads".into()));
+    }
+    Ok(ids)
+}
+
+fn selected_download_allowed_conn(conn: &rusqlite::Connection, job_id: &str) -> Result<bool> {
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM job_selected_download s JOIN job j
+        ON j.id=s.job_id AND j.attempt_no=s.attempt_no WHERE s.job_id=?1
+        AND j.type='download_direct_url' AND j.track IN ('youtube_single','other_video') AND json_extract(j.params_json,'$.subscription_id') IS NULL)", [job_id], |r| r.get(0))?)
+}
+
+fn has_selected_downloads_conn(conn: &rusqlite::Connection) -> Result<bool> {
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM job_selected_download s JOIN job j
+        ON j.id=s.job_id AND j.attempt_no=s.attempt_no WHERE j.status IN ('queued','running'))", [], |r| r.get(0))?)
+}
+
+/// Authorize exact attempts without rewriting timestamps or provider policy.
+pub fn start_selected_downloads(paths: &AppPaths, job_ids: &[String], mode: &str) -> Result<SelectedDownloadStartReceipt> {
+    let _publication = SELECTED_DOWNLOAD_PUBLICATION.lock().unwrap_or_else(|e| e.into_inner());
+    start_selected_downloads_inner(paths, job_ids, mode)
+}
+
+fn start_selected_downloads_inner(paths: &AppPaths, job_ids: &[String], mode: &str) -> Result<SelectedDownloadStartReceipt> {
+    if !matches!(mode, "only" | "continue_all") || job_ids.is_empty() || job_ids.len() > 1500 {
+        return Err(EngineError::InstallFailed("select 1-1500 jobs and mode only or continue_all".into()));
+    }
+    let mut seen = HashSet::new();
+    if job_ids.iter().any(|id| id.trim().is_empty() || !seen.insert(id)) {
+        return Err(EngineError::InstallFailed("selection contains blank or duplicate IDs".into()));
+    }
+    if JOB_RUNNER_SAFE_MODE.load(Ordering::SeqCst) {
+        return Err(EngineError::InstallFailed("Safe Mode blocks selected downloads".into()));
+    }
+    // Resolve each job's actual auth/runtime context before writer admission; no filesystem work in the transaction.
+    let policy_conn = db::open_readonly(paths)?;
+    let mut policy_params = Vec::with_capacity(job_ids.len());
+    for id in job_ids {
+        let params = policy_conn.query_row("SELECT params_json FROM job WHERE id=?1 AND status='queued'
+            AND type='download_direct_url' AND track IN ('youtube_single','other_video') AND json_extract(params_json,'$.subscription_id') IS NULL", [id], |r| r.get::<_,String>(0)).optional()?;
+        policy_params.push(params.ok_or_else(|| EngineError::InstallFailed(format!("selected job is not queued: {id}")))?);
+    }
+    drop(policy_conn);
+    let mut selected_policy: Option<YoutubeSchedulerPolicy> = None;
+    for (id, params) in job_ids.iter().zip(&policy_params) {
+        if let Some(policy) = effective_youtube_scheduler_policy(paths, id, params)? {
+            if selected_policy.as_ref().is_some_and(|first| first.auth_fingerprint != policy.auth_fingerprint
+                || first.runtime_epoch != policy.runtime_epoch) {
+                return Err(EngineError::InstallFailed("selected jobs require one shared YouTube authentication context".into()));
+            }
+            if selected_policy.is_none() { selected_policy = Some(policy); }
+        }
+    }
+    let paused = mode == "only";
+    let mut conn = db::write_context(paths)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if JOB_RUNNER_SAFE_MODE.load(Ordering::SeqCst) {
+        return Err(EngineError::InstallFailed("Safe Mode blocks selected downloads".into()));
+    }
+    let mut attempts = Vec::with_capacity(job_ids.len());
+    for (id, expected_params) in job_ids.iter().zip(&policy_params) {
+        let current = tx.query_row("SELECT attempt_no,params_json FROM job WHERE id=?1 AND status='queued'
+            AND type='download_direct_url' AND track IN ('youtube_single','other_video')
+            AND json_extract(params_json,'$.subscription_id') IS NULL", [id],
+            |r| Ok((r.get::<_,i64>(0)?, r.get::<_,String>(1)?))).optional()?;
+        let (attempt, current_params) = current.ok_or_else(|| EngineError::InstallFailed(format!("selected job is not a queued foreground download: {id}")))?;
+        if current_params != *expected_params {
+            return Err(EngineError::InstallFailed(format!("selected job context changed before admission: {id}")));
+        }
+        attempts.push(attempt);
+    }
+    tx.execute("DELETE FROM job_selected_download", [])?;
+    for (ordinal, (id, attempt)) in job_ids.iter().zip(attempts).enumerate() {
+        tx.execute("INSERT INTO job_selected_download(job_id,attempt_no,ordinal) VALUES(?1,?2,?3)",
+            params![id, attempt, ordinal as i64])?;
+    }
+    tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![META_KEY_JOBS_QUEUE_PAUSED, if paused { "1" } else { "0" }])?;
+    if !paused {
+        tx.execute("INSERT INTO meta(key,value) VALUES(?1,'0') ON CONFLICT(key) DO UPDATE SET value='0'",
+            [META_KEY_JOBS_RECURRING_PAUSED])?;
+    }
+    tx.commit()?;
+    drop(conn);
+    let mut next = None;
+    let mut hold = None;
+    if let Some(policy) = selected_policy {
+        next = policy.next_eligible_probe_at_ms;
+        if policy.effective.mode == youtube_protection::DownloaderPolicyMode::Cooldown {
+            match youtube_protection::request_controlled_download_probe(paths, &policy.auth_fingerprint, &policy.runtime_epoch) {
+                Ok(state) => { next = state.next_eligible_probe_at_ms; hold = Some("adaptive_youtube_cooldown".into()); }
+                Err(error) => hold = Some(format!("controlled_probe_unavailable: {error}")),
+            }
+            invalidate_youtube_policy_gate_fields(paths);
+        } else if !policy.effective.eligible { hold = Some("youtube_protection_hold".into()); }
+    }
+    Ok(SelectedDownloadStartReceipt { mode: mode.into(), job_ids: job_ids.to_vec(), paused,
+        rest_paused: paused, held: hold.is_some(), hold_reason: hold, next_eligible_at_ms: next })
+}
+
 pub fn set_queue_paused(paths: &AppPaths, paused: bool) -> Result<JobQueueControlState> {
+    let _publication = SELECTED_DOWNLOAD_PUBLICATION.lock().unwrap_or_else(|e| e.into_inner());
     db::AppDatabase::for_paths(paths)?.write(
         db::DatabaseOperationContext::new("queue_control", "set_queue_paused").foreground(),
         TransactionBehavior::Immediate,
         |transaction| {
+            transaction.execute("DELETE FROM job_selected_download", [])?;
             transaction.execute(
                 "INSERT INTO meta(key, value) VALUES(?1, ?2)
                  ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -7157,6 +7332,8 @@ pub fn cancel_job(paths: &AppPaths, job_id: &str) -> Result<()> {
     if updated == 0 {
         return Ok(());
     }
+
+    conn.execute("DELETE FROM job_selected_download WHERE job_id=?1", [job_id])?;
 
     if let Some((job_type, Some(batch_id))) = job_context {
         if job_type == JobType::ImportLocal.as_str() && !batch_id.trim().is_empty() {
@@ -11289,7 +11466,10 @@ fn runner_loop(
             }
         }
 
-        if is_queue_paused(&paths).unwrap_or(false) {
+        let selected_pending = db::open_readonly(&paths)
+            .and_then(|conn| has_selected_downloads_conn(&conn)).unwrap_or(false);
+        if JOB_RUNNER_SAFE_MODE.load(Ordering::SeqCst)
+            || (is_queue_paused(&paths).unwrap_or(true) && !selected_pending) {
             observe_youtube_gate(
                 &paths,
                 &runtime_state,
@@ -11339,7 +11519,9 @@ fn runner_loop(
         // tracks. The one-start loop intentionally provides alternating fairness when both
         // queues are eligible rather than launching a burst in a single scheduler tick.
         if youtube_start_gate.ready() {
-            'youtube_tracks: for track in youtube_start_gate.candidate_order() {
+            'youtube_tracks: for track in if selected_pending {
+                [JobTrack::YoutubeSingle, JobTrack::YoutubeRecurring]
+            } else { youtube_start_gate.candidate_order() } {
                 if track == JobTrack::YoutubeRecurring && recurring_paused {
                     continue;
                 }
@@ -11662,6 +11844,20 @@ fn fetch_queued_jobs_for_track_inner(
     let limit = limit.max(1);
     let conn = db::open_readonly(paths)?;
     let mut result = Vec::with_capacity(limit);
+    let paused = is_queue_paused_conn(&conn)?;
+    if paused || (matches!(wanted_track, JobTrack::YoutubeSingle | JobTrack::OtherVideo)
+        && wanted_type == Some(JobType::DownloadDirectUrl.as_str())
+        && has_selected_downloads_conn(&conn)?) {
+        let mut stmt = conn.prepare("SELECT j.id,j.type,j.params_json FROM job j
+          LEFT JOIN job_selected_download s ON s.job_id=j.id AND s.attempt_no=j.attempt_no
+          WHERE j.status='queued' AND j.track=?1 AND (?2 IS NULL OR j.type=?2)
+            AND (?3=0 OR s.job_id IS NOT NULL)
+          ORDER BY CASE WHEN s.job_id IS NULL THEN 1 ELSE 0 END,s.ordinal,j.created_at_ms,j.id LIMIT ?4")?;
+        let rows = stmt.query_map(params![wanted_track.as_str(), wanted_type, paused as i64, limit as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        return Ok(rows);
+    }
 
     // New rows use the indexable persisted track predicate. The fallback below is intentionally
     // bounded so a 55k pre-v24 queue cannot turn one scheduler tick into a full migration scan.
@@ -12115,8 +12311,13 @@ fn claim_job_for_track(
     });
 
     drop(conn);
+    let _publication = SELECTED_DOWNLOAD_PUBLICATION.lock().unwrap_or_else(|e| e.into_inner());
     let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if JOB_RUNNER_SAFE_MODE.load(Ordering::SeqCst)
+        || (is_queue_paused_conn(&tx)? && !selected_download_allowed_conn(&tx, job_id)?) {
+        return Ok(DispatchClaimOutcome::DeferredChanged);
+    }
     let current: Option<(String, String, String)> = tx
         .query_row(
             "SELECT status, type, params_json FROM job WHERE id=?1",
@@ -21033,6 +21234,7 @@ fn set_succeeded(paths: &AppPaths, job_id: &str) -> Result<()> {
             JobStatus::Running.as_str()
         ],
     )?;
+    conn.execute("DELETE FROM job_selected_download WHERE job_id=?1", [job_id])?;
     drop(conn);
     let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, job_id);
     Ok(())
@@ -21139,6 +21341,7 @@ fn set_failed(paths: &AppPaths, job_id: &str, error: &str) -> Result<()> {
     )?;
     let mut failed_url_to_release: Option<Option<String>> = None;
     if changed > 0 {
+        conn.execute("DELETE FROM job_selected_download WHERE job_id=?1", [job_id])?;
         let context: Option<(String, String)> = conn
             .query_row(
                 "SELECT type, params_json FROM job WHERE id=?1",
@@ -22190,6 +22393,11 @@ fn reserve_scheduler_canary(
     let Some(policy) = policy.filter(|policy| policy.effective.canary_only) else {
         return Ok(true);
     };
+    let conn = db::open_readonly(paths)?;
+    if has_selected_downloads_conn(&conn)? && !selected_download_allowed_conn(&conn, job_id)? {
+        return Ok(false);
+    }
+    drop(conn);
     Ok(youtube_protection::claim_cooldown_canary(
         paths,
         youtube_protection::PROVIDER_YOUTUBE,
@@ -32784,6 +32992,110 @@ mod tests {
     use std::net::TcpListener;
     use std::path::Path;
     use std::sync::Barrier;
+
+    fn selected_queue_fixture() -> (tempfile::TempDir, AppPaths) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("selected_queue"));
+        db::ensure_schema(&paths).expect("schema");
+        let conn = db::open(&paths).expect("fixture");
+        for (id, track, created) in [("older", "youtube_single", 1), ("selected", "youtube_single", 100),
+            ("second", "youtube_single", 101), ("recurring", "youtube_recurring", 0)] {
+            conn.execute(r#"INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path,track,batch_id)
+                VALUES(?1,'download_direct_url','queued',0,'{"url":"https://example.org/video"}',?2,'',?3,'selected-batch')"#,
+                params![id, created, track]).expect("seed");
+        }
+        (dir, paths)
+    }
+
+    #[test]
+    fn selected_downloads_filter_before_limit_and_claim_hold_unrelated_work() {
+        let (_dir, paths) = selected_queue_fixture();
+        start_selected_downloads(&paths, &["selected".into(), "second".into()], "only").expect("select");
+        let rows = fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 1).expect("fetch");
+        assert_eq!(rows[0].0, "selected");
+        assert!(fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeRecurring, 10).expect("recurring").is_empty());
+        assert!(matches!(claim_job_for_track(&paths, "older", JobTrack::YoutubeSingle).expect("claim"), DispatchClaimOutcome::DeferredChanged));
+        let conn = db::open_readonly(&paths).expect("read");
+        assert_eq!(conn.query_row("SELECT created_at_ms FROM job WHERE id='selected'", [], |r| r.get::<_,i64>(0)).unwrap(), 100);
+    }
+
+    #[test]
+    fn selected_downloads_continue_all_prioritizes_without_reordering_originals() {
+        let (_dir, paths) = selected_queue_fixture();
+        start_selected_downloads(&paths, &["second".into(), "selected".into()], "continue_all").expect("select");
+        assert!(!is_queue_paused(&paths).unwrap());
+        let rows = fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 10).expect("fetch");
+        assert_eq!(rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), vec!["second", "selected", "older"]);
+        assert_eq!(fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeRecurring, 10).unwrap().len(), 1);
+        set_queue_paused(&paths, true).expect("explicit pause revokes selection");
+        assert!(fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn selected_downloads_validate_whole_set_and_attempt_binding() {
+        let (_dir, paths) = selected_queue_fixture();
+        assert!(start_selected_downloads(&paths, &["selected".into(), "missing".into()], "only").is_err());
+        let conn = db::open_readonly(&paths).expect("read");
+        assert!(!has_selected_downloads_conn(&conn).unwrap());
+        drop(conn);
+        start_selected_downloads(&paths, &["selected".into()], "only").expect("select");
+        let conn = db::open(&paths).expect("fixture");
+        conn.execute("UPDATE job SET attempt_no=attempt_no+1 WHERE id='selected'", []).unwrap();
+        assert!(!selected_download_allowed_conn(&conn, "selected").unwrap());
+        drop(conn);
+        assert!(fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn selected_downloads_failure_preserves_remaining_batch_and_restart_pause() {
+        let (_dir, paths) = selected_queue_fixture();
+        start_selected_downloads(&paths, &["selected".into(), "second".into()], "only").expect("select");
+        let conn = db::open(&paths).expect("fixture");
+        conn.execute("UPDATE job SET status='running' WHERE id='selected'", []).unwrap();
+        drop(conn);
+        set_failed(&paths, "selected", "provider failure").expect("terminal failure");
+        assert_eq!(fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 10).unwrap()[0].0, "second");
+        let conn = db::open(&paths).expect("fixture");
+        conn.execute("UPDATE job SET status='running' WHERE id='second'", []).unwrap();
+        requeue_orphaned_running_jobs(&conn).expect("restart recovery");
+        assert!(is_queue_paused_conn(&conn).unwrap());
+        assert!(selected_download_allowed_conn(&conn, "second").unwrap());
+        drop(conn);
+        cancel_job(&paths, "second").expect("cancel");
+        assert!(!has_selected_downloads_conn(&db::open_readonly(&paths).unwrap()).unwrap());
+    }
+
+    #[test]
+    fn selected_downloads_safe_mode_is_absolute_and_precedes_enqueue() {
+        struct ResetSafeMode;
+        impl Drop for ResetSafeMode { fn drop(&mut self) { set_runner_safe_mode(false); } }
+        let (_dir, paths) = selected_queue_fixture();
+        let _reset = ResetSafeMode;
+        set_runner_safe_mode(true);
+        assert!(start_selected_downloads(&paths, &["selected".into()], "only").is_err());
+        assert!(enqueue_selected_download_batch(&paths, vec!["https://www.youtube.com/watch?v=3Q61HdKKJeo".into()],
+            None, None, None, None, None, vec![], "only").is_err());
+        assert!(matches!(claim_job_for_track(&paths, "selected", JobTrack::YoutubeSingle).unwrap(), DispatchClaimOutcome::DeferredChanged));
+        assert_eq!(db::open_readonly(&paths).unwrap().query_row("SELECT COUNT(*) FROM job", [], |r| r.get::<_,i64>(0)).unwrap(), 4);
+    }
+
+    #[test]
+    fn selected_downloads_atomic_submission_publishes_only_before_claim() {
+        let (_dir, paths) = selected_queue_fixture();
+        let receipt = enqueue_selected_download_batch(&paths, vec!["https://example.org/new-video.mkv".into()],
+            None, None, None, None, None, vec![], "only").expect("atomic submission");
+        assert!(receipt.submission_error.is_none());
+        assert_eq!(receipt.jobs.len(), 1);
+        assert_eq!(receipt.start.as_ref().unwrap().job_ids, vec![receipt.jobs[0].id.clone()]);
+        assert!(receipt.start.unwrap().rest_paused);
+        let conn = db::open_readonly(&paths).unwrap();
+        assert!(is_queue_paused_conn(&conn).unwrap());
+        assert!(selected_download_allowed_conn(&conn, &receipt.jobs[0].id).unwrap());
+        drop(conn);
+        assert!(matches!(claim_job_for_track(&paths, "older", JobTrack::YoutubeSingle).unwrap(), DispatchClaimOutcome::DeferredChanged));
+        let rows = fetch_queued_jobs_for_track(&paths, JobTrack::OtherVideo, 1).unwrap();
+        assert_eq!(rows[0].0, receipt.jobs[0].id);
+    }
 
     fn seed_subtitle_publication_item(paths: &AppPaths, item_id: &str) {
         db::ensure_schema(paths).expect("schema");

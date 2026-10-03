@@ -1,5 +1,12 @@
 # VoxVulgi — Product Spec (Rebuild; Cross-Platform; Local-First)
 
+## Selected foreground downloads (WP-0334)
+
+- [VV-0334-POLICY-001] Paused or provider-held single-video submissions, including multiple links submitted together, offer `Download only this video/batch` or `Continue all` and place this submission first; Cancel authorizes no execution.
+- [VV-0334-POLICY-002] Only mode admits precisely the selected canonical queued attempts while other queued starts remain paused. Continue all explicitly resumes the queue and prioritizes those selected members without rewriting history.
+- [VV-0334-POLICY-003] Safe Mode, provider/auth/storage gates, pacing and MKV quality remain enforced. A selected cooldown retry retains the existing exclusive canary and minimum wait; selection never implicitly resets protection.
+- [VV-0334-POLICY-004] Operator and authenticated agent paths expose the same decisions, exact selection and truthful progress/hold state.
+
 Date: 2026-03-09  
 Status: Draft (assumptions noted; intended as the starting point for implementation planning).
 

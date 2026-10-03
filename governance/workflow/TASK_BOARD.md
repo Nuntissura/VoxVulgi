@@ -2,6 +2,8 @@
 
 Last updated: 2026-10-03
 
+| WP-0334 | Selected single or batch start | IN_PROGRESS | Codex | Operator2026-10-03: prompt Download only this video/batch or Continue all and place selected submission first; preserve paused unrelated queue, attempt identity, provider pacing and Safe Mode. Contract: `work_packets/WP-0334_SELECTED_SINGLE_OR_BATCH_START_v1.json`. |
+
 This is the single source of truth for work status.
 
 ## Status legend

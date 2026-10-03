@@ -18,7 +18,7 @@ pub use database_runtime::{
     WRITER_QUEUE_CAPACITY,
 };
 
-const CURRENT_SCHEMA_VERSION: u32 = 60;
+const CURRENT_SCHEMA_VERSION: u32 = 61;
 /// WP-0321 S6: bounded archived-attempt history kept in `job_attempt` per surviving `job` row
 /// once it is superseded by a later attempt for the same video (`job.target_key`). Older
 /// superseded rows beyond this count are still deduped and deleted during the v58 migration, but
@@ -274,8 +274,12 @@ pub(crate) const MIGRATION_STEPS: &[MigrationStep] = &[
         apply: apply_schema_v59,
     },
     MigrationStep {
-        version: CURRENT_SCHEMA_VERSION,
+        version: 60,
         apply: apply_schema_v60,
+    },
+    MigrationStep {
+        version: CURRENT_SCHEMA_VERSION,
+        apply: apply_schema_v61,
     },
 ];
 
@@ -3350,6 +3354,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_job_attempt_legacy
 /// `consecutive_failures`.
 pub(crate) fn apply_schema_v59(conn: &Connection) -> Result<()> {
     ensure_column(conn, "job", "app_busy_attempts", "INTEGER NOT NULL DEFAULT 0")?;
+    Ok(())
+}
+
+/// WP-0334: exact attempt-bound selected-download admission and priority.
+fn apply_schema_v61(conn: &Connection) -> Result<()> {
+    conn.execute_batch("CREATE TABLE IF NOT EXISTS job_selected_download (
+      job_id TEXT PRIMARY KEY REFERENCES job(id) ON DELETE CASCADE,
+      attempt_no INTEGER NOT NULL,
+      ordinal INTEGER NOT NULL
+    ); CREATE INDEX IF NOT EXISTS idx_job_selected_download_order
+       ON job_selected_download(ordinal,job_id);")?;
     Ok(())
 }
 

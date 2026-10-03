@@ -15,6 +15,14 @@ pub(super) fn stop_explicit_runner() -> bool {
     owned.is_none_or(|runner|runner.stop_and_join(jobs::JOB_RUNNER_SHUTDOWN_TIMEOUT).is_ok())
 }
 
+fn ensure_explicit_headless_runner(paths: &AppPaths) -> Result<(), String> {
+    if agent_bridge_state().lock().unwrap().agent_headless {
+        let mut runner = EXPLICIT_HEADLESS_RUNNER.get_or_init(Default::default).lock().unwrap();
+        if runner.is_none() { *runner = Some(jobs::start_runner(paths.clone()).map_err(|e|e.to_string())?); }
+    }
+    Ok(())
+}
+
 pub(super) fn catalog() -> Value {
     serde_json::from_str(CATALOG).expect("embedded agent manual must be valid JSON")
 }
@@ -51,6 +59,9 @@ fn validate_input(request: &Value, descriptor: &Value) -> Result<(), String> {
     }
     for (key, value) in object {
         let rule = properties.get(key).ok_or_else(||format!("unsupported field: {key}"))?;
+        if let Some(choices) = rule["enum"].as_array() {
+            if !choices.contains(value) { return Err(format!("{key} is outside the declared choices")); }
+        }
         match rule["type"].as_str() {
             Some("string") if !value.is_string() => return Err(format!("{key} must be a string")),
             Some("integer") => {
@@ -168,6 +179,10 @@ fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, St
             request["after_id"].as_str().unwrap_or(""), request["limit"].as_u64().unwrap_or(200) as usize).map_err(|e|e.to_string()),
         "youtube.return_to_baseline" => serde_json::to_value(jobs::return_youtube_protection_to_baseline(paths, Some("download")).map_err(|e|e.to_string())?).map_err(|e|e.to_string()),
         "youtube.controlled_probe" => serde_json::to_value(jobs::request_youtube_controlled_probe(paths).map_err(|e|e.to_string())?).map_err(|e|e.to_string()),
+        "queue.pause" => {
+            let control = jobs::set_queue_paused(paths, true).map_err(|e|e.to_string())?;
+            Ok(json!({"queue":control,"safe_mode":agent_bridge_state().lock().unwrap().safe_mode,"completion":"new dispatch paused; selected permissions revoked; inspect canonical running jobs"}))
+        }
         "queue.resume" => {
             if agent_bridge_state().lock().unwrap().agent_headless {
                 let mut runner = EXPLICIT_HEADLESS_RUNNER.get_or_init(Default::default).lock().unwrap();
@@ -267,10 +282,31 @@ fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, St
             let urls = request["urls"].as_array().ok_or("urls is required")?;
             if urls.is_empty() || urls.len() > 25 { return Err("provide 1-25 URLs".into()); }
             let urls = urls.iter().map(|v| v.as_str().filter(|s|s.len()<=2048).map(str::to_string).ok_or("invalid URL".to_string())).collect::<Result<Vec<_>,_>>()?;
+            if let Some(mode) = request["mode"].as_str() {
+                let submission = jobs::enqueue_selected_download_batch(paths, urls, None,
+                    request["output_dir"].as_str().map(str::to_string), None, None,
+                    request["preset_id"].as_str().map(str::to_string), Vec::new(), mode).map_err(|e|e.to_string())?;
+                if submission.start.is_some() { ensure_explicit_headless_runner(paths)?; }
+                let all_succeeded = submission.submission_error.is_none();
+                return Ok(json!({"jobs":submission.jobs.into_iter().map(safe_job).collect::<Vec<_>>(),"start":submission.start,"submission_error":submission.submission_error,"all_succeeded":all_succeeded,"completion":if all_succeeded { "submission accepted; inspect canonical jobs and held receipt; not a completed download" } else { "canonical jobs queued, queue paused, selected start not admitted; inspect exact jobs before retry" }}));
+            }
             let rows = jobs::enqueue_download_direct_url_batch_with_repairs(paths, urls, None,
                 request["output_dir"].as_str().map(str::to_string), None, None,
                 request["preset_id"].as_str().map(str::to_string), Vec::new()).map_err(|e|e.to_string())?;
             Ok(json!({"jobs":rows.into_iter().map(safe_job).collect::<Vec<_>>(),"completion":"queued_only; inspect canonical jobs for progress"}))
+        }
+        "downloads.batch_members" => {
+            let batch = request["batch_id"].as_str().filter(|s|token(s)).ok_or("valid batch_id required")?;
+            let selected = jobs::queued_foreground_download_batch_ids(paths, batch).map_err(|e|e.to_string())?;
+            Ok(json!({"batch_id":batch,"job_ids":selected,"scope":"whole_canonical_queued_foreground_batch"}))
+        }
+        "downloads.start_selected" => {
+            let values = request["job_ids"].as_array().filter(|v| !v.is_empty() && v.len() <= 1500).ok_or("select 1-1500 exact job IDs")?;
+            let selected = values.iter().map(|v|v.as_str().filter(|s|token(s)).map(str::to_string).ok_or("invalid job ID")).collect::<Result<Vec<_>,_>>()?;
+            let mode = request["mode"].as_str().filter(|m|matches!(*m,"only"|"continue_all")).ok_or("mode must be only or continue_all")?;
+            let result = jobs::start_selected_downloads(paths, &selected, mode).map_err(|e|e.to_string())?;
+            ensure_explicit_headless_runner(paths)?;
+            serde_json::to_value(result).map_err(|e|e.to_string())
         }
         "jobs.retry" | "downloads.restart_current" | "jobs.cancel" => {
             let selected = ids(request)?;
@@ -306,7 +342,7 @@ fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, St
 }
 
 fn is_read(command: &str) -> bool {
-    matches!(command, "database.runtime_status" | "jobs.list" | "jobs.inspect" | "jobs.logs" | "jobs.overview" | "jobs.activity" | "downloads.presets" | "subscriptions.failed_downloads" | "operation.get")
+    matches!(command, "database.runtime_status" | "jobs.list" | "jobs.inspect" | "jobs.logs" | "jobs.overview" | "jobs.activity" | "downloads.presets" | "downloads.batch_members" | "subscriptions.failed_downloads" | "operation.get")
 }
 
 pub(super) fn handle(body: &str) -> (&'static str, String) {
@@ -473,5 +509,21 @@ mod tests {
         assert!(confirm(&json!({}),"jobs.cancel",&selected).is_err());
         assert!(confirm(&json!({"confirmation":"JOBS.CANCEL:a,b"}),"jobs.cancel",&selected).is_ok());
         assert!(!token("../escape")); assert!(!token(""));
+    }
+    #[test] fn selected_download_schema_rejects_wrong_mode_duplicates_and_missing_operation() {
+        let c = catalog();
+        let descriptor = c["commands"].as_array().unwrap().iter().find(|v|v["name"]=="downloads.start_selected").unwrap();
+        let mut request = json!({"actor_id":"test","command":"downloads.start_selected","job_ids":["b","a"],"mode":"only","operation_id":"op-selected"});
+        assert!(validate_input(&request,descriptor).is_ok());
+        request["mode"] = json!("resume_everything_silently");
+        assert!(validate_input(&request,descriptor).is_err());
+        request["mode"] = json!("continue_all");
+        request["job_ids"] = json!(["a","a"]);
+        assert!(validate_input(&request,descriptor).is_err());
+        request["job_ids"] = json!(["a"]);
+        request.as_object_mut().unwrap().remove("operation_id");
+        assert!(validate_input(&request,descriptor).is_err());
+        assert!(is_read("downloads.batch_members"));
+        assert!(!is_read("queue.pause"));
     }
 }

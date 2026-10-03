@@ -30,6 +30,7 @@ import { fileName, joinPath, parentPath } from "../lib/pathUtils";
 import { classifyFailure, historyReadRetryDelay, type FailureState } from "../lib/failureStates";
 import { FailureExplainer, type FailureActionHandlers } from "../components/FailureExplainer";
 import { youtubeGateText, type YoutubeGateSnapshot } from "../lib/youtubeGateText";
+import { shouldOfferSelectedDownloadStart, selectedDownloadStartMessage } from "../lib/selectedDownloadStart";
 import { usePollingLoop } from "../lib/activity";
 import { isProjectionRequestCurrent } from "../lib/projectionFreshness";
 import {
@@ -1092,6 +1093,16 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
   const [youtubeGate, setYoutubeGate] = useState<YoutubeGateSnapshot | null>(null);
   const [youtubeGateBusy, setYoutubeGateBusy] = useState(false);
   const [youtubeGateMessage, setYoutubeGateMessage] = useState<string | null>(null);
+  const [selectedStartPrompt, setSelectedStartPrompt] = useState<{ count: number; reason: string } | null>(null);
+  const selectedStartResolve = useRef<((mode: "only" | "continue_all" | null) => void) | null>(null);
+  useEffect(() => () => { selectedStartResolve.current?.(null); selectedStartResolve.current = null; }, []);
+  useEffect(() => {
+    if (!visible) {
+      selectedStartResolve.current?.(null);
+      selectedStartResolve.current = null;
+      setSelectedStartPrompt(null);
+    }
+  }, [visible]);
   const [videoLibraries, setVideoLibraries] = useState<VideoLibraryRow[]>([]);
   const [videoLibraryName, setVideoLibraryName] = useState("");
   const [videoLibraryRoot, setVideoLibraryRoot] = useState("");
@@ -1135,6 +1146,11 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
     if (raw === "youtube_recurring" || raw === "website") return raw;
     return "youtube_single";
   });
+  useEffect(() => {
+    selectedStartResolve.current?.(null);
+    selectedStartResolve.current = null;
+    setSelectedStartPrompt(null);
+  }, [mode, videoArchiverTab]);
   const [downloadPresets, setDownloadPresets] = useState<DownloadPresetsConfig | null>(null);
   const [batchRules, setBatchRules] = useState<BatchOnImportRules | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -3325,7 +3341,9 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
     setBusy(true);
     setError(null);
     try {
-      const queued = await invoke<EnqueuedJobReceipt[]>("jobs_enqueue_download_batch", {
+      const decision = await chooseSelectedDownloadStart(approved.length, false, approved.some((row) => row.service === "youtube"));
+      if (decision === null) return;
+      const submission = await enqueueDownloadSubmission({
         urls: approved.map((row) => row.url),
         authCookie: null,
         outputDir: urlBatchOutputDir.trim() || null,
@@ -3333,9 +3351,17 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
         browserCookieSource: null,
         presetId: urlBatchPresetId.trim() || null,
         approvedMissingItemIds: approved.map((row) => row.library_item_id),
-      });
+      }, decision);
+      const queued = submission.jobs;
+      setNotice(`Queued ${queued.length} approved missing-video download${queued.length === 1 ? "" : "s"}. Exact job IDs: ${queued.map((job) => job.id).join(", ")}.`);
+      if (submission.submission_error) {
+        setError(`The videos are queued and the queue is paused; selected start was not admitted: ${submission.submission_error}`);
+        await refreshYoutubeSingleActivity();
+        return;
+      }
+      const startReceipt = submission.start;
       setNotice(
-        `Approved redownload for ${queued.length} missing canonical video${queued.length === 1 ? "" : "s"}. The existing library identity is retained.`,
+        `Approved redownload for ${queued.length} missing canonical video${queued.length === 1 ? "" : "s"}. The existing library identity is retained.${startReceipt ? ` ${selectedDownloadStartMessage(startReceipt)}` : ""}`,
       );
       await rerunDownloadPreflight(downloadPreflightRows.map((row) => row.url));
       await refreshYoutubeSingleActivity();
@@ -3423,6 +3449,54 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
   }
 
 
+  function resolveSelectedStart(mode: "only" | "continue_all" | null) {
+    const resolve = selectedStartResolve.current;
+    selectedStartResolve.current = null;
+    setSelectedStartPrompt(null);
+    resolve?.(mode);
+  }
+
+  async function enqueueDownloadSubmission(args: Record<string, unknown>, mode: "only" | "continue_all" | "normal") {
+    if (mode === "normal") {
+      return { jobs: await invoke<EnqueuedJobReceipt[]>("jobs_enqueue_download_batch", args), start: null, submission_error: null };
+    }
+    return invoke<{ jobs: EnqueuedJobReceipt[]; start: { rest_paused: boolean; held: boolean; hold_reason: string | null; next_eligible_at_ms: number | null } | null; submission_error: string | null }>("jobs_enqueue_selected_download_batch", { ...args, mode });
+  }
+
+  async function chooseSelectedDownloadStart(count: number, force = false, hasYoutube = true): Promise<"only" | "continue_all" | "normal" | null> {
+    const [control, runtime] = await Promise.all([
+      invoke<{ paused: boolean }>("jobs_queue_control_get"),
+      invoke<{ youtube_gate: YoutubeGateSnapshot }>("jobs_track_runtime_get"),
+    ]);
+    const gate = runtime.youtube_gate;
+    if (!force && !shouldOfferSelectedDownloadStart(control.paused, gate, hasYoutube)) return "normal";
+    return new Promise((resolve) => {
+      selectedStartResolve.current = resolve;
+      setSelectedStartPrompt({ count, reason: control.paused ? "The download queue is paused." : youtubeGateText(gate) || "Choose how to start this selection." });
+    });
+  }
+
+  async function startSelectedDownloads(jobIds: string[], mode: "only" | "continue_all") {
+    const receipt = await invoke<{ job_ids: string[]; held: boolean; hold_reason: string | null; rest_paused: boolean; next_eligible_at_ms: number | null }>("jobs_start_selected_downloads", { jobIds, mode });
+    setYoutubeGateMessage(selectedDownloadStartMessage(receipt));
+    return receipt;
+  }
+
+  async function startExistingDownload(jobId: string, batchId?: string) {
+    setBusy(true);
+    setError(null);
+    try {
+      const jobIds = batchId ? await invoke<string[]>("jobs_queued_download_batch_ids", { batchId }) : [jobId];
+      if (!jobIds.length) throw new Error("This selection no longer has queued videos. Refresh the activity list.");
+      const decision = await chooseSelectedDownloadStart(jobIds.length, true);
+      if (decision === null || decision === "normal") return;
+      const receipt = await startSelectedDownloads(jobIds, decision);
+      setNotice(selectedDownloadStartMessage(receipt));
+      await Promise.all([refresh(), refreshYoutubeSingleActivity()]);
+    } catch (e) { setError(String(e)); }
+    finally { setBusy(false); }
+  }
+
   async function enqueueUrlBatch() {
     setBusy(true);
     setError(null);
@@ -3465,7 +3539,9 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
         );
         return;
       }
-      const queued = await invoke<EnqueuedJobReceipt[]>("jobs_enqueue_download_batch", {
+      const decision = await chooseSelectedDownloadStart(readyUrls.length, false, preflight.some((row) => row.status === "ready" && row.service === "youtube"));
+      if (decision === null) return;
+      const submission = await enqueueDownloadSubmission({
         urls: readyUrls,
         authCookie: null,
         outputDir: urlBatchOutputDir.trim() || null,
@@ -3473,7 +3549,15 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
         browserCookieSource: null,
         presetId: urlBatchPresetId.trim() || null,
         approvedMissingItemIds: [],
-      });
+      }, decision);
+      const queued = submission.jobs;
+      setNotice(`Queued ${queued.length} download${queued.length === 1 ? "" : "s"}. Exact job IDs: ${queued.map((job) => job.id).join(", ")}.`);
+      if (submission.submission_error) {
+        setError(`The videos are queued and the queue is paused; selected start was not admitted: ${submission.submission_error}`);
+        await Promise.all([refresh(), refreshYoutubeSingleActivity()]);
+        return;
+      }
+      const startReceipt = submission.start;
       setUrlBatchText(blocked.map((row) => row.url).join("\n"));
       const visibleJobIds = queued.slice(0, 3).map((job) => job.id.slice(0, 8));
       const extraCount = Math.max(0, queued.length - visibleJobIds.length);
@@ -3482,7 +3566,7 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
         : "";
       const tracks = summarizeEnqueuedTracks(queued);
       setNotice(
-        `Queued ${queued.length} new download job${queued.length === 1 ? "" : "s"}${tracks ? `: ${tracks}.` : "."}${receipt}${blocked.length ? ` ${blocked.length} input${blocked.length === 1 ? " needs" : "s need"} review below.` : ""}`,
+        `Queued ${queued.length} new download job${queued.length === 1 ? "" : "s"}${tracks ? `: ${tracks}.` : "."}${receipt}${blocked.length ? ` ${blocked.length} input${blocked.length === 1 ? " needs" : "s need"} review below.` : ""}${startReceipt ? ` ${selectedDownloadStartMessage(startReceipt)}` : ""}`,
       );
       await Promise.all([refresh(), refreshYoutubeSingleActivity()]);
     } catch (e) {
@@ -4955,6 +5039,17 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
         <div className="row">
           <button type="button" disabled={busy || parsedUrlCount === 0} data-agent-action-id="downloads.enqueue" data-agent-effect-class="reversible_state_change" onClick={enqueueUrlBatch}>Download videos ({parsedUrlCount})</button>
         </div>
+        {selectedStartPrompt ? (
+          <div role="dialog" aria-modal="false" aria-labelledby="selected-download-start-title" data-testid="selected-download-start-prompt">
+            <h3 id="selected-download-start-title">Start {selectedStartPrompt.count === 1 ? "this video" : `this batch of ${selectedStartPrompt.count} videos`}?</h3>
+            <p>{selectedStartPrompt.reason} Download only this selection and keep the rest paused, or continue all queued work and put this selection first. Provider cooldown permits only a controlled retry at its next eligible time; sign-in checks and normal pacing still apply.</p>
+            <div className="row">
+              <button type="button" data-agent-action-id="downloads.start-only" data-agent-effect-class="reversible_state_change" onClick={() => resolveSelectedStart("only")}>Download only {selectedStartPrompt.count === 1 ? "this video" : "this batch"}</button>
+              <button type="button" data-agent-action-id="downloads.continue-all" data-agent-effect-class="reversible_state_change" onClick={() => resolveSelectedStart("continue_all")}>Continue all — put {selectedStartPrompt.count === 1 ? "this video" : "this batch"} first</button>
+              <button type="button" data-agent-action-id="downloads.start-cancel" data-agent-effect-class="reversible_state_change" onClick={() => resolveSelectedStart(null)}>Cancel</button>
+            </div>
+          </div>
+        ) : null}
         <details className="download-options"><summary>Folder and quality options</summary>
         <div style={{ color: "#4b5563", marginTop: 8 }}>
           Save to: <code>{urlBatchOutputDir || defaultVideoDownloadsDir || "Default video folder"}</code>
@@ -5146,6 +5241,7 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
                             <div style={{ color: "#4b5563", fontSize: 12 }}>
                               Job <code>{job.id.slice(0, 8)}</code>
                             </div>
+                            {job.status === "queued" ? <button type="button" disabled={busy} data-agent-action-id={`downloads.start-existing.${job.id}`} data-agent-effect-class="reversible_state_change" onClick={() => void startExistingDownload(job.id)}>Start this video…</button> : null}
                           </td>
                           <td style={{ minWidth: 260, overflowWrap: "anywhere" }}>
                             <div style={{ fontWeight: 600 }}>
@@ -5155,7 +5251,7 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
                               <div style={{ color: "#4b5563", fontSize: 12 }}>{sourceUrl}</div>
                             ) : null}
                           </td>
-                          <td>{job.batch_id ? <code>{job.batch_id.slice(0, 8)}</code> : "—"}</td>
+                          <td>{job.batch_id ? <><code>{job.batch_id.slice(0, 8)}</code>{job.status === "queued" ? <button type="button" disabled={busy} data-agent-action-id={`downloads.start-batch.${job.batch_id}`} data-agent-effect-class="reversible_state_change" onClick={() => void startExistingDownload(job.id, job.batch_id!)}>Start this batch…</button> : null}</> : "—"}</td>
                           <td style={{ minWidth: 180 }}>
                             <div
                               className="job-bar"

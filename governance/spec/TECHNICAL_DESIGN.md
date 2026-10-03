@@ -1,5 +1,12 @@
 # VoxVulgi - Technical Design (Rebuild; Cross-Platform; Local-First)
 
+## Selected foreground admission (WP-0334)
+
+- Persist selected canonical job IDs with attempt numbers and stable member order; apply selection before pagination and recheck admission atomically when claiming a job.
+- Only mode holds unrelated new dispatch until explicit resume; Continue all resumes ordinary scheduling with selected members first. Creation timestamps and unrelated queue order remain intact.
+- Safe Mode is an absolute engine barrier. Pause all revokes selected permits; retries cannot inherit stale attempt grants; shutdown recovery preserves original identities and paused-rest intent.
+- UI, Tauri and authenticated bridge use one bounded engine operation with canonical receipts. Existing pacing, provider cooldown/canary, authentication, storage and MKV execution stay authoritative.
+
 Date: 2026-03-09  
 Status: Draft (implementation-oriented; adjusts as we pick stack).
 

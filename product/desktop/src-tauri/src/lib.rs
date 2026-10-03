@@ -12267,6 +12267,7 @@ fn safe_mode_set(state: State<'_, AppState>, enabled: bool) -> Result<SafeModeSt
     config::save_safe_mode_config(&state.paths, &config::SafeModeConfig { enabled })
         .map_err(|e| e.to_string())?;
     state.safe_mode_enabled.store(enabled, Ordering::SeqCst);
+    jobs::set_runner_safe_mode(enabled);
 
     let _ = jobs::set_queue_paused(&state.paths, enabled);
     build_safe_mode_status(&state)
@@ -16222,6 +16223,31 @@ fn jobs_enqueue_download_batch(
 }
 
 #[tauri::command]
+async fn jobs_start_selected_downloads(state: State<'_, AppState>, job_ids: Vec<String>, mode: String) -> Result<jobs::SelectedDownloadStartReceipt, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || jobs::start_selected_downloads(&paths, &job_ids, &mode).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn jobs_enqueue_selected_download_batch(
+    state: State<'_, AppState>, urls: Vec<String>, auth_cookie: Option<String>,
+    output_dir: Option<String>, use_browser_cookies: Option<bool>, browser_cookie_source: Option<String>,
+    preset_id: Option<String>, approved_missing_item_ids: Option<Vec<String>>, mode: String,
+) -> Result<jobs::SelectedDownloadSubmissionReceipt, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || jobs::enqueue_selected_download_batch(
+        &paths, urls, auth_cookie, output_dir, use_browser_cookies, browser_cookie_source,
+        preset_id, approved_missing_item_ids.unwrap_or_default(), &mode,
+    ).map_err(|e|e.to_string())).await.map_err(|e|e.to_string())?
+}
+
+#[tauri::command]
+async fn jobs_queued_download_batch_ids(state: State<'_, AppState>, batch_id: String) -> Result<Vec<String>, String> {
+    let paths = state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || jobs::queued_foreground_download_batch_ids(&paths, &batch_id).map_err(|e| e.to_string())).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
 async fn library_download_preflight(
     state: State<'_, AppState>,
     urls: Vec<String>,
@@ -18878,6 +18904,7 @@ pub fn run() {
                     }
                 });
             }
+            jobs::set_runner_safe_mode(safe_mode_enabled);
             if safe_mode_enabled && !cli_agent_headless {
                 let _ = jobs::set_queue_paused(&paths, true);
             }
@@ -19130,6 +19157,9 @@ pub fn run() {
             jobs_enqueue_dummy,
             jobs_enqueue_asr_local,
             jobs_enqueue_download_batch,
+            jobs_start_selected_downloads,
+            jobs_enqueue_selected_download_batch,
+            jobs_queued_download_batch_ids,
             library_download_preflight,
             library_canonical_media_relocate,
             library_canonical_source_replace,

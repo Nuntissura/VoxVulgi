@@ -1,0 +1,34 @@
+{
+  "file_id": "WP-0334-v1",
+  "file_kind": "work_packet",
+  "updated_at": "2026-10-03",
+  "id": "WP-0334",
+  "version": 1,
+  "title": "Selected single or batch start",
+  "status": "IN_PROGRESS",
+  "board": "../TASK_BOARD.md",
+  "refinement": "WP-0334_SELECTED_SINGLE_OR_BATCH_START_v1_REFINEMENT.md",
+  "operator_request": "Prompt Download only this video/single batch or Continue all and place the single/batch at the top of the queue. Download and test https://www.youtube.com/watch?v=3Q61HdKKJeo.",
+  "scope": [
+    "Inline semantic prompt for paused or provider-held single/multi-link submissions: Download only this video/batch, Continue all, Cancel",
+    "Exact canonical queued foreground direct-download selection; durable attempt-bound grants and member priority without rewriting timestamps",
+    "only keeps all other queued starts paused; continue_all explicitly resumes the queue and places selected members first",
+    "Normal budgets, pacing, authentication, storage and MKV pipeline; selected controlled probe preserves five-minute minimum and exclusive canary, never resets provider baseline",
+    "Absolute Safe Mode barrier; explicit Pause all revokes selected permissions; restart preserves paused-rest intent and interrupted original attempt",
+    "Tauri and authenticated actor/operation-ID bridge expose the same product behavior, canonical selection and truthful receipts"
+  ],
+  "files": ["product/engine/src/jobs.rs", "product/engine/src/db.rs", "product/desktop/src/pages/LibraryPage.tsx", "product/desktop/src-tauri/src/lib.rs", "product/desktop/src-tauri/src/agent_control.rs", "product/desktop/src/lib/agentManual.ts", "governance/spec/PRODUCT_SPEC.md", "governance/spec/TECHNICAL_DESIGN.md"],
+  "acceptance": [
+    "Single and multi-link submissions offer the two requested decisions with correct count and rest-paused/resumed wording; Cancel authorizes no execution",
+    "Selection is applied before LIMIT and rechecked at atomic claim; only mode never dispatches unrelated queued jobs, including after selected completion/restart",
+    "continue_all puts selected YouTube members ahead of unrelated YouTube starts while respecting budgets and pacing",
+    "All-or-none validation rejects invalid/nonqueued/nonforeground or changed-attempt selections; dedupe never authorizes unrelated active jobs",
+    "Safe Mode and explicit Pause all stop new selected dispatch; stale grants cannot authorize later retries",
+    "Provider cooldown remains visible and uses only the selected controlled retry without baseline reset or unrelated canary",
+    "Owning tests, retained-version core build and quiet packaged semantic UI/command proof include independent canonical mixed-queue reads",
+    "Requested exact YouTube case reaches verified MKV video/audio/available subtitles or records its concrete external blocker; no false DONE"
+  ],
+  "verification": ["Root coordinates one canonical cargo_cache and one compatible test/build batch", "Engine selection/priority/pause/claim/Safe/restart tests; bridge validation/receipt and frontend decision/manual/semantic tests", "Disposable packaged headless mixed queue: single/batch decisions, receipts, independent SQLite reads, inspected snapshots", "Exact requested video download and ffprobe; WP-0332 retains separate shutdown proof"],
+  "non_goals": ["Offline ISO packaging", "Version bump or changelog edits", "Deleting user media/subscriptions/history", "Native foreground input or arbitrary WebView scripts"],
+  "status_updates": [{"date": "2026-10-03", "state": "IN_PROGRESS", "note": "Primary-source patterns and current code inspected; operator clarified two-choice prompt before implementation."}]
+}
