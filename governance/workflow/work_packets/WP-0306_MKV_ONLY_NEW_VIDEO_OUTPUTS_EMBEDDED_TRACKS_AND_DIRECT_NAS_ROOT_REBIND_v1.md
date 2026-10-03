@@ -1,10 +1,10 @@
 ---
 file_id: WP-0306-v1
 file_kind: work-packet
-updated_at: 2026-08-14
+updated_at: 2026-10-03
 ---
 
-<topic id="contract" status="done" version="v1" wp="WP-0306" updated_at="2026-08-14">
+<topic id="contract" status="in-progress" version="v1" wp="WP-0306" updated_at="2026-10-03">
 
 # Work Packet: WP-0306 — MKV-only new video outputs, embedded tracks, and direct-NAS root rebind
 
@@ -12,7 +12,7 @@ updated_at: 2026-08-14
 
 - ID: WP-0306
 - Owner: agent-wp0306
-- Status: DONE
+- Status: IN_PROGRESS (2026-10-03 selected-audio metadata remediation; August proof retained)
 - Created: 2026-08-09
 - Refinement: `WP-0306_MKV_ONLY_NEW_VIDEO_OUTPUTS_EMBEDDED_TRACKS_AND_DIRECT_NAS_ROOT_REBIND_v1_REFINEMENT.md`
 - Board: `../TASK_BOARD.md#wp-0306`
@@ -44,6 +44,18 @@ Make MKV with embedded selected tracks the non-bypassable final container for ev
 - MKV enforcement and historical MP4 compatibility must not be held back solely because the machine-local `Z:` proof gate is false.
 - The rebind portion must remain explicitly blocked—not guessed or proxied—until the exact target/path identity gate passes.
 - No status may be `DONE` until every new-output path, embedded-track probe, legacy-MP4 compatibility path, root-rebind safety path, adversarial review, UI/app-boundary proof, and build proof required by the refinement passes.
+
+</topic>
+
+<topic id="selected-audio-metadata-remediation" status="in-progress" version="v1" wp="WP-0306" updated_at="2026-10-03">
+
+Exact-case regression: job `997c312e-40b5-4951-8727-b3a3214e2550`, URL `https://www.youtube.com/watch?v=3Q61HdKKJeo`, failed finalization in source `5d6fe66`. Its retained MKV has one Opus audio stream tagged `eng`; authoritative selected-track validation expects `ko`. English and Korean subtitles are embedded correctly. Evidence: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0334/20261003/exact_failed_ffprobe.json` and `live_update_5d6fe66/exact_terminal_canonical.json`.
+
+Remediation scope: publish language/title metadata from the exact selected audio formats in `product/engine/resources/tooling/voxvulgi_archive_policy.py`, preserving selected order and cardinality and refusing ambiguous/mismatched mappings. Handle audio-only metadata publication when there are no subtitles; retain strict engine validation and missing-tag repair semantics. Do not stamp every stream from a top-level/original-language hint, weaken wrong-language rejection, alter historical media, or change runtime dependencies.
+
+Research basis: [yt-dlp 2026.08.19 FFmpegMergerPP](https://github.com/yt-dlp/yt-dlp/blob/2026.08.19/yt_dlp/postprocessor/ffmpeg.py) maps each selected format's audio in `requested_formats` order. The product's embedded archive plugin is installed per attempt by `archive_quality::install_plugin`; this repair ships with the core and needs no offline payload refresh. Reuse that postprocessor and ffprobe stream metadata, with explicit selected/observed count checks.
+
+Proof: owning Python mapping/publication tests including conflicting source-container tags, multiple audio streams, unknown languages and no-subtitle cases; retained strict engine metadata tests; an isolated real MKV publication/probe; retained-version core build; retry the exact original job through the app and independently verify its finalized MKV and canonical terminal state. WP-0334 remains in progress until this exact-case gate passes. The August completion and NAS rebind evidence above remain historical facts.
 
 </topic>
 

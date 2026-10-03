@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-0334
 parent: null
-generation: 10
+generation: 14
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -33,3 +33,7 @@ steps:
 - {id: GP-017, role: any, at: before_verdict, do: require exact selected attempt and unrelated queued state in packaged proof, check: {type: confirm}, source: 'WP0334: queue-only selection must not resume unrelated jobs', state: active}
 - {id: GP-018, role: any, at: before_round, do: require prepolicy attempt and stale candidate priority rechecked at atomic publication and claim, check: {type: confirm}, source: 'WP0334-F01/F02: independently reviewed retry and priority races', state: active}
 - {id: GP-019, role: any, at: before_round, do: require typed and generic selected priority applied before scan LIMIT, check: {type: confirm}, source: 'RED7875be2: Continue all generic fetch returned older before selected', state: active}
+- {id: GP-020, role: any, at: before_round, do: require admitted IDs preserved after hidden runner startup error, check: {type: confirm}, source: 'HIGH: runner failure hid canonical enqueue and selection receipt', state: active}
+- {id: GP-021, role: any, at: before_round, do: require owned process exit code checked when Windows retains exited object, check: {type: confirm}, source: backup helper falsely equated retained OpenProcess handle with live PID, state: active}
+- {id: GP-022, role: any, at: before_round, do: require WMI probe Detached_Process8 and ShowWindow0; forbid unsupported CREATE_NO_WINDOW flag, check: {type: confirm}, source: 'infra: WMI Create returned21 for unsupported CreateFlags134217728', state: active}
+- {id: GP-023, role: any, at: before_round, do: require selected audio mapping and cardinality stamped before strict MKV publication, check: {type: confirm}, source: 'exact video failed: selected ko audio inherited eng container tag', state: active}

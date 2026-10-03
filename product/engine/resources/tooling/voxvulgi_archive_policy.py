@@ -77,15 +77,47 @@ class VoxVulgiArchivePolicyPP(PostProcessor):
 
 
 class VoxVulgiArchiveMetadataPP(FFmpegPostProcessor):
-    """Restore caption labels after remuxing combined MP4 sources into MKV."""
+    """Publish selected stream labels after remuxing source containers into MKV."""
+    @staticmethod
+    def selected_audio_formats(info):
+        downloads = info.get('requested_downloads')
+        if downloads:
+            if len(downloads) != 1:
+                raise PostProcessingError('Archive audio metadata has ambiguous download mapping')
+            selected = downloads[0].get('requested_formats') or [downloads[0]]
+        else:
+            selected = info.get('requested_formats') or [info]
+        if any(not isinstance(f, dict) or not isinstance(f.get('acodec'), str) for f in selected):
+            raise PostProcessingError('Archive audio metadata lacks explicit selected codec mapping')
+        return [f for f in selected if f['acodec'].lower() != 'none']
+
     def run(self, info):
         subtitles = info.get('requested_subtitles') or {}
-        if not subtitles:
-            return [], info
         filename = info['filepath']
         if info['ext'] != 'mkv':
             raise PostProcessingError('Archive metadata requires finalized MKV')
+        audio = self.selected_audio_formats(info)
+        observed = [s for s in self.get_metadata_object(filename)['streams']
+                    if s.get('codec_type') == 'audio']
+        # FFmpegMergerPP maps one audio stream per selected format, in selection order.
+        # A progressive source is therefore safe only when it contains exactly one audio.
+        if len(audio) != len(observed):
+            raise PostProcessingError('Archive audio metadata selected/observed cardinality mismatch')
         options = ['-map', '0', '-c', 'copy']
+        audio_receipt = []
+        for index, selected in enumerate(audio):
+            language = selected.get('language')
+            language = language.strip() if isinstance(language, str) else None
+            track = selected.get('audio_track') or {}
+            title = track.get('display_name') if isinstance(track, dict) else None
+            title = title.strip() if isinstance(title, str) else None
+            if language:
+                options.extend([f'-metadata:s:a:{index}',
+                                'language=' + (ISO639Utils.short2long(language) or language)])
+            if title:
+                options.extend([f'-metadata:s:a:{index}', 'title=' + title])
+            audio_receipt.append({'stream_index': index, 'format_id': selected.get('format_id'),
+                                  'language': language or None, 'title': title or None})
         titles = {t['language']: t['title'] for t in
                   info.get('voxvulgi_archive_policy', {}).get('subtitles', [])}
         for index, (lang, track) in enumerate(subtitles.items()):
@@ -93,6 +125,9 @@ class VoxVulgiArchiveMetadataPP(FFmpegPostProcessor):
             options.extend([f'-metadata:s:s:{index}',
                             'language=' + (ISO639Utils.short2long(lang) or lang),
                             f'-metadata:s:s:{index}', 'title=' + (track.get('name') or lang)])
+        info['voxvulgi_archive_audio_metadata'] = {'schema_version': 1, 'tracks': audio_receipt}
+        if len(options) == 4:
+            return [], info
         temporary = prepend_extension(filename, 'vv-metadata')
         self.run_ffmpeg(filename, temporary, options)
         os.replace(temporary, filename)
