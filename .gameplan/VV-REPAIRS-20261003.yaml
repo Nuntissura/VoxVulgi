@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: batch
 assignment: VV-REPAIRS-20261003
 parent: null
-generation: 19
+generation: 24
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -42,3 +42,7 @@ steps:
 - {id: GP-026, role: any, at: before_round, do: require normalized full executable paths in installer process guard, check: {type: confirm}, source: 'risk: forward-slash installed path differs from process backslash path', state: active}
 - {id: GP-027, role: any, at: before_round, do: verify final candidate destination absent before packaging, check: {type: file, path: offline-installer-runtime/package_candidates_final_9f8a137/candidate_0.1.205_runtime_b9bd5d61388584cb50b2dadf, exists: false}, source: 'fail: prior candidate destination collision requires distinct supported OutputDir', state: retired}
 - {id: GP-028, role: any, at: before_round, do: require canonical writer timeout spelling in live monitor, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0323/20261003/monitor_live_database.py, contains: writer_admission_timeout}, source: 'failure: monitor missed six actual writer_admission_timeout events', state: active}
+- {id: GP-029, role: any, at: before_round, do: verify owned app close reached shutdown before installer update, check: {type: confirm}, source: 'failure: CloseMainWindow returned true while bridge and jobs kept running', state: active}
+- {id: GP-030, role: any, at: before_round, do: require owned lifecycle close targets Tauri Window not Tao auxiliary; compare UTC identity ticks, check: {type: confirm}, source: 'failure: CloseMainWindow destroys Tao auxiliary; PS7 dates parsed as DateTime', state: active}
+- {id: GP-031, role: any, at: before_round, do: require runtime-status fixture has existing db parent and no app.sqlite, check: {type: confirm}, source: 'failure: AppDatabase canonicalizes db parent; missing-parent fixture failed before observation', state: retired}
+- {id: GP-032, role: any, at: before_round, do: require database status fixture existing directory and absent SQLite files, check: {type: file, path: product/desktop/src-tauri/src/agent_control.rs, contains: 'std::fs::create_dir_all(paths.db_dir()).unwrap();'}, source: 'failure: runtime identity canonicalizes existing db parent; absent test directory OS3', state: active}

@@ -1,6 +1,6 @@
 # VoxVulgi â€” Task Board
 
-Last updated: 2026-09-30
+Last updated: 2026-10-03
 
 This is the single source of truth for work status.
 
@@ -19,7 +19,13 @@ This is the single source of truth for work status.
 
 Rows are historical, append-only per WP; do not rewrite old Notes text. This file is not machine-parsed (verified 2026-09-23: no script in `governance/scripts`, `offline-installer-runtime/scripts`, or `product/**/*.{ts,rs,ps1}` reads `TASK_BOARD.md`), so row format may stay free-form prose.
 
-## Current open-work snapshot — 2026-09-30
+## Current open-work snapshot — 2026-10-03
+
+Fresh board-row count: 330 packets: 251 DONE (including four qualified historical DONE labels), 32 NEEDS_VALIDATION, 14 IN_PROGRESS, 9 BLOCKED, 12 BACKLOG, 1 REVIEW, and 11 SUPERSEDED. WP-0169 and WP-0327 now have accepted proof; WP-0332 retains the active-runner shutdown/update proof gap. Earlier packet intent and remaining acceptance are preserved.
+
+The installed e318 candidate still reproduces database admission failures: the focused normal-download observer recorded 71 failure events in 810 seconds, so WP-0323 remains IN_PROGRESS. The full offline ISO remains unpublished because exact clean-profile offline acceptance has not passed; Docker does not provide that Windows desktop proof surface.
+
+## Historical reconciliation snapshot — 2026-09-30
 
 WP-0326 reconciled every one of the 64 previously open rows, including all 54 below WP-0300. Historical Notes remain append-only; the dated 2026-09-30 update and packet header describe current state. No underlying feature was newly proven DONE or discarded.
 
@@ -373,3 +379,4 @@ Current remaining work is stated in every reconciled packet. Stale MOSTLY DONE a
 | WP-0329 | Runtime readiness and model restoration | IN_PROGRESS | Codex | Operator-approved Torch/Demucs probe remediation and required model restoration via governed runtime paths. Agent implementing; packet/refinement WP-0329; WP-0262/0239 acceptance preserved. |
 | WP-0330 | Installed proof batch | IN_PROGRESS | Codex | Inventory and exercise remaining NEEDS_VALIDATION acceptance in compatible batches; preserve original contracts. WP: work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1.json. |
 | WP-0331 | Repair build and installer delivery | IN_PROGRESS | Codex | Integrate repairs, bundle focused Cargo checks, reuse canonical cache, commit/push, build retained 0.1.205 and prove exact installer. Full ISO governed solely by WP-0316/GUIDE. WP: work_packets/WP-0331_REPAIR_BUILD_AND_INSTALLER_DELIVERY_v1.json. |
+| WP-0332 | Owned desktop close and shutdown | IN_PROGRESS | Codex | Verified owned Tauri window closed, but desktop process/bridge/background work persisted beyond120s; only exact session-owned app/children were subsequently stopped. Distinguish event dispatch from shutdown entry and repair proven cause; preserve runner join/database drain. Contract: `work_packets/WP-0332_OWNED_DESKTOP_CLOSE_AND_SHUTDOWN_v1.json`. |

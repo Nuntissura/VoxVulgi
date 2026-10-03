@@ -8,3 +8,6 @@
 .options-root-actions { display: flex; flex-direction: column; align-items: stretch; gap: 6px; }
 .options-root-actions button { white-space: normal; overflow-wrap: anywhere; }
 .options-root-free-space { margin-top: 6px; font-family: inherit; }
+.options-page [data-setting-id="video-archiver.subscription-export-dir"] .v { min-width: 0; word-break: normal; }
+.options-page [data-setting-id="video-archiver.subscription-export-dir"] .v:not(.options-path-value) { overflow-wrap: break-word; }
+.options-page [data-setting-id="video-archiver.subscription-export-dir"] p.options-path-value { max-width: 100%; word-break: normal; }

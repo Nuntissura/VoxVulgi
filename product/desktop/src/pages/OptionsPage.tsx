@@ -3459,7 +3459,7 @@ export function OptionsPage() {
                 Export now
               </button>
             </div>
-            {subscriptionExportMessage ? <p role="status">{subscriptionExportMessage}</p> : null}
+            {subscriptionExportMessage ? <p className="options-path-value" role="status">{subscriptionExportMessage}</p> : null}
           </div>
         ) : null}
       </section>

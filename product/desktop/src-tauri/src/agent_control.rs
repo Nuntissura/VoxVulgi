@@ -154,6 +154,15 @@ fn reopen_receipt(original_id: &str, row: jobs::JobRow) -> Value {
 
 fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, String> {
     match command {
+        "database.runtime_status" => {
+            // Observe admission and terminal receipts without opening SQLite or reserving a lane.
+            let database = db::AppDatabase::for_paths(paths).map_err(|e|e.to_string())?;
+            Ok(redact_diagnostics_value(json!({
+                "snapshot": database.snapshot(), "wal_health": database.wal_health(),
+                "scope": "in_memory_runtime_receipts_and_read_only_file_metadata",
+                "phase_semantics": "connection_use includes SQL and caller work after open; connection_close appears immediately before connection drop; terminal receipts contain its completed duration; zero on an active operation is an initial marker or a submillisecond close"
+            })))
+        }
         "subscriptions.failed_downloads" => jobs::failed_subscription_downloads(paths,
             request["since_ms"].as_i64().unwrap_or(0), request["until_ms"].as_i64().unwrap_or_else(now_epoch_ms_i64),
             request["after_id"].as_str().unwrap_or(""), request["limit"].as_u64().unwrap_or(200) as usize).map_err(|e|e.to_string()),
@@ -297,7 +306,7 @@ fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, St
 }
 
 fn is_read(command: &str) -> bool {
-    matches!(command, "jobs.list" | "jobs.inspect" | "jobs.logs" | "jobs.overview" | "jobs.activity" | "downloads.presets" | "subscriptions.failed_downloads" | "operation.get")
+    matches!(command, "database.runtime_status" | "jobs.list" | "jobs.inspect" | "jobs.logs" | "jobs.overview" | "jobs.activity" | "downloads.presets" | "subscriptions.failed_downloads" | "operation.get")
 }
 
 pub(super) fn handle(body: &str) -> (&'static str, String) {
@@ -406,6 +415,27 @@ mod tests {
         assert!(validate_input(&json!({"actor_id":"test","command":"jobs.list","limit":201}),descriptor).is_err());
         assert!(validate_input(&json!({"actor_id":"test","command":"jobs.list","sql":"DELETE"}),descriptor).is_err());
         assert!(validate_input(&json!({"actor_id":"test","command":"jobs.list","limit":25}),descriptor).is_ok());
+    }
+    #[test] fn database_runtime_status_is_read_only_and_refuses_sql_input() {
+        let c = catalog();
+        let descriptor = c["commands"].as_array().unwrap().iter().find(|v|v["name"]=="database.runtime_status").unwrap();
+        assert!(is_read("database.runtime_status"));
+        assert_eq!(descriptor["read_only"], true);
+        assert!(validate_input(&json!({"actor_id":"test","command":"database.runtime_status"}),descriptor).is_ok());
+        assert!(validate_input(&json!({"actor_id":"test","command":"database.runtime_status","sql":"PRAGMA wal_checkpoint"}),descriptor).is_err());
+    }
+    #[test] fn database_runtime_status_observes_without_creating_database_or_admission() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(directory.path().join("runtime_without_database"));
+        // Runtime identity canonicalizes the existing database directory, even before a file exists.
+        std::fs::create_dir_all(paths.db_dir()).unwrap();
+        let result = execute(&paths, "database.runtime_status", &json!({})).unwrap();
+        assert_eq!(result["snapshot"]["active_readers"], 0);
+        assert_eq!(result["snapshot"]["writer_active"], false);
+        assert!(result["snapshot"]["active_operations"].as_array().unwrap().is_empty());
+        assert!(result["snapshot"]["recent_receipts"].as_array().unwrap().is_empty());
+        assert_eq!(std::fs::read_dir(paths.db_dir()).unwrap().count(), 0,
+            "status must not create SQLite, WAL or SHM files");
     }
     #[test] fn missing_token_never_reaches_dispatch() {
         let (status, _) = handle(r#"{"command":"jobs.cancel","actor_id":"test"}"#);

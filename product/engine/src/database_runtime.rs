@@ -766,6 +766,7 @@ pub struct DatabaseWriteContext {
     permit: Option<WriterPermit>,
     initial_total_changes: u64,
     read_meter: ReadMeter,
+    connection_use_started: Instant,
 }
 
 impl Deref for DatabaseWriteContext {
@@ -1092,6 +1093,9 @@ impl ReadMeter {
 
 impl Drop for DatabaseWriteContext {
     fn drop(&mut self) {
+        if let Some(permit) = self.permit.as_ref() {
+            permit.phase("connection_use", self.connection_use_started.elapsed());
+        }
         if let (Some(connection), Some(permit)) = (self.connection.as_ref(), self.permit.as_ref()) {
             let row_count = connection
                 .total_changes()
@@ -1105,7 +1109,14 @@ impl Drop for DatabaseWriteContext {
                     .record_file_bytes_read(permit.operation_id, bytes);
             }
         }
+        if let Some(permit) = self.permit.as_ref() {
+            permit.phase("connection_close", Duration::ZERO);
+        }
+        let close_started = Instant::now();
         self.connection.take();
+        if let Some(permit) = self.permit.as_ref() {
+            permit.phase("connection_close", close_started.elapsed());
+        }
         self.permit.take();
     }
 }
@@ -1114,6 +1125,7 @@ pub struct DatabaseReadContext {
     connection: Option<Connection>,
     permit: Option<ReaderPermit>,
     read_meter: ReadMeter,
+    connection_use_started: Instant,
 }
 
 impl DatabaseReadContext {
@@ -1149,6 +1161,7 @@ impl DerefMut for DatabaseReadContext {
 
 impl Drop for DatabaseReadContext {
     fn drop(&mut self) {
+        self.record_phase("connection_use", self.connection_use_started.elapsed());
         if let (Some(_), Some(permit), Some(bytes)) = (
             self.connection.as_ref(),
             self.permit.as_ref(),
@@ -1158,7 +1171,10 @@ impl Drop for DatabaseReadContext {
                 .runtime
                 .record_file_bytes_read(permit.operation_id, bytes);
         }
+        self.record_phase("connection_close", Duration::ZERO);
+        let close_started = Instant::now();
         self.connection.take();
+        self.record_phase("connection_close", close_started.elapsed());
         self.permit.take();
     }
 }
@@ -1223,6 +1239,7 @@ impl AppDatabase {
                     permit: Some(permit),
                     initial_total_changes,
                     read_meter,
+                    connection_use_started: Instant::now(),
                 })
             }
             Err(error) => {
@@ -1253,6 +1270,7 @@ impl AppDatabase {
                     connection: Some(connection),
                     permit: Some(permit),
                     read_meter,
+                    connection_use_started: Instant::now(),
                 })
             }
             Err(error) => {
@@ -2104,6 +2122,11 @@ mod tests {
             .find(|receipt| receipt.operation == "context_read")
             .expect("read receipt");
         assert_eq!(read.outcome, "completed_read_context");
+        for receipt in [write, read] {
+            assert!(receipt.phase_ms.contains_key("connection_use"));
+            assert!(receipt.phase_ms.contains_key("connection_close"));
+            assert_eq!(receipt.phase_ms.len(), 3);
+        }
     }
 
     #[test]

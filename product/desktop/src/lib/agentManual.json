@@ -3,6 +3,23 @@
   "title": "VoxVulgi user and agent manual",
   "commands": [
     {
+      "name": "database.runtime_status",
+      "description": "Read bounded in-memory database admission state and terminal operation receipts, plus read-only WAL file sizes. Opens no SQLite connection and takes no database admission slot. connection_use includes SQL and caller work; connection_close appears immediately before connection drop; terminal receipts contain its completed duration. A zero value on an active operation is the initial marker or a submillisecond completed close.",
+      "read_only": true,
+      "effect": "read_only",
+      "input": {},
+      "input_schema": {
+        "type": "object",
+        "required": ["bridge_token", "actor_id", "command"],
+        "properties": {
+          "bridge_token": {"type": "string"},
+          "actor_id": {"type": "string", "minLength": 1, "maxLength": 80},
+          "command": {"const": "database.runtime_status"}
+        },
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "jobs.list",
       "description": "Read a page of the canonical job store. Continue paging; visible rows are not the whole queue.",
       "read_only": true,
