@@ -1,9 +1,11 @@
 //! Disposable non-cfg(test) AppDatabase connection-lifetime probe.
 //! Usage: --root <new-absolute-directory> [--seconds 20] [--database-copy <schema59-or60-backup>] [--workload meta|job_insert] [--reader-interval-ms 0..1000] [--writer-interval-ms 0..1000] [--reader-count 1..16] [--writer-count 1..4] [--connection-policy baseline|no_close_checkpoint|no_close_checkpoint_full|no_close_checkpoint_full_no_auto_checkpoint]
-//! No live backup, keeper connection, injected lock, or admission delay.
+//! Baseline uses no live backup, keeper connection, injected lock, or admission delay.
 //! Opt-in maintenance scenario: --maintenance-interval-ms 500 --reader-pin-ms 5000.
 //! This deliberately pins an isolated WAL reader; it is not baseline causal evidence.
 //! --maintenance-reopen-owner 1 opts into a fresh owner before every checkpoint.
+//! --maintenance-recovery-retries 0..3 permits only delayed BUSY_RECOVERY preparation retries.
+//! --maintenance-keeper 1 retains an idle mapped disposable connection through both joins.
 use rusqlite::{config::DbConfig, Connection, OpenFlags, TransactionBehavior};
 use serde::Serialize;
 use serde_json::json;
@@ -158,7 +160,7 @@ fn reject_protected(path: &Path) -> ProbeResult<()> {
     Ok(())
 }
 
-fn parse() -> ProbeResult<(PathBuf, u64, Option<PathBuf>, Workload, u64, u64, usize, usize, ConnectionPolicy, u64, u64, bool)> {
+fn parse() -> ProbeResult<(PathBuf, u64, Option<PathBuf>, Workload, u64, u64, usize, usize, ConnectionPolicy, u64, u64, bool, u32, bool)> {
     let mut root = None;
     let mut seconds = 20;
     let mut copy = None;
@@ -171,6 +173,9 @@ fn parse() -> ProbeResult<(PathBuf, u64, Option<PathBuf>, Workload, u64, u64, us
     let mut maintenance_interval_ms: u64 = 0;
     let mut reader_pin_ms: u64 = 0;
     let mut reopen_owner = false;
+    let mut recovery_retries: u32 = 0;
+    let mut recovery_retries_requested = false;
+    let mut keeper_enabled = false;
     let mut args = std::env::args_os().skip(1);
     while let Some(argument) = args.next() {
         let value = args.next().ok_or("Every argument requires a value")?;
@@ -184,6 +189,14 @@ fn parse() -> ProbeResult<(PathBuf, u64, Option<PathBuf>, Workload, u64, u64, us
             Some("--maintenance-reopen-owner") => reopen_owner = match value.to_str() {
                 Some("0") => false, Some("1") => true,
                 _ => return Err("maintenance-reopen-owner must be0 or1".into()),
+            },
+            Some("--maintenance-recovery-retries") => {
+                recovery_retries_requested = true;
+                recovery_retries = value.to_str().ok_or("Invalid recovery retries")?.parse()?;
+            },
+            Some("--maintenance-keeper") => keeper_enabled = match value.to_str() {
+                Some("0") => false, Some("1") => true,
+                _ => return Err("maintenance-keeper must be0 or1".into()),
             },
             Some("--reader-interval-ms") => reader_interval_ms = value.to_str().ok_or("Invalid reader interval")?.parse()?,
             Some("--writer-interval-ms") => writer_interval_ms = value.to_str().ok_or("Invalid writer interval")?.parse()?,
@@ -204,6 +217,12 @@ fn parse() -> ProbeResult<(PathBuf, u64, Option<PathBuf>, Workload, u64, u64, us
     }
     if maintenance_interval_ms == 0 && reader_pin_ms != 0 { return Err("Reader pin requires maintenance".into()); }
     if maintenance_interval_ms == 0 && reopen_owner { return Err("Owner reopen requires maintenance".into()); }
+    if recovery_retries > 3 || (recovery_retries_requested && (maintenance_interval_ms == 0 || !reopen_owner)) {
+        return Err("Recovery retries must be0..3 and require maintenance plus owner reopen".into());
+    }
+    if keeper_enabled && (maintenance_interval_ms == 0 || !reopen_owner) {
+        return Err("Keeper requires maintenance plus owner reopen".into());
+    }
     let root = root.ok_or("--root is required")?;
     if !root.is_absolute() || root.exists() { return Err("root must be an absent absolute directory".into()); }
     let parent = root.parent().ok_or("Root parent missing")?.canonicalize()?;
@@ -217,9 +236,52 @@ fn parse() -> ProbeResult<(PathBuf, u64, Option<PathBuf>, Workload, u64, u64, us
         if ![59, CURRENT_PROBE_SCHEMA].contains(&standalone_schema(&source)?) {
             return Err("database-copy must have schema59 or60; only the disposable destination may migrate".into());
         }
-        return Ok((root, seconds, Some(source), workload, reader_interval_ms, writer_interval_ms, reader_count, writer_count, policy, maintenance_interval_ms, reader_pin_ms, reopen_owner));
+        return Ok((root, seconds, Some(source), workload, reader_interval_ms, writer_interval_ms, reader_count, writer_count, policy, maintenance_interval_ms, reader_pin_ms, reopen_owner, recovery_retries, keeper_enabled));
     }
-    Ok((root, seconds, None, workload, reader_interval_ms, writer_interval_ms, reader_count, writer_count, policy, maintenance_interval_ms, reader_pin_ms, reopen_owner))
+    Ok((root, seconds, None, workload, reader_interval_ms, writer_interval_ms, reader_count, writer_count, policy, maintenance_interval_ms, reader_pin_ms, reopen_owner, recovery_retries, keeper_enabled))
+}
+
+fn idle_owner_verified(state: &serde_json::Value) -> bool {
+    state["is_autocommit"].as_bool() == Some(true) && state["main_txn_state"].as_i64() == Some(0)
+        && state["busy_statement_count"].as_u64() == Some(0)
+        && state["statement_count_overflow"].as_bool() == Some(false)
+}
+
+fn prepare_keeper(path: &Path, initial_identity: &serde_json::Value) -> ProbeResult<(Connection, serde_json::Value)> {
+    // Fixed staged helper opens only the already guarded disposable database, without CREATE.
+    let (connection, owner_identity) = reopen_maintenance_owner(path)?;
+    let mut stages = StageRecorder { receipts: owner_identity["stage_receipts"].as_array().cloned().unwrap_or_default() };
+    stages.run("keeper_fixed_identity_verify", || {
+        if owner_identity["sqlite_version"] != initial_identity["sqlite_version"]
+            || owner_identity["sqlite_source_id"] != initial_identity["sqlite_source_id"] {
+            return Err("Keeper identity differs".into());
+        }
+        Ok(())
+    })?;
+    stage!(stages, "keeper_query_only_set", connection.pragma_update(None, "query_only", "ON"));
+    let query_only: i64 = stage!(stages, "keeper_query_only_get", connection.pragma_query_value(None, "query_only", |row|row.get(0)));
+    let busy_timeout: i64 = stage!(stages, "keeper_busy_timeout_get", connection.pragma_query_value(None, "busy_timeout", |row|row.get(0)));
+    stages.run("keeper_settings_verify", || if query_only == 1 && busy_timeout == 0 { Ok(()) }
+        else { Err("Keeper settings differ".into()) })?;
+    stage!(stages, "keeper_begin", connection.execute_batch("BEGIN"));
+    let _: String = stage!(stages, "keeper_meta_snapshot_read", connection.query_row(
+        "SELECT value FROM meta WHERE key=?1", [KEY], |row| row.get(0)));
+    let mapped_state = native_owner_state(&connection);
+    stages.run("keeper_read_snapshot_verify", || {
+        if mapped_state["main_txn_state"].as_i64() != Some(1)
+            || mapped_state["is_autocommit"].as_bool() != Some(false) {
+            return Err("Keeper mapping read transaction not observed".into());
+        }
+        Ok(())
+    })?;
+    stage!(stages, "keeper_rollback", connection.execute_batch("ROLLBACK"));
+    let idle_state = native_owner_state(&connection);
+    stages.run("keeper_idle_verify", || if idle_owner_verified(&idle_state) { Ok(()) }
+        else { Err("Keeper retained active SQLite state".into()) })?;
+    Ok((connection, json!({"owner_identity":owner_identity,"mapped_read_state":mapped_state,
+        "query_only":query_only,"busy_timeout_ms":busy_timeout,
+        "idle_state":idle_state,"stage_receipts":stages.receipts,"prepared_before_threads":true,
+        "limits":"Idle connection mapping is a harness counterfactual, not a proven live cause or production solution."})))
 }
 
 fn reopen_maintenance_owner(path: &Path) -> ProbeResult<(Connection, serde_json::Value)> {
@@ -368,7 +430,7 @@ fn fresh_checkpoint_diagnostic(path: &Path, requested_vfs: Option<&str>) -> serd
 
 fn maintenance_worker(connection: Connection, pin: Connection, identity: serde_json::Value,
     barrier: Arc<Barrier>, stop: Arc<AtomicBool>, path: PathBuf, page_size: u64,
-    interval_ms: u64, pin_ms: u64, reopen_owner: bool) -> serde_json::Value {
+    interval_ms: u64, pin_ms: u64, reopen_owner: bool, recovery_retries: u32) -> serde_json::Value {
     let wal_path = PathBuf::from(format!("{}-wal", path.display()));
     let mut pin = Some(pin); // RAII rollback/close also releases on unwinding.
     let mut connection = Some(connection);
@@ -384,6 +446,7 @@ fn maintenance_worker(connection: Connection, pin: Connection, identity: serde_j
     let mut before_final_checkpoint = None;
     let mut stop_observed = false;
     let mut error_exit = false;
+    let mut recovery_retries_used = 0_u32;
     barrier.wait();
     let started = Instant::now();
     loop {
@@ -397,12 +460,13 @@ fn maintenance_worker(connection: Connection, pin: Connection, identity: serde_j
         }
         let mut reopen_receipt = None;
         if reopen_owner {
-            let owned = connection.take().expect("owner present before reopen");
-            let prior_state = native_owner_state(&owned);
+            let owned = connection.take();
+            let had_previous_owner = owned.is_some();
+            let prior_state = owned.as_ref().map(native_owner_state);
             let close_started = Instant::now();
-            let close_error = match owned.close() {
-                Ok(()) => None,
-                Err((owned,error)) => { drop(owned); Some(error.to_string()) },
+            let close_error = match owned.map(Connection::close) {
+                Some(Ok(())) | None => None,
+                Some(Err((owned,error))) => { drop(owned); Some(error.to_string()) },
             };
             let close_ms = close_started.elapsed().as_millis();
             let open_started = Instant::now();
@@ -417,22 +481,38 @@ fn maintenance_worker(connection: Connection, pin: Connection, identity: serde_j
                         drop(fresh);
                         if receipts.len() < 128 { receipts.push(json!({"final_after_stop":final_attempt,
                             "owner_reopen_error":"Fixed native identity differs from initial owner",
+                            "had_previous_owner":had_previous_owner,
                             "identity":reopened_identity,"close_ms":close_ms,
                             "open_ms":open_started.elapsed().as_millis()})); } else { overflow += 1; }
                         break;
                     }
                     connection = Some(fresh);
                     reopen_receipt = Some(json!({"prior_state":prior_state,"close_ms":close_ms,
-                        "close_error":close_error,"open_ms":open_started.elapsed().as_millis(),"identity":reopened_identity}));
+                        "close_error":close_error,"had_previous_owner":had_previous_owner,
+                        "recovery_retries_used":recovery_retries_used,
+                        "open_ms":open_started.elapsed().as_millis(),"identity":reopened_identity}));
                 }
                 Err(error) => {
-                    errors += 1;
-                    error_exit = true;
+                    let stage_failure = error.downcast_ref::<StageFailure>().map(|failure| &failure.0);
+                    let busy_recovery = stage_failure.is_some_and(|failure|
+                        failure["sqlite_error_codes"]["extended"].as_i64() == Some(261)
+                        && failure["sqlite_error_codes"]["primary"].as_i64() == Some(5));
+                    let retry = close_error.is_none() && busy_recovery && recovery_retries_used < recovery_retries;
+                    if retry { recovery_retries_used += 1; }
+                    else { errors += 1; error_exit = true; }
                     if receipts.len() < 128 { receipts.push(json!({"final_after_stop":final_attempt,
                         "at_ms":started.elapsed().as_millis(),"owner_reopen_error":error.to_string(),
-                        "owner_reopen_stage_failure":error.downcast_ref::<StageFailure>().map(|failure|&failure.0),
+                        "owner_reopen_stage_failure":stage_failure,"checkpoint_skipped":true,
+                        "retry_scheduled":retry,"recovery_retries_used":recovery_retries_used,
+                        "recovery_retry_budget":recovery_retries,"had_previous_owner":had_previous_owner,
+                        "incomplete_owner_returned":false,"retry_interval_ms":if retry { Some(interval_ms) } else { None },
                         "prior_state":prior_state,"close_ms":close_ms,"close_error":close_error,
                         "open_ms":open_started.elapsed().as_millis()})); } else { overflow += 1; }
+                    if retry {
+                        // Full explicit cadence even after stop; no hot-loop final retry.
+                        std::thread::sleep(Duration::from_millis(interval_ms));
+                        continue;
+                    }
                     break;
                 }
             }
@@ -499,6 +579,7 @@ fn maintenance_worker(connection: Connection, pin: Connection, identity: serde_j
         "fresh_diagnostics_do_not_override_original_verdict":true,
         "fresh_diagnostic_order":"default PASSIVE then exact registered VFS PASSIVE; the first can change checkpoint state seen by the second",
         "reopen_owner":reopen_owner,
+        "recovery_retry_budget":recovery_retries,"recovery_retries_used":recovery_retries_used,
         "owner_lifetime":"Opt-in closes previous owner immediately before each checkpoint; native close may change last-connection state. Default retains one owner.",
         "elapsed_ms":started.elapsed().as_millis(),"stop_observed":stop_observed,"error_exit":error_exit,
         "limits":"WAL samples are not an absolute growth bound. PASSIVE has no native fsync wall-clock deadline. Reader pin is an intentional isolated starvation scenario, not a claimed live cause."})
@@ -646,7 +727,7 @@ fn worker(database: db::AppDatabase, barrier: Arc<Barrier>, deadline: Instant, i
 }
 
 fn main() -> ProbeResult<()> {
-    let (root, seconds, source, workload, reader_interval_ms, writer_interval_ms, reader_count, writer_count, policy, maintenance_interval_ms, reader_pin_ms, reopen_owner) = parse()?;
+    let (root, seconds, source, workload, reader_interval_ms, writer_interval_ms, reader_count, writer_count, policy, maintenance_interval_ms, reader_pin_ms, reopen_owner, recovery_retries, keeper_enabled) = parse()?;
     std::fs::create_dir(&root)?;
     let root = root.canonicalize()?;
     reject_protected(&root)?;
@@ -701,6 +782,9 @@ fn main() -> ProbeResult<()> {
     drop(setup);
     let database = db::AppDatabase::for_paths(&paths)?;
     let prepared_maintenance = if maintenance_interval_ms != 0 { Some(prepare_maintenance(&database_path)?) } else { None };
+    let keeper = if keeper_enabled {
+        Some(prepare_keeper(&database_path, &prepared_maintenance.as_ref().expect("maintenance required").2)?)
+    } else { None };
     let barrier = Arc::new(Barrier::new(reader_count+writer_count+1+usize::from(prepared_maintenance.is_some())));
     let maintenance_stop = Arc::new(AtomicBool::new(false));
     let started = Instant::now();
@@ -710,7 +794,7 @@ fn main() -> ProbeResult<()> {
         let stop = Arc::clone(&maintenance_stop);
         let path = database_path.clone();
         std::thread::spawn(move || maintenance_worker(connection, pin, identity, barrier, stop,
-            path, page_size, maintenance_interval_ms, reader_pin_ms, reopen_owner))
+            path, page_size, maintenance_interval_ms, reader_pin_ms, reopen_owner, recovery_retries))
     });
     let workers = (0..reader_count+writer_count).map(|index| {
         let database = database.clone();
@@ -718,7 +802,7 @@ fn main() -> ProbeResult<()> {
         let job_params = Arc::clone(&job_params);
         std::thread::spawn(move || worker(database, barrier, deadline, index, writer_count, workload, job_params, if index < writer_count { writer_interval_ms } else { reader_interval_ms }, policy))
     }).collect::<Vec<_>>();
-    println!("{}", json!({"event":"started","pid":std::process::id(),"root":root,"seconds":seconds,"writer_count":writer_count,"reader_count":reader_count,"keeper":false,"workload":format!("{workload:?}"),"connection_policy":format!("{policy:?}"),"reader_interval_ms":reader_interval_ms,"writer_interval_ms":writer_interval_ms,"source_job_count":job_count,"page_count":page_count,"page_size":page_size,"job_params_bytes":job_params.len(),"destination_schema_before_migration":destination_schema_before_migration,"destination_schema_after_migration":destination_schema_after_migration}));
+    println!("{}", json!({"event":"started","pid":std::process::id(),"root":root,"seconds":seconds,"writer_count":writer_count,"reader_count":reader_count,"keeper":keeper_enabled,"workload":format!("{workload:?}"),"connection_policy":format!("{policy:?}"),"reader_interval_ms":reader_interval_ms,"writer_interval_ms":writer_interval_ms,"source_job_count":job_count,"page_count":page_count,"page_size":page_size,"job_params_bytes":job_params.len(),"destination_schema_before_migration":destination_schema_before_migration,"destination_schema_after_migration":destination_schema_after_migration}));
     barrier.wait();
     let mut reports = Vec::new();
     let mut panics = 0;
@@ -737,6 +821,25 @@ fn main() -> ProbeResult<()> {
         Err(_) => { panics += 1; json!({"panic":true}) }
     });
     let maintenance_join_ms = maintenance_join_started.elapsed().as_millis();
+    let maintenance_join_finished_at_ms = started.elapsed().as_millis();
+    // Keeper outlives both owned joins, then closes before canonical read and runtime drain.
+    let keeper_close_requested_at_ms = started.elapsed().as_millis();
+    let keeper_report = keeper.map(|(connection, identity)| {
+        let before_close = native_owner_state(&connection);
+        let idle = idle_owner_verified(&before_close);
+        let close_started = Instant::now();
+        let close_error = match connection.close() {
+            Ok(()) => None,
+            Err((owned,error)) => { drop(owned); Some(error.to_string()) },
+        };
+        json!({"identity":identity,"before_close":before_close,"idle_verified":idle,
+            "close_error":close_error,"close_ms":close_started.elapsed().as_millis(),
+            "close_requested_at_ms":keeper_close_requested_at_ms,
+            "maintenance_join_finished_at_ms":maintenance_join_finished_at_ms,
+            "closed_after_workers_and_maintenance_join":true,"closed_before_canonical_read_and_database_drain":true})
+    });
+    let keeper_proven = keeper_report.as_ref().map(|report|
+        report["idle_verified"].as_bool() == Some(true) && report["close_error"].is_null()).unwrap_or(true);
     let maintenance_proven = maintenance_report.as_ref().map(|report|
         report["errors"].as_u64() == Some(0) && report["receipt_overflow"].as_u64() == Some(0)
         && report["partial_during_pin"].as_bool() == Some(true)
@@ -745,6 +848,22 @@ fn main() -> ProbeResult<()> {
         && report["owner_close_error"].is_null()
         && report["pin_release_error"].is_null() && report["stop_observed"].as_bool() == Some(true)
     ).unwrap_or(true);
+    let post_keeper_close_diagnostics = if keeper_enabled
+        && keeper_report.as_ref().is_some_and(|report| report["close_error"].is_null())
+        && maintenance_report.as_ref().is_some_and(|report|
+            report["final_checkpoint_complete"].as_bool() == Some(false))
+    {
+        let diagnostic_started_at_ms = started.elapsed().as_millis();
+        let default = fresh_checkpoint_diagnostic(&database_path, None);
+        let counted = fresh_checkpoint_diagnostic(&database_path, Some("voxvulgi_read_counting"));
+        json!({"started_at_ms":diagnostic_started_at_ms,
+            "maintenance_join_finished_at_ms":maintenance_join_finished_at_ms,
+            "keeper_close_requested_at_ms":keeper_close_requested_at_ms,
+            "workers_and_maintenance_joined":true,"keeper_checked_close_succeeded":true,
+            "before_canonical_read_and_database_drain":true,
+            "results":[default,counted],"original_verdict_not_overridden":true,
+            "limits":"Sequential diagnostics: the default-VFS checkpoint and close may change the state observed by the subsequent exact registered-VFS checkpoint. These results do not alter the original final checkpoint or maintenance verdict; SQL transaction NONE does not establish absence of a WAL read lock."})
+    } else { serde_json::Value::Null };
     let verification = database.read(db::DatabaseOperationContext::new("probe_verify", "disposable_counter_read"), |connection| {
         if policy != ConnectionPolicy::Baseline { apply_policy(connection, policy)?; }
         if workload == Workload::Meta {
@@ -761,7 +880,7 @@ fn main() -> ProbeResult<()> {
     let canonical_counter_matches = panics == 0 && writer_succeeded.is_some() && writer_succeeded == counter;
     let maintenance_nonempty_commits = maintenance_report.is_none()
         || (writer_succeeded.unwrap_or(0) > 0 && counter.unwrap_or(0) > 0);
-    let maintenance_proven = maintenance_proven && maintenance_nonempty_commits;
+    let maintenance_proven = maintenance_proven && maintenance_nonempty_commits && keeper_proven;
     let drain_started = Instant::now();
     let drain = database.shutdown_and_drain(db::SHUTDOWN_DRAIN_TIMEOUT);
     let snapshot = database.snapshot();
@@ -774,6 +893,9 @@ fn main() -> ProbeResult<()> {
     summary["maintenance"] = json!({"enabled":maintenance_interval_ms != 0,
         "interval_ms":maintenance_interval_ms,"reader_pin_ms":reader_pin_ms,
         "reopen_owner":reopen_owner,
+        "recovery_retry_budget":recovery_retries,
+        "keeper_enabled":keeper_enabled,"keeper_proven":keeper_proven,"keeper_report":keeper_report,
+        "post_keeper_close_diagnostics":post_keeper_close_diagnostics,
         "stop_requested_at_ms":maintenance_stop_requested_at_ms,"join_ms":maintenance_join_ms,
         "proven":maintenance_proven,"report":maintenance_report,
         "nonempty_committed_workload":maintenance_nonempty_commits,

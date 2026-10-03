@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: batch
 assignment: VV-REPAIRS-20261003
 parent: null
-generation: 40
+generation: 43
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -61,3 +61,6 @@ steps:
 - {id: GP-045, role: any, at: on_resume, do: require board status column verified before recount, check: {type: confirm}, source: 'mistake: split column2 is WP title; status is column3', state: active}
 - {id: GP-046, role: any, at: before_round, do: require fresh owner-reopen locking-protocol RED before new counterfactual, check: {type: confirm}, source: 'failure: guarded owner reopen11070ms protocol error;7workerfailures;18canonicalcommits', state: active}
 - {id: GP-047, role: any, at: before_round, do: require synchronous-set BUSY_RECOVERY stage retained before maintenance retry policy, check: {type: confirm}, source: 'failure: nativeopen313ms succeeds; synchronous_set8ms returns primary5 extended261', state: active}
+- {id: GP-048, role: any, at: before_round, do: require canonical retry exhaustion and worker RED before mapped-keeper counterfactual, check: {type: confirm}, source: 'failure: four261prep errors exhaust3retries;3writeradmissionfails;52canonicalcommits', state: active}
+- {id: GP-049, role: any, at: before_round, do: require canonical keeper final partial RED before post-close diagnostic, check: {type: confirm}, source: 'failure:81canonicalwrites0workererrors butfinal518of1736 whileidlekeeperalive', state: active}
+- {id: GP-050, role: any, at: before_round, do: require original final partial and post-keeper-close complete checkpoint before native lock attribution, check: {type: confirm}, source: 'failure:92canonicalwrites0workerfails; finalpartial butfreshCP848of848 afterkeeperclose', state: active}

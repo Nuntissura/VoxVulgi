@@ -9,13 +9,13 @@ updated_at: 2026-10-03
 ## Metadata
 
 - ID: WP-0323
-- Owner: — (next session)
+- Owner: Codex
 - Status: IN_PROGRESS
 - Created: 2026-09-24
 - Board: `../TASK_BOARD.md`
 - Related: WP-0312 (SQLite runtime boundary), WP-0322 (actionable errors; the export retry is a symptom workaround)
 
-## Why NEEDS_VALIDATION
+## Why NEEDS_VALIDATION (2026-09-24 record)
 
 Operator direction 2026-09-24: VoxVulgi cargo builds slow down the higher-priority Handshake project, so this session may run its reproduction test but no further builds or cargo tests; the operator will use the app and record findings for the next session. The reproduction below did **not** confirm the leading hypothesis, so no fix was implemented — implementing an unproven cause would be speculation. The next session must validate the remaining hypotheses against live evidence before changing code.
 

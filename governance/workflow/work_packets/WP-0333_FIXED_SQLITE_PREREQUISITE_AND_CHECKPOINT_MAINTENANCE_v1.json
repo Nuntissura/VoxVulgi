@@ -364,6 +364,373 @@
       "production_policy_changed": false,
       "production_promotion_authorized": false,
       "live_closure_proven": false
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Fresh recovery-retry-configured harness run GREEN16canonicalcommits/0workerfailures/10768ms, partial/recovery/final257of257 and clean owner close/stop. Budget3 used0: retry branch remains unproven; no retry causation or production repair claim. Canonical counterpart is the next pending test.32focused tests reused; production policy unchanged/live closure unproven.",
+      "fresh_recovery_retry": {
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/fresh_recovery_retry_summary.json",
+        "source_summary": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_fresh_retry_v1\\churn_summary.json",
+        "summary_sha256": "8C47FE90ED01FD047704E41EF1000DDB2BD0E8078C81C59E417F04F0D2E6D80F",
+        "exact_copy_verified": true,
+        "frozen_example": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/fixed_sqlite_recovery_retry_source.rs",
+        "example_sha256": "EA3812991E8570904922698A7F1DBC1D6A619D30368B6EEA0219830ACEF64B50",
+        "executable_sha256": "A9A19DBAE837518066A1A4421CDAE9E38B7B445AFCE92B918C3E3C904473A9CA",
+        "executable_path": "product/desktop/build_target/cargo_cache/debug/examples/wp0323_connection_churn.exe",
+        "verdict": "GREEN_FRESH_HARNESS_ONLY",
+        "worker_failures": 0,
+        "reconciled_commits": 16,
+        "canonical_counter_matches": true,
+        "elapsed_ms": 10768,
+        "partial_during_pin": true,
+        "recovered_after_pin": true,
+        "final_checkpoint": {
+          "log_frames": 257,
+          "checkpointed_frames": 257,
+          "busy": 0
+        },
+        "final_checkpoint_complete": true,
+        "owner_close_error": null,
+        "stop_observed": true,
+        "error_exit": false,
+        "recovery_retry_budget": 3,
+        "recovery_retries_used": 0,
+        "retry_branch_proven": false,
+        "retry_causation_claim": false
+      },
+      "negative_guards": [
+        {
+          "case": "budget4",
+          "log": "product/desktop/build_target/logs/wp0333_retry_invalid_budget.log",
+          "log_sha256": "3967C3F1B3168DF6DBC2DFD666A276661C8B133EE303A7423EAF6939B2445AF7",
+          "exact_error": "Recovery retries must be0..3 and require maintenance plus owner reopen",
+          "fixture_root": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_retry_invalid_budget_v1",
+          "fixture_exists_after": false,
+          "before_absence_basis": "Root observed absent before command; independently absent after command"
+        },
+        {
+          "case": "budget3_without_owner_reopen",
+          "log": "product/desktop/build_target/logs/wp0333_retry_invalid_mode.log",
+          "log_sha256": "3967C3F1B3168DF6DBC2DFD666A276661C8B133EE303A7423EAF6939B2445AF7",
+          "exact_error": "Recovery retries must be0..3 and require maintenance plus owner reopen",
+          "fixture_root": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_retry_invalid_mode_v1",
+          "fixture_exists_after": false,
+          "before_absence_basis": "Root observed absent before command; independently absent after command"
+        }
+      ],
+      "focused_tests_passed_reused": 32,
+      "canonical_counterpart_status": "PENDING",
+      "production_policy_changed": false,
+      "production_fix_proven": false,
+      "live_closure_proven": false
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Canonical owner-reopen/retry counterpart RED:3actual writer_admission_timeout failures/52reconciledcommits/33419ms. Budget3 exhausted; synchronous_set primary5/extended261 despite completed native open206ms. Partial/recovery true cannot replace unattempted original final checkpoint. Fresh harness GREEN did not generalize.32focused tests reused; no production policy, permission or live-fix claim.",
+      "canonical_reopen_retry": {
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/canonical_reopen_retry_summary.json",
+        "source_summary": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_canonical_reopen_retry_v1\\churn_summary.json",
+        "summary_sha256": "A7217CD62496533DCD2FCC9E192D1C059B454837FCB86E2D2F41E2B06E69903B",
+        "exact_copy_verified": true,
+        "frozen_example": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/fixed_sqlite_recovery_retry_source.rs",
+        "example_sha256": "EA3812991E8570904922698A7F1DBC1D6A619D30368B6EEA0219830ACEF64B50",
+        "executable_sha256": "A9A19DBAE837518066A1A4421CDAE9E38B7B445AFCE92B918C3E3C904473A9CA",
+        "executable_path": "product/desktop/build_target/cargo_cache/debug/examples/wp0323_connection_churn.exe",
+        "verdict": "RED",
+        "worker_failures": 3,
+        "failures_by_kind": {
+          "writer_admission_timeout": 3
+        },
+        "reconciled_commits": 52,
+        "canonical_counter_matches": true,
+        "elapsed_ms": 33419,
+        "partial_during_pin": true,
+        "recovered_after_pin": true,
+        "recovery_retry_budget": 3,
+        "recovery_retries_used": 3,
+        "retry_exhaustion_at_ms": 28988,
+        "retry_scheduled": false,
+        "maintenance_preparation_failure": {
+          "completed_stages": [
+            {
+              "completed": true,
+              "elapsed_ms": 206,
+              "stage": "native_connection_open"
+            },
+            {
+              "completed": true,
+              "elapsed_ms": 0,
+              "stage": "busy_timeout"
+            },
+            {
+              "completed": true,
+              "elapsed_ms": 0,
+              "stage": "no_checkpoint_on_close_set"
+            }
+          ],
+          "error_class": "stage_failed_no_SQL_or_secret_text",
+          "failed_stage": "synchronous_set",
+          "failed_stage_elapsed_ms": 7,
+          "sqlite_error_codes": {
+            "classification": "DatabaseBusy",
+            "extended": 261,
+            "primary": 5
+          }
+        },
+        "sqlite_extended_code_name": "SQLITE_BUSY_RECOVERY",
+        "original_final_checkpoint_attempted": false,
+        "stop_observed": false,
+        "error_exit": true,
+        "maintenance_errors": 1,
+        "final_checkpoint_complete": false,
+        "max_sampled_wal_bytes": 4165352,
+        "database_drain_ms": 2,
+        "database_drain_error": null
+      },
+      "focused_tests_passed_reused": 32,
+      "canonical_counterpart_passed": false,
+      "production_policy_changed": false,
+      "production_permission_granted": false,
+      "production_fix_proven": false,
+      "live_closure_proven": false
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Fresh mapped-keeper harness GREEN30canonicalcommits/0workerfailures/11686ms; partial/recovery/final484of484, keeper mapped READ then rollback idle NONE and clean close after both joins before canonical read/drain. Retry0 does not prove retry branch. Canonical counterpart not passed;32focused tests reused, production policy unchanged/live closure unproven.",
+      "fresh_mapped_keeper": {
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/fresh_mapped_keeper_summary.json",
+        "source_summary": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_fresh_keeper_v1\\churn_summary.json",
+        "summary_sha256": "1B6A5C08AEBCCC261F577C0C4F09C56351665B61E3CF5625B1F11DA31FD7BB13",
+        "exact_copy_verified": true,
+        "frozen_example": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/fixed_sqlite_mapped_keeper_source.rs",
+        "example_sha256": "4B71E31361FAFB76D86135A272AAD785BFD7F9BC5B0A60EF5EF329F271FD413E",
+        "executable_sha256": "B4D1FE3FBACC1420CDA32C59EB6EA488C0B701A7EB5168DE50248539F9482A1A",
+        "executable_path": "product/desktop/build_target/cargo_cache/debug/examples/wp0323_connection_churn.exe",
+        "verdict": "GREEN_FRESH_HARNESS_ONLY",
+        "worker_failures": 0,
+        "reconciled_commits": 30,
+        "canonical_counter_matches": true,
+        "elapsed_ms": 11686,
+        "partial_during_pin": true,
+        "recovered_after_pin": true,
+        "final_checkpoint": {
+          "log_frames": 484,
+          "checkpointed_frames": 484,
+          "busy": 0
+        },
+        "final_checkpoint_complete": true,
+        "keeper_mapped_read_state": {
+          "actual_vfs": "win32",
+          "busy_statement_count": 0,
+          "is_autocommit": false,
+          "main_txn_state": 1,
+          "statement_count": 0,
+          "statement_count_overflow": false,
+          "vfs_name_rc": 0
+        },
+        "keeper_after_rollback_idle_state": {
+          "actual_vfs": "win32",
+          "busy_statement_count": 0,
+          "is_autocommit": true,
+          "main_txn_state": 0,
+          "statement_count": 0,
+          "statement_count_overflow": false,
+          "vfs_name_rc": 0
+        },
+        "keeper_close_error": null,
+        "keeper_closed_after_workers_and_maintenance_join": true,
+        "keeper_closed_before_canonical_read_and_database_drain": true,
+        "owner_close_error": null,
+        "stop_observed": true,
+        "database_drain_ms": 1,
+        "recovery_retry_budget": 3,
+        "recovery_retries_used": 0,
+        "retry_branch_proven": false,
+        "causation_claim": false
+      },
+      "negative_guards": [
+        {
+          "case": "value2",
+          "log": "product/desktop/build_target/logs/wp0333_keeper_invalid_value.log",
+          "log_sha256": "DF2BFF5BB181D41E13963840EE2B4757D869857FC1CAD4969735581FC7623B0A",
+          "exact_error": "maintenance-keeper must be0 or1",
+          "fixture_root": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_keeper_invalid_value_v1",
+          "fixture_exists_after": false,
+          "before_absence_basis": "Root observed absent before command; independently absent after command"
+        },
+        {
+          "case": "enabled1_without_maintenance",
+          "log": "product/desktop/build_target/logs/wp0333_keeper_invalid_mode.log",
+          "log_sha256": "F3EFFE6EEFE5ECDF381833C87FFCEDCF1E4C89350661833DAACC5A3CABFE431D",
+          "exact_error": "Keeper requires maintenance plus owner reopen",
+          "fixture_root": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_keeper_invalid_mode_v1",
+          "fixture_exists_after": false,
+          "before_absence_basis": "Root observed absent before command; independently absent after command"
+        }
+      ],
+      "focused_tests_passed_reused": 32,
+      "canonical_counterpart_passed": false,
+      "production_policy_changed": false,
+      "production_fix_proven": false,
+      "live_closure_proven": false
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Canonical mapped-keeper counterpart RED for incomplete maintenance despite81reconciledcommits/0workerfailures/31206ms. Original final and both fresh diagnostic probes before keeper close remain518of1736,busy0,pinfalse. SQL NONE/idle owner state is not native WAL-lock proof.32focused tests reused; no final maintenance proof, production permission/policy/fix or live closure.",
+      "canonical_mapped_keeper": {
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/canonical_mapped_keeper_summary.json",
+        "source_summary": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_canonical_keeper_v1\\churn_summary.json",
+        "summary_sha256": "021806A87E26489A4A95EC50ECB7557BDE369E94370966176507D1A37C9CF14B",
+        "exact_copy_verified": true,
+        "frozen_example": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/fixed_sqlite_mapped_keeper_source.rs",
+        "example_sha256": "4B71E31361FAFB76D86135A272AAD785BFD7F9BC5B0A60EF5EF329F271FD413E",
+        "executable_sha256": "B4D1FE3FBACC1420CDA32C59EB6EA488C0B701A7EB5168DE50248539F9482A1A",
+        "executable_path": "product/desktop/build_target/cargo_cache/debug/examples/wp0323_connection_churn.exe",
+        "verdict": "RED_INCOMPLETE_FINAL_MAINTENANCE",
+        "worker_failures": 0,
+        "reconciled_commits": 81,
+        "canonical_counter_matches": true,
+        "elapsed_ms": 31206,
+        "partial_during_pin": true,
+        "recovered_after_pin": true,
+        "recovery_retries_used": 0,
+        "retry_branch_proven": false,
+        "final_checkpoint": {
+          "log_frames": 1736,
+          "checkpointed_frames": 518,
+          "busy": 0,
+          "pin_active": false
+        },
+        "final_checkpoint_complete": false,
+        "fresh_diagnostics_before_keeper_close": [
+          {
+            "requested_vfs": null,
+            "checkpoint": {
+              "busy": 0,
+              "checkpointed_frames": 518,
+              "log_frames": 1736
+            }
+          },
+          {
+            "requested_vfs": "voxvulgi_read_counting",
+            "checkpoint": {
+              "busy": 0,
+              "checkpointed_frames": 518,
+              "log_frames": 1736
+            }
+          }
+        ],
+        "keeper_idle_verified": true,
+        "keeper_close_ms": 2,
+        "keeper_close_error": null,
+        "keeper_closed_after_workers_and_maintenance_join": true,
+        "keeper_closed_before_canonical_read_and_database_drain": true,
+        "database_drain_ms": 3,
+        "max_sampled_wal_bytes": 7152352,
+        "sql_none_proves_native_wal_lock_absence": false,
+        "later_diagnostics_override_original_verdict": false
+      },
+      "focused_tests_passed_reused": 32,
+      "canonical_counterpart_passed": false,
+      "production_permission_granted": false,
+      "production_policy_changed": false,
+      "production_fix_proven": false,
+      "live_closure_proven": false
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Canonical post-keeper-close diagnostic remains RED at original maintenance gate:92canonicalwrites/0workerfailures, original final66of848 and both pre-close fresh probes66of848. After keeper close sequential default848of848/326ms then registered848of848/18ms succeeded; these do not override original failure or prove native cause/production repair.32focused tests reused; all8criteria preserved.",
+      "canonical_post_keeper_close": {
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/canonical_post_keeper_close_summary.json",
+        "source_summary": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_canonical_post_keeper_close_v1\\churn_summary.json",
+        "summary_sha256": "CC3A495CEBDE68BFD93CD38D419B193D53A688917F6B1BBCFCD8DCE7B69CAAA7",
+        "exact_copy_verified": true,
+        "frozen_example": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/fixed_sqlite_post_keeper_close_source.rs",
+        "example_sha256": "D607E2D1E138EE163A60771D04203B3620023B1EAAD1064C80702E7F152F310D",
+        "frozen_executable": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/fixed_sqlite_post_keeper_close.exe",
+        "executable_sha256": "96F08D67B8D2D5572BBB9CFA462E030A84F5B0DC7FC7F4A4450012559286A7C5",
+        "verdict": "RED_ORIGINAL_FINAL_MAINTENANCE",
+        "worker_failures": 0,
+        "reconciled_commits": 92,
+        "canonical_counter_matches": true,
+        "elapsed_ms": 31377,
+        "partial_during_pin": true,
+        "recovered_after_pin": true,
+        "recovery_retries_used": 0,
+        "original_final_checkpoint": {
+          "log_frames": 848,
+          "checkpointed_frames": 66,
+          "busy": 0,
+          "pin_active": false,
+          "physical_wal_frames": 1106,
+          "wal_bytes": 4556752
+        },
+        "final_checkpoint_complete": false,
+        "pre_keeper_close_diagnostics": [
+          {
+            "requested_vfs": null,
+            "checkpoint": {
+              "busy": 0,
+              "checkpointed_frames": 66,
+              "log_frames": 848
+            },
+            "checkpoint_ms": 0,
+            "close_ms": 0,
+            "elapsed_ms": 6
+          },
+          {
+            "requested_vfs": "voxvulgi_read_counting",
+            "checkpoint": {
+              "busy": 0,
+              "checkpointed_frames": 66,
+              "log_frames": 848
+            },
+            "checkpoint_ms": 0,
+            "close_ms": 0,
+            "elapsed_ms": 5
+          }
+        ],
+        "post_keeper_close_diagnostics": [
+          {
+            "requested_vfs": null,
+            "checkpoint": {
+              "busy": 0,
+              "checkpointed_frames": 848,
+              "log_frames": 848
+            },
+            "checkpoint_ms": 326,
+            "close_ms": 0,
+            "elapsed_ms": 345
+          },
+          {
+            "requested_vfs": "voxvulgi_read_counting",
+            "checkpoint": {
+              "busy": 0,
+              "checkpointed_frames": 848,
+              "log_frames": 848
+            },
+            "checkpoint_ms": 18,
+            "close_ms": 0,
+            "elapsed_ms": 39
+          }
+        ],
+        "post_close_diagnostics_sequential": true,
+        "sequence_limits": "Sequential diagnostics: the default-VFS checkpoint and close may change the state observed by the subsequent exact registered-VFS checkpoint. These results do not alter the original final checkpoint or maintenance verdict; SQL transaction NONE does not establish absence of a WAL read lock.",
+        "original_verdict_not_overridden": true,
+        "keeper_close_error": null,
+        "keeper_close_ms": 0,
+        "keeper_closed_after_workers_and_maintenance_join": true,
+        "post_close_probes_before_canonical_read_and_database_drain": true,
+        "database_drain_ms": 3,
+        "max_sampled_wal_bytes": 4556752,
+        "native_cause_proven": false
+      },
+      "focused_tests_passed_reused": 32,
+      "canonical_counterpart_passed": false,
+      "production_permission_granted": false,
+      "production_policy_changed": false,
+      "production_fix_proven": false,
+      "live_closure_proven": false
     }
   ]
 }
