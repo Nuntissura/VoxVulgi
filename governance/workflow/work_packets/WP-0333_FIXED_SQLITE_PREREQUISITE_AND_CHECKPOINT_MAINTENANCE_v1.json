@@ -140,6 +140,77 @@
         "Fresh then canonical-density same-policy counterpart with7worker native filenames, balanced captured lock receipts, reconciled canonical writes, original final checkpoint, keeper close and database drain",
         "Independent source review before compile; production policy remains unselected"
       ]
+    },
+    "native_close_residual_probe_2026_10_03": {
+      "recorded_before_implementation": true,
+      "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/canonical_plain_local_summary.json",
+      "observed_writer": {
+        "operation_id": 159,
+        "request_id": "churn_writer_1-12",
+        "admitted_at_ms": 1791019631640,
+        "finished_at_ms": 1791019639867,
+        "execution_ms": 8227,
+        "phase_ms": {
+          "open": 1474,
+          "connection_use": 2573,
+          "connection_close": 4178
+        },
+        "xClose_calls": 2,
+        "xClose_total_ms": 4177.8876,
+        "xClose_max_ms": 4177.8587,
+        "xSyncWal_ms": 680.7644,
+        "xShmUnmap_ms": 0.0429,
+        "xShmLock_ms": 0.063
+      },
+      "admission_failures": [
+        {
+          "operation_id": 172,
+          "request_id": "churn_writer_0-12",
+          "enqueued_at_ms": 1791019630328,
+          "finished_at_ms": 1791019635338,
+          "elapsed_ms": 5010,
+          "overlap": "Previous admitted writer150 until1791019631640, then159 through timeout; no exact callback-window attribution."
+        },
+        {
+          "operation_id": 173,
+          "request_id": "churn_writer_2-13",
+          "enqueued_at_ms": 1791019631740,
+          "finished_at_ms": 1791019636748,
+          "elapsed_ms": 5008,
+          "overlap": "Entire queue window inside admitted writer159 lifetime; callbacks have no timestamps to clip phase overlap."
+        }
+      ],
+      "sources_checked": [
+        {
+          "source": "Pinned libsqlite3-sys0.38.2 SQLite3.53.2 sqlite3/sqlite3.c",
+          "anchors": [
+            "winClose51492-51516",
+            "winClose success/error return51538-51546"
+          ],
+          "observed": "Native xClose performs optional winUnmapfile then osCloseHandle with at most two100ms retry sleeps. Configured retry sleeps alone cannot account for4.178seconds; current aggregate does not distinguish file kind, OS CloseHandle versus optional unmap, or physical cause."
+        }
+      ],
+      "reuse": "Existing default-disabled bounded TLS open-flags file-kind table and single-delegate VFS timings; exact guarded plain-local fixture and original proof gates.",
+      "selected": "Add diagnostic-only default-off xClose MAIN_DB/WAL/explicit unknown timing categorization using the same single delegate measurement, plus close result/error coverage. Record effective mmap_size readback during setup outside measured operation SQL. No production policy or connection lifetime solution selected.",
+      "constraints": [
+        "Delegate each native close exactly once; category and aggregate durations overlap, not partition.",
+        "Preserve existing file header/layout, fixed bounded TLS data, default-disabled behavior, no callback allocations/logging/runtime admission calls.",
+        "Capture file kind before successful close removes tracking; unknown/overflow/absent callback coverage cannot prove classification.",
+        "Keep identical guarded canonical input, plain-local all-owner spelling, FULL/no-close-checkpoint/auto0/500ms maintenance,4read/3write counts,100ms cadence,5second FIFO bound and atomicity.",
+        "Original maintenance/worker/canonical/shutdown verdict cannot be overridden by diagnostics."
+      ],
+      "rejected": [
+        "Higher admission timeout or dropping close from admitted lifetime without reviewed bounds/ownership design.",
+        "Inferring native CloseHandle or mapping root cause from aggregate xClose duration.",
+        "Selecting production pooling/keeper/policy before measured file-kind counterpart."
+      ],
+      "validation_plan": [
+        "Independent source review of single delegation, close error classification/default-disabled/unknown coverage and owning focused helper tests.",
+        "Same guarded canonical-density actual-AppDatabase counterpart with changed attribution inputs; reconcile every acknowledged write and retain original error/final checkpoint/drain gates."
+      ],
+      "production_cause_proven": false,
+      "production_policy_selected": false,
+      "phase2_blocked": true
     }
   },
   "recorded_evidence": {
@@ -1034,6 +1105,78 @@
       "owning_test_count": 22,
       "canonical_counterpart_passed": false,
       "phase2_status": "BLOCKED_BY_CANONICAL_ADMISSION_FAILURES",
+      "production_policy_selected": false,
+      "production_policy_changed": false,
+      "production_fix_proven": false,
+      "live_closure_proven": false
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Independent exact plain-local residual review: writer159 admitted8227ms open1474/use2573/close4178 overlaps both recorded admission failures172/173; native xClose2calls total4177.8876ms/max4177.8587ms dominates close, WALsync680.7644ms, wrapped SHM callbacks negligible. Pinned winClose configured200ms maximum retry sleep alone does not explain measured stall. Minimum next diagnostic-only file-kind close probe basis recorded before implementation; no native cause/production policy claim. Eight acceptance criteria and phase2 admission blocker preserved.",
+      "production_policy_changed": false,
+      "production_fix_proven": false,
+      "phase2_status": "BLOCKED_BY_CANONICAL_ADMISSION_FAILURES"
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Current close-kind canonical counterpart GREEN101independently matchedwrites/0workerfailures/final2161of2161/443ms, pin recovery/stop/drain1ms, mmap0/allclosesknownOK. Owning2+runtime21 checks GREEN. Earlier plain-local2timeoutRED remains observed variance, not erased or explained. Phase2 awaits independent peer review and reviewed spec/exception amendment; no production fix/live closure.",
+      "canonical_close_kind": {
+        "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/canonical_close_kind_summary.json",
+        "source_summary": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_wp0333_canonical_close_kind_v1\\churn_summary.json",
+        "summary_sha256": "91509FC80485044C17DAF2063C0550A5A0B70EE58EC9B6217B44A351EA9F8F58",
+        "exact_copy_verified": true,
+        "frozen_artifacts": {
+          "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/close_kind_runtime.rs": "3B64A9821CD4FAAA411F5F1C2FF21B01297542205494949C8F0EC05D16001EE5",
+          "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/close_kind_example.rs": "5895D288417D0A49A1CCED6ADE4B9E8627F9DC3C44579F557DF8F896CB1783FB",
+          "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/close_kind_example.exe": "548D8440A2BCE7513BE59FF28FD5996EA673BE3F0F6FEF115385DE1C5839A2FC"
+        },
+        "verdict": "GREEN_CURRENT_DISPOSABLE_CANONICAL_COUNTERPART",
+        "reconciled_commits": 101,
+        "worker_failures": 0,
+        "canonical_counter_matches": true,
+        "elapsed_ms": 31352,
+        "original_final_checkpoint": {
+          "log_frames": 2161,
+          "checkpointed_frames": 2161,
+          "checkpoint_ms": 443,
+          "busy": 0,
+          "pin_active": false
+        },
+        "final_checkpoint_complete": true,
+        "partial_during_pin": true,
+        "recovered_after_pin": true,
+        "stop_observed": true,
+        "database_drain_ms": 1,
+        "max_sampled_wal_bytes": 8903352,
+        "mmap_size_bytes_setup": 0,
+        "mmap_size_bytes_each_worker": 0,
+        "all_captured_close_kinds_known": true,
+        "all_captured_close_results_ok": true,
+        "independent_canonical_reread": {
+          "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261003/close_kind_independent_read.json",
+          "sha256": "D5C0AF00B4952EA9EE15F741063C923FBE4DDA04BB390D1BC4C39E429658F211",
+          "persisted_committed_fixture_jobs": 101,
+          "worker_acknowledged_writes": 101,
+          "schema_version": 60,
+          "acknowledgements_reconcile": true
+        }
+      },
+      "owning_test_results": [
+        {
+          "log": "product/desktop/build_target/logs/wp0333_close_kind_owning_tests.log",
+          "sha256": "6DFD54B34112E5247F35BCE7B60A483436E6B65922FEF995345DFC8D29C9EE3A",
+          "passed": 2
+        },
+        {
+          "log": "product/desktop/build_target/logs/wp0333_close_kind_runtime_regressions.log",
+          "sha256": "6CF0EC2AFA7CED52F733290352C81B92E75E38DBC8D7E0C459F6FD6EB8B70DC5",
+          "passed": 21
+        }
+      ],
+      "owning_test_count": 23,
+      "previous_plain_local_two_timeout_red_preserved": true,
+      "variance_cause_proven": false,
+      "phase2_status": "AWAITING_INDEPENDENT_PEER_REVIEW_AND_SPEC_EXCEPTION_AMENDMENT",
       "production_policy_selected": false,
       "production_policy_changed": false,
       "production_fix_proven": false,

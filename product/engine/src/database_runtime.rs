@@ -808,7 +808,7 @@ thread_local! {
 // Disposable example probes only; no allocation, logging or runtime mutex inside SQLite callbacks.
 #[derive(Clone, Copy, Default)]
 struct VfsTiming { calls: u64, total_ns: u64, max_ns: u64 }
-const VFS_TIMING_NAMES: [&str; 9] = ["xClose", "xShmUnmap", "xShmLock", "xSync", "xDelete", "xSyncMainDb", "xSyncWal", "xSyncUnknown", "fileKindOverflow"];
+const VFS_TIMING_NAMES: [&str; 14] = ["xClose", "xShmUnmap", "xShmLock", "xSync", "xDelete", "xSyncMainDb", "xSyncWal", "xSyncUnknown", "fileKindOverflow", "xCloseMainDb", "xCloseWal", "xCloseUnknown", "xCloseOk", "xCloseError"];
 #[derive(Clone, Copy, Default)]
 struct VfsProbeFile { pointer: usize, open_flags: std::os::raw::c_int }
 #[derive(Clone, Copy, Default, Serialize)]
@@ -887,8 +887,8 @@ fn capture_shm_result(file: *mut rusqlite::ffi::sqlite3_file, offset: i32, count
 }
 thread_local! {
     static VFS_PROBE_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static VFS_PROBE_TIMINGS: std::cell::Cell<[VfsTiming; 9]> = const {
-        std::cell::Cell::new([VfsTiming { calls: 0, total_ns: 0, max_ns: 0 }; 9])
+    static VFS_PROBE_TIMINGS: std::cell::Cell<[VfsTiming; 14]> = const {
+        std::cell::Cell::new([VfsTiming { calls: 0, total_ns: 0, max_ns: 0 }; 14])
     };
     static VFS_PROBE_FILES: std::cell::Cell<[VfsProbeFile; 64]> = const {
         std::cell::Cell::new([VfsProbeFile { pointer: 0, open_flags: 0 }; 64])
@@ -950,6 +950,19 @@ fn timed_vfs_call(index: usize, call: impl FnOnce() -> std::os::raw::c_int) -> s
     result
 }
 
+fn timed_vfs_close(file: *mut rusqlite::ffi::sqlite3_file, delegate_present: bool, call: impl FnOnce() -> std::os::raw::c_int) -> std::os::raw::c_int {
+    if !VFS_PROBE_ENABLED.try_with(std::cell::Cell::get).unwrap_or(false) { return call(); }
+    // Capture flags before the delegate frees the real file. All three metrics use one sample.
+    let kind = if delegate_present { probe_sync_kind(file) + 4 } else { 11 };
+    let started = Instant::now();
+    let result = call();
+    let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+    record_vfs_timing(0, elapsed);
+    record_vfs_timing(kind, elapsed);
+    record_vfs_timing(if result == rusqlite::ffi::SQLITE_OK { 12 } else { 13 }, elapsed);
+    result
+}
+
 fn thread_sqlite_bytes_read() -> u64 {
     THREAD_SQLITE_BYTES_READ.with(std::cell::Cell::get)
 }
@@ -992,7 +1005,15 @@ macro_rules! forward_io {
 }
 
 unsafe extern "C" fn counting_close(file: *mut rusqlite::ffi::sqlite3_file) -> std::os::raw::c_int {
-    let result = timed_vfs_call(0, || forward_io!(file, xClose, rusqlite::ffi::SQLITE_OK));
+    let result = if VFS_PROBE_ENABLED.try_with(std::cell::Cell::get).unwrap_or(false) {
+        let real = read_counting_real_file(file);
+        let methods = (*real).pMethods;
+        let close = if methods.is_null() { None } else { (*methods).xClose };
+        timed_vfs_close(file, close.is_some(), || match close {
+            Some(function) => function(real),
+            None => rusqlite::ffi::SQLITE_OK,
+        })
+    } else { forward_io!(file, xClose, rusqlite::ffi::SQLITE_OK) };
     if result == rusqlite::ffi::SQLITE_OK { capture_shm_close(file); }
     else { with_shm_capture(|state|state.unknown = state.unknown.saturating_add(1)); }
     probe_file_close(file);
@@ -1461,15 +1482,16 @@ impl AppDatabase {
     /// Begin an example-only per-thread VFS probe. Never nest probes on one thread.
     #[doc(hidden)]
     pub fn begin_vfs_timing_probe() {
-        VFS_PROBE_TIMINGS.with(|metrics| metrics.set([VfsTiming::default(); 9]));
+        VFS_PROBE_TIMINGS.with(|metrics| metrics.set([VfsTiming::default(); 14]));
         VFS_PROBE_FILES.with(|files|files.set([VfsProbeFile::default(); 64]));
         VFS_PROBE_ENABLED.with(|enabled| enabled.set(true));
     }
 
     /// (callback, calls, accumulated nanoseconds, maximum single-call nanoseconds).
     /// Metrics can overlap through nested forwarding; they are not a duration partition.
+    /// Close result metrics are returned codes; a missing delegate is always an unknown close kind.
     #[doc(hidden)]
-    pub fn finish_vfs_timing_probe() -> [(&'static str, u64, u64, u64); 9] {
+    pub fn finish_vfs_timing_probe() -> [(&'static str, u64, u64, u64); 14] {
         VFS_PROBE_ENABLED.with(|enabled| enabled.set(false));
         let metrics = VFS_PROBE_TIMINGS.with(std::cell::Cell::get);
         std::array::from_fn(|i| (VFS_TIMING_NAMES[i], metrics[i].calls, metrics[i].total_ns, metrics[i].max_ns))
@@ -2532,6 +2554,41 @@ mod tests {
     }
 
     #[test]
+    fn vfs_close_probe_classifies_single_delegate_results_and_resets() {
+        AppDatabase::finish_vfs_timing_probe();
+        let calls = std::cell::Cell::new(0);
+        let close = |result| { calls.set(calls.get() + 1); result };
+        let main = 101_usize as *mut rusqlite::ffi::sqlite3_file;
+        let wal = 102_usize as *mut rusqlite::ffi::sqlite3_file;
+        let unknown = 103_usize as *mut rusqlite::ffi::sqlite3_file;
+        assert_eq!(timed_vfs_close(main, true, || close(rusqlite::ffi::SQLITE_IOERR)), rusqlite::ffi::SQLITE_IOERR);
+        assert_eq!(calls.get(), 1);
+        assert!(AppDatabase::finish_vfs_timing_probe().iter().all(|(_, count, _, _)| *count == 0));
+        AppDatabase::begin_vfs_timing_probe();
+        probe_file_open(main, rusqlite::ffi::SQLITE_OPEN_MAIN_DB);
+        probe_file_open(wal, rusqlite::ffi::SQLITE_OPEN_WAL);
+        assert_eq!(timed_vfs_close(main, true, || close(rusqlite::ffi::SQLITE_OK)), rusqlite::ffi::SQLITE_OK);
+        probe_file_close(main);
+        assert_eq!(timed_vfs_close(wal, true, || close(rusqlite::ffi::SQLITE_IOERR)), rusqlite::ffi::SQLITE_IOERR);
+        probe_file_close(wal);
+        timed_vfs_close(unknown, true, || close(rusqlite::ffi::SQLITE_OK));
+        probe_file_open(main, rusqlite::ffi::SQLITE_OPEN_MAIN_DB);
+        timed_vfs_close(main, false, || close(rusqlite::ffi::SQLITE_OK));
+        probe_file_close(main);
+        let metrics = AppDatabase::finish_vfs_timing_probe();
+        assert_eq!(calls.get(), 5, "call must run exactly once per close");
+        assert_eq!([metrics[9].1, metrics[10].1, metrics[11].1], [1, 1, 2], "missing native close cannot prove known kind");
+        assert_eq!([metrics[12].1, metrics[13].1], [3, 1]);
+        assert_eq!(metrics[0].1, metrics[9].1 + metrics[10].1 + metrics[11].1);
+        assert_eq!(metrics[0].2, metrics[9].2 + metrics[10].2 + metrics[11].2);
+        assert_eq!(metrics[0].1, metrics[12].1 + metrics[13].1);
+        assert_eq!(metrics[0].2, metrics[12].2 + metrics[13].2);
+        assert_eq!(metrics[0].3, metrics[9].3.max(metrics[10].3).max(metrics[11].3));
+        AppDatabase::begin_vfs_timing_probe();
+        assert!(AppDatabase::finish_vfs_timing_probe().iter().all(|(_, count, total, max)| *count == 0 && *total == 0 && *max == 0));
+    }
+
+    #[test]
     fn vfs_probe_records_actual_callbacks_and_resets_between_operations() {
         let _serial = serial_test_guard();
         let (_directory, _paths, database) = fixture();
@@ -2542,6 +2599,12 @@ mod tests {
         let metrics = AppDatabase::finish_vfs_timing_probe();
         assert_eq!(metrics[0].0, "xClose");
         assert!(metrics[0].1 > 0, "actual close must be observed");
+        assert!(metrics[9].1 > 0, "actual main DB close must be classified");
+        assert_eq!(metrics[11].1, 0, "actual fixture closes must have known kinds/delegates");
+        assert_eq!(metrics[13].1, 0, "actual fixture closes must succeed");
+        assert_eq!(metrics[0].1, metrics[9].1 + metrics[10].1 + metrics[11].1);
+        assert_eq!(metrics[0].2, metrics[9].2 + metrics[10].2 + metrics[11].2);
+        assert_eq!(metrics[0].1, metrics[12].1 + metrics[13].1);
         assert!(metrics.iter().all(|(_, _, total, max)| total >= max));
         AppDatabase::begin_vfs_timing_probe();
         {

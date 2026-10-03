@@ -138,10 +138,20 @@ struct WorkerReport {
     first_failures: Vec<serde_json::Value>,
     policy_observations: Vec<serde_json::Value>,
     first_native_filename: Option<NativeFilenameObservation>,
+    first_mmap_size_bytes: Option<i64>,
     lock_summary: WorkerLockSummary,
     vfs_timings: Vec<serde_json::Value>,
     slow_vfs_operations: Vec<serde_json::Value>,
     vfs_file_kind_proven: bool,
+}
+
+impl WorkerReport {
+    fn observe_mmap_size(&mut self, connection: &Connection) -> rusqlite::Result<()> {
+        if self.first_mmap_size_bytes.is_none() {
+            self.first_mmap_size_bytes = Some(connection.pragma_query_value(None, "mmap_size", |row| row.get(0))?);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize)]
@@ -737,8 +747,8 @@ fn worker(database: db::AppDatabase, barrier: Arc<Barrier>, deadline: Instant, i
     let is_writer = index < writer_count;
     let lane = if is_writer { format!("churn_writer_{index}") } else { format!("churn_reader_{}", index-writer_count+1) };
     let mut report = WorkerReport { lane: lane.clone(), ..Default::default() };
-    let mut vfs_totals = [(0_u64, 0_u64, 0_u64); 9];
-    let mut vfs_names = [""; 9];
+    let mut vfs_totals = [(0_u64, 0_u64, 0_u64); 14];
+    let mut vfs_names = [""; 14];
     barrier.wait();
     while Instant::now() < deadline && report.attempts < MAX_ITERATIONS {
         report.attempts += 1;
@@ -753,6 +763,7 @@ fn worker(database: db::AppDatabase, barrier: Arc<Barrier>, deadline: Instant, i
             // Same autocommit INSERT column/value shape as jobs.rs enqueue; no extra transaction.
             (|| {
                 let connection = database.write_context(context)?;
+                report.observe_mmap_size(&connection)?;
                 if lock_probe && report.first_native_filename.is_none() { report.first_native_filename = Some(native_filename_observation(&connection)); }
                 if policy != ConnectionPolicy::Baseline {
                     let effective = apply_policy(&connection, policy)?;
@@ -768,6 +779,7 @@ fn worker(database: db::AppDatabase, barrier: Arc<Barrier>, deadline: Instant, i
             })()
         } else if workload == Workload::JobInsert {
             database.read(context, |connection| {
+                report.observe_mmap_size(connection)?;
                 if lock_probe && report.first_native_filename.is_none() { report.first_native_filename = Some(native_filename_observation(connection)); }
                 if policy != ConnectionPolicy::Baseline {
                     let effective = apply_policy(connection, policy)?;
@@ -785,6 +797,7 @@ fn worker(database: db::AppDatabase, barrier: Arc<Barrier>, deadline: Instant, i
             })
         } else if is_writer {
             database.write(context, TransactionBehavior::Immediate, |transaction| {
+                report.observe_mmap_size(transaction)?;
                 if lock_probe && report.first_native_filename.is_none() { report.first_native_filename = Some(native_filename_observation(transaction)); }
                 let query_started = Instant::now();
                 let result = transaction.execute(
@@ -795,6 +808,7 @@ fn worker(database: db::AppDatabase, barrier: Arc<Barrier>, deadline: Instant, i
             })
         } else {
             database.read(context, |connection| {
+                report.observe_mmap_size(connection)?;
                 if lock_probe && report.first_native_filename.is_none() { report.first_native_filename = Some(native_filename_observation(connection)); }
                 if policy != ConnectionPolicy::Baseline {
                     let effective = apply_policy(connection, policy)?;
@@ -846,7 +860,10 @@ fn worker(database: db::AppDatabase, barrier: Arc<Barrier>, deadline: Instant, i
         }
     }
     report.vfs_file_kind_proven = report.attempts != 0 && vfs_totals[0].0 != 0
-        && vfs_totals[7].0 == 0 && vfs_totals[8].0 == 0;
+        && vfs_totals[7].0 == 0 && vfs_totals[8].0 == 0
+        && vfs_totals[11].0 == 0 && vfs_totals[13].0 == 0
+        && vfs_totals[0].0 == vfs_totals[9].0 + vfs_totals[10].0 + vfs_totals[11].0
+        && vfs_totals[0].0 == vfs_totals[12].0 + vfs_totals[13].0;
     report.lock_summary.enabled = lock_probe;
     report.lock_summary.attribution_proven = lock_probe && report.lock_summary.operations > 0
         && report.lock_summary.coverage_failures == 0 && report.lock_summary.native_shm_calls > 0
@@ -913,6 +930,7 @@ fn main() -> ProbeResult<()> {
     let job_params = Arc::new(job_params);
     setup.execute("INSERT INTO meta(key,value) VALUES(?1,'0') ON CONFLICT(key) DO UPDATE SET value='0'", [KEY])?;
     let setup_native_state = native_owner_state(&setup);
+    let setup_mmap_size_bytes: i64 = setup.pragma_query_value(None, "mmap_size", |row|row.get(0))?;
     drop(setup);
     let database = db::AppDatabase::for_paths(&paths)?;
     let prepared_maintenance = if maintenance_interval_ms != 0 { Some(prepare_maintenance(&database_path)?) } else { None };
@@ -1045,6 +1063,8 @@ fn main() -> ProbeResult<()> {
         "reopen_owner":reopen_owner,
         "lock_probe_enabled":lock_probe,
         "plain_local_filename_probe_enabled":plain_local_probe,"setup_native_state":setup_native_state,
+        "setup_mmap_size_bytes":setup_mmap_size_bytes,
+        "mmap_readback_limits":"Read-only setup and first-worker-connection observations before the job SQL timer; no mmap setting changes. First-worker readback adds observer work to operation elapsed time. Getter errors use existing failure retention.",
         "worker_lock_capture_limits":"All operation captures include context close; snapshots and aggregation follow operation elapsed/VFS timing capture. Native filename inspection and callbacks still have observer CPU/scheduling effects. Historical inferred masks are not physical OS lock-state proof; worker diagnostics never alter the original verdict.",
         "recovery_retry_budget":recovery_retries,
         "keeper_enabled":keeper_enabled,"keeper_proven":keeper_proven,"keeper_report":keeper_report,

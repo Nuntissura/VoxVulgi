@@ -73,3 +73,15 @@ The official signed matching Codex0.160 side-by-side launcher removed the observ
 Installed actual ASR/translation/dub outputs and exact-ISO clean-profile acceptance remain unproven. This packet is not DONE.
 
 </topic>
+
+<topic id="registered-launcher-preflight-handoff" status="IN_PROGRESS" wp="WP-0329" updated_at="2026-10-03">
+
+Registered launcher repair remains before Phase B. Installed signed Core is actual codex-cli0.159.2; exact-version source reconciliation and compiled gated setup broker are retained in WP-0329/20261003/windowless_setup_broker_research.json (SHA FC4A2530A10BD7D35C14B12934D6B15A48D5195BBD8DC08FD0DBAEAD9769DA84). Broker source CA90DEE8F484A2CFF9B03E95541AA953DF79807B33CADA00E7E91D227987465B; compiled executable 8DF57D58B9AD6B58AE2D4EF2E73475A9CF0ABE69CF62988CEDA67B6D1E711AEB, native PE subsystem2. Setup activation remains withheld; root's independent live native identity, owner/home/SID, service/firewall/config and managed-process guards precede its fresh nonce authorization.
+
+Canonical process census remains blocked: 527 enumerated PIDs,376 owner SIDs resolved, no managed SID observed among resolved rows; this is not an all-clear. Targeted WMI finished with148 denied and3 exited.36 ordinary processes remained owner-denied. PID129928 remoting_host.exe creation2026-09-22T01:37:03.672631Z independently denied native token query(error5), GetOwnerSid(return2), and GetOwner(return2). Kernel/special0/4/8 remain separately classified, without inferred ownership. Exact rows and limitations: managed_account_process_census_summary.json and managed_account_process_wmi_owner_recheck.json.
+
+Reviewed read-only elevated census helper is ready, not run: source91BF36E13E00116AD9C8AF0202E391C07586D8FE52B96EC256F6D9AA0458FA77; compiledA340CDBD159240E154968856EFC8AC83C0D1D9EFE3E1248B7C50C46F7B8B3985; native PE subsystem2. It neither self-elevates nor starts/stops processes; reads only native IDs/image/creation/owner SID and writes one CreateNew proof. Pending operator decision: allow its single Windows UAC prompt for read-only ownership inspection. No UAC or setup permission is inferred from elapsed time; elevated protected-process denial remains possible.
+
+Exact official setup side-effect scope and canonical existing firewall/ACL captures are retained in codex_setup_sideeffect_scope.json SHA7D0BDF328404619F40D30C5B7682A6D4C8D72EB68CBAFCF972FFFF7AAC28C977. ProvisionOnly has empty workspace ACL roots; both managed accounts, canonical sandbox directories, root-only AppData metadata grants and Offline-SID network controls can change. Current3 firewall rules target only SID1005; inbound rule absent. Existing sandbox-directory explicit ACEs match official targets. Existing WFP state was not independently enumerated. No service start, provisioning, native clean-profile acceptance, or ISO Phase B advancement occurred in this preflight. Preserve current0.1.205 and all existing acceptance; WP remains IN_PROGRESS.
+
+</topic>
