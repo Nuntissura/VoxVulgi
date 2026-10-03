@@ -6763,12 +6763,13 @@ mod tests {
     use voxvulgi_engine::{config, db, paths::AppPaths};
 
     #[test]
-    fn quiet_shell_open_preserves_associated_file_argument() {
-        let path = std::path::Path::new(r"C:\media folder\日本語 & clip.mkv");
-        let command = windows_shell_open_command(path);
-        let args: Vec<_> = command.get_args().collect();
-        assert_eq!(command.get_program(), std::ffi::OsStr::new("cmd"));
-        assert_eq!(args, vec![std::ffi::OsStr::new("/C"), std::ffi::OsStr::new("start"), std::ffi::OsStr::new(""), path.as_os_str()]);
+    fn quiet_shell_open_rejects_missing_literal_special_character_path() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in ["日本語 & clip.mkv", "clip&ver&rest.mkv", "%VV_LITERAL_NAME%.mkv"] {
+            let path = dir.path().join(name);
+            let result = tauri_plugin_opener::open_path(&path, None::<&str>);
+            assert!(result.is_err(), "missing literal path must fail before launching: {name}");
+        }
     }
 
     #[test]
@@ -9226,8 +9227,10 @@ fn run_shell_command(command: &mut std::process::Command, action: &str) -> Resul
 fn shell_open_target(path: &std::path::Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let mut command = windows_shell_open_command(path);
-        return run_shell_command(&mut command, "open path");
+        // The pinned opener uses ShellExecuteExW with a literal UTF-16 lpFile.
+        // No command interpreter or intermediate console is involved.
+        return tauri_plugin_opener::open_path(path, None::<&str>)
+            .map_err(|error| format!("open path: {error}"));
     }
 
     #[cfg(target_os = "macos")]
@@ -9243,14 +9246,6 @@ fn shell_open_target(path: &std::path::Path) -> Result<(), String> {
         command.arg(path.as_os_str());
         return run_shell_command(&mut command, "open path");
     }
-}
-
-#[cfg(any(target_os = "windows", test))]
-fn windows_shell_open_command(path: &std::path::Path) -> std::process::Command {
-    // Hide the intermediate console; the associated GUI application still opens.
-    let mut command = voxvulgi_engine::cmd::command("cmd");
-    command.arg("/C").arg("start").arg("").arg(path.as_os_str());
-    command
 }
 
 #[cfg(any(target_os = "windows", test))]

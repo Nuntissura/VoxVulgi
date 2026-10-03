@@ -203,7 +203,7 @@ function New-SelfContainedPythonRuntime([string]$PortableRoot, [string]$VenvRoot
   }
 }
 
-function Test-PythonRuntime([string]$PythonExe, [string[]]$Modules, [string]$Label) {
+function Test-PythonRuntime([string]$PythonExe, [string[]]$Modules, [string]$Label, [int]$TimeoutMilliseconds = 180000) {
   $moduleLiteral = ($Modules | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ','
   $probe = "import importlib,sys; mods=[$moduleLiteral]; [importlib.import_module(m) for m in mods]; print(sys.executable); print('QUALIFIED_IMPORTS_OK')"
   $saved = @{}
@@ -224,20 +224,20 @@ function Test-PythonRuntime([string]$PythonExe, [string[]]$Modules, [string]$Lab
       if (-not $child.Start()) { throw "$Label failed to start owned import probe." }
       $deadline = [Diagnostics.Stopwatch]::StartNew()
       $childId = $child.Id
-      Write-Output "QUALIFICATION_IMPORT_PROBE: $Label pid=$childId timeout_seconds=180"
+      Write-Output "QUALIFICATION_IMPORT_PROBE: $Label pid=$childId timeout_ms=$TimeoutMilliseconds"
       $stdout = $child.StandardOutput.ReadToEndAsync()
       $stderr = $child.StandardError.ReadToEndAsync()
-      if (-not $child.WaitForExit(180000)) {
+      if (-not $child.WaitForExit($TimeoutMilliseconds)) {
         $child.Kill($true)
         $child.WaitForExit()
-        throw "$Label relocation/import proof timed out after 180 seconds; owned probe pid=$childId terminated."
+        throw "$Label relocation/import proof timed out after $TimeoutMilliseconds milliseconds; owned probe pid=$childId terminated."
       }
-      $remainingMs = [Math]::Max(0, 180000 - [int]$deadline.ElapsedMilliseconds)
+      $remainingMs = [Math]::Max(0, $TimeoutMilliseconds - [int]$deadline.ElapsedMilliseconds)
       $drain = [Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]@($stdout, $stderr))
       if (-not $drain.Wait($remainingMs)) {
         $child.StandardOutput.Close()
         $child.StandardError.Close()
-        throw "$Label redirected output did not close within the 180-second deadline (parent pid=$childId exited; descendant ownership is unverified)."
+        throw "$Label redirected output did not close within the $TimeoutMilliseconds millisecond deadline (parent pid=$childId exited; descendant ownership is unverified)."
       }
       $output = $stdout.GetAwaiter().GetResult() + "`n" + $stderr.GetAwaiter().GetResult()
       if ($child.ExitCode -ne 0 -or $output -notmatch 'QUALIFIED_IMPORTS_OK') {

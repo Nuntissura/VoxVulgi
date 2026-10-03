@@ -19,3 +19,9 @@ Verification: root batches engine/desktop focused tests and one canonical-cache 
 Microtasks: replace omitted quiet wrappers; cover nested Python subprocesses; source-audit intentional exceptions; run bundled tests; verify packaged associated-file opening and background console absence; synchronize board/status with proof.
 
 </topic>
+
+<topic id="shell-parser-remediation" status="IN_PROGRESS" wp="WP-0328" updated_at="2026-10-03">
+
+Independent hidden parser probes proved cmd/start interprets unspaced ampersands and expands percent-delimited environment names inside filenames. Replace that shared Windows open path with the existing pinned tauri_plugin_opener::open_path default-association API. Local opener2.5.3 enables open5.3.3 shellexecute-on-windows; its detached Windows implementation passes literal UTF-16 lpFile to ShellExecuteExW. Microsoft reference: https://learn.microsoft.com/en-us/windows/win32/api/shellapi/nf-shellapi-shellexecuteexw. No new dependency or shell escaping layer. Missing special-character paths must fail before launching; actual associated-player GUI proof remains outstanding. Root interrupted only its own candidate build and descendants after the late finding; no foreign process was stopped.
+
+</topic>

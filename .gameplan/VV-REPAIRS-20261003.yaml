@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: batch
 assignment: VV-REPAIRS-20261003
 parent: null
-generation: 7
+generation: 11
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -31,3 +31,7 @@ steps:
 - {id: GP-015, role: any, at: before_round, do: verify qualification test uses PowerShell7 and diagnostic fields retain command types, check: {type: confirm}, source: Focused run used Windows5; tsc found unknown field inference, state: active}
 - {id: GP-016, role: any, at: before_round, do: forbid repeated full live database backup under disk load, check: {type: confirm}, source: Backup exceeded90s; equivalent canonical-field projection proves194 aggregates, state: active}
 - {id: GP-017, role: any, at: before_round, do: require engine tests use owning engine manifest for dev dependencies, check: {type: file, path: product/engine/Cargo.toml, contains: '[dev-dependencies]'}, source: Desktop manifest excludes dependency tests because engine is not a workspace member, state: active}
+- {id: GP-018, role: any, at: before_round, do: require desktop build includes assigned WorkPackets, check: {type: confirm}, source: Build preflight rejected missing WorkPackets, state: active}
+- {id: GP-019, role: any, at: before_round, do: verify fixture extracts qualification function without indentation, check: {type: file, path: offline-installer-runtime/tests/runtimeProbeDeadline.test.ts, contains: indexOf("function Test-PythonRuntime(")}, source: 'failure: fixture indentation assumption extracted empty function', state: active}
+- {id: GP-020, role: any, at: before_round, do: require review findings closed and agent source frozen before build, check: {type: confirm}, source: Owned candidate build interrupted after late shell fidelity finding, state: active}
+- {id: GP-021, role: any, at: before_round, do: require inherited pipes explicit in descendant fixture, check: {type: file, path: offline-installer-runtime/tests/runtimeProbeDeadline.test.ts, contains: 'stdout=sys.stdout,stderr=sys.stderr'}, source: 'failure: Windows subprocess default handles did not preserve redirected pipes', state: active}

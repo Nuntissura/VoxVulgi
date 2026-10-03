@@ -1651,7 +1651,13 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           }),
           "trace",
           force,
-        ),
+        ).then((result) => {
+          commitDemandResult(result.generation, () => {
+            if (youtubeProtectionRequestRef.current !== protectionGeneration) return;
+            setYoutubeProtectionDiagnostics({ ...result.value, downloadReplay: null, enumerationReplay: null });
+          });
+          return result;
+        }),
       ]);
       commitDemandResult(traceResult.generation, () => {
         setDiagnosticsTraceDir(traceResult.value.nextDiagnosticsTraceDir);

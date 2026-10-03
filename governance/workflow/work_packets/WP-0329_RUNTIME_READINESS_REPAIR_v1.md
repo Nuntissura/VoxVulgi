@@ -51,3 +51,11 @@ Restore helper safety: -Apply with explicit alive owned PID275880 refused before
 Phase Q named main and CosyVoice offline imports completed successfully with bounded owned probes. It continues fresh qualified-tree hashing/archive construction; no final passing receipt yet.
 
 </topic>
+
+<topic id="live-restoration-and-future-deadline" status="IN_PROGRESS" wp="WP-0329" updated_at="2026-10-03">
+
+Root performed closed-app restore after a consistent SQLite backup with quick_check and matching table counts. Independent canonical reread checked both model files, all three pinned Kokoro files, and refs/main against the current product manifests, without trusting the restore receipt. Every size/hash and the exact Kokoro revision matched; evidence: product/desktop/build_target/tool_artifacts/wp_runs/WP-0329/20261003/independent_live_asset_hashes.json. Actual installed ASR/translation/dub workflows remain unproven.
+
+Active qualification loaded recipe SHA DD231B1E49548C0C7B956ABCD54F53D9A1F57DB5E20560CCE30CB9246C651F5E; its exact source was preserved as qualification_recipe_b9bd5d61388584cb50b2dadf.ps1 in the same proof folder before future edits. Both successful import drains finished before archive construction. Future source adds a bounded asynchronous pipe drain for the parent-exited/descendant-held-pipe failure, keeping the production 180000ms deadline. runtimeProbeDeadline.test.ts extracts the actual function and substitutes only an owned finite-lived Python probe payload. Initial fixture errors were corrected (indentation assumption; explicit Windows redirected-pipe inheritance). A subsequently observed passing run is not accepted because concurrent shared GP020 had failed; gate confirmation and focused rerun are required.
+
+</topic>
