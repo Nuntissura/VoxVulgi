@@ -17542,7 +17542,8 @@ def run_ffmpeg_convert(ffmpeg_cmd: str, in_path: str, out_path: str) -> str:
         "16000",
         out_path,
     ]
-    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                   creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     return out_path if file_exists(out_path) else in_path
 
 
@@ -33286,7 +33287,7 @@ INSERT INTO library_item (
     }
 
     fn run_fixture_ffmpeg(paths: &AppPaths, args: &[&str]) {
-        let output = std::process::Command::new(paths.ffmpeg_cmd())
+        let output = crate::cmd::command(paths.ffmpeg_cmd())
             .args(["-nostdin", "-loglevel", "error", "-y"])
             .args(args)
             .output()
@@ -37744,7 +37745,7 @@ EOF
         "VOXVULGI_INSTAGRAM_AUTH_CROSS_PROCESS_TEST_ROOT";
 
     fn replace_instagram_auth_from_fresh_process(paths: &AppPaths) -> Result<()> {
-        let status = std::process::Command::new(std::env::current_exe()?)
+        let status = crate::cmd::command(std::env::current_exe()?)
             .arg("--exact")
             .arg("jobs::tests::instagram_auth_cross_process_writer_child")
             .arg("--ignored")

@@ -11,6 +11,8 @@ param(
   [Parameter(Mandatory)][string]$AppVersion,
   [Parameter(Mandatory)][string]$OutputRoot,
   [Parameter(Mandatory)][string]$SevenZipPath,
+  [string]$ModelManifestPath = (Join-Path $PSScriptRoot '..\..\product\engine\resources\models\manifest.json'),
+  [string]$DependencyManifestPath = (Join-Path $PSScriptRoot '..\..\product\engine\resources\tooling\pinned_dependency_manifest.json'),
   [string[]]$MainImportModules = @('torch', 'transformers', 'spleeter', 'demucs_infer'),
   [string[]]$CosyImportModules = @('torch', 'torchaudio')
 )
@@ -210,9 +212,39 @@ function Test-PythonRuntime([string]$PythonExe, [string[]]$Modules, [string]$Lab
     [Environment]::SetEnvironmentVariable($name, '1', 'Process')
   }
   try {
-    $output = & $PythonExe -I -c $probe 2>&1
-    if ($LASTEXITCODE -ne 0 -or (($output -join "`n") -notmatch 'QUALIFIED_IMPORTS_OK')) {
-      throw "$Label relocation/import proof failed:`n$($output -join "`n")"
+    $start = [Diagnostics.ProcessStartInfo]::new($PythonExe)
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in @('-I', '-c', $probe)) { $start.ArgumentList.Add($argument) }
+    $child = [Diagnostics.Process]::new()
+    $child.StartInfo = $start
+    try {
+      if (-not $child.Start()) { throw "$Label failed to start owned import probe." }
+      $deadline = [Diagnostics.Stopwatch]::StartNew()
+      $childId = $child.Id
+      Write-Output "QUALIFICATION_IMPORT_PROBE: $Label pid=$childId timeout_seconds=180"
+      $stdout = $child.StandardOutput.ReadToEndAsync()
+      $stderr = $child.StandardError.ReadToEndAsync()
+      if (-not $child.WaitForExit(180000)) {
+        $child.Kill($true)
+        $child.WaitForExit()
+        throw "$Label relocation/import proof timed out after 180 seconds; owned probe pid=$childId terminated."
+      }
+      $remainingMs = [Math]::Max(0, 180000 - [int]$deadline.ElapsedMilliseconds)
+      $drain = [Threading.Tasks.Task]::WhenAll([Threading.Tasks.Task[]]@($stdout, $stderr))
+      if (-not $drain.Wait($remainingMs)) {
+        $child.StandardOutput.Close()
+        $child.StandardError.Close()
+        throw "$Label redirected output did not close within the 180-second deadline (parent pid=$childId exited; descendant ownership is unverified)."
+      }
+      $output = $stdout.GetAwaiter().GetResult() + "`n" + $stderr.GetAwaiter().GetResult()
+      if ($child.ExitCode -ne 0 -or $output -notmatch 'QUALIFIED_IMPORTS_OK') {
+        throw "$Label relocation/import proof failed (pid=$childId):`n$output"
+      }
+    } finally {
+      $child.Dispose()
     }
   } finally {
     foreach ($name in $saved.Keys) { [Environment]::SetEnvironmentVariable($name, $saved[$name], 'Process') }
@@ -284,6 +316,9 @@ $preparedIdentity = Import-PreparedPayloadIdentity $PreparedPayloadReceipt ([ord
   voice_backends = [ordered]@{ root = $voice; excludes = @() }
 })
 $inputIdentity = [ordered]@{
+  qualification_recipe_sha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
+  model_manifest_sha256 = (Get-FileHash -LiteralPath (Resolve-File $ModelManifestPath 'product model manifest') -Algorithm SHA256).Hash.ToLowerInvariant()
+  dependency_manifest_sha256 = (Get-FileHash -LiteralPath (Resolve-File $DependencyManifestPath 'product dependency manifest') -Algorithm SHA256).Hash.ToLowerInvariant()
   prepared_payload_contract_sha256 = $preparedIdentity.contract_sha256
   tools = $preparedIdentity.trees.tools
   models = $preparedIdentity.trees.models
@@ -334,7 +369,41 @@ try {
   New-SelfContainedPythonRuntime $portableSource $mainVenv (Join-Path $pythonRoot 'runtime_main')
   New-SelfContainedPythonRuntime $portableSource $cosyVenv (Join-Path $pythonRoot 'runtime_cosyvoice')
   Copy-Tree $modelsSource (Join-Path $generation 'models')
+  # ModelStore resolves <id>/<version>/<file>; historical payloads supplied flat files.
+  # Normalize only owned qualification output, using exact existing manifest-bound bytes.
+  $modelManifest = Get-Content -Raw -LiteralPath $ModelManifestPath | ConvertFrom-Json
+  $modelRequired = @()
+  foreach ($modelId in @('whispercpp-large-v3-q5_0', 'whispercpp-tiny')) {
+    $model = @($modelManifest.models | Where-Object id -EQ $modelId)
+    if ($model.Count -ne 1) { throw "Required ASR model is absent or ambiguous in product manifest: $modelId" }
+    foreach ($file in $model[0].files) {
+      $relative = "$($model[0].id)/$($model[0].version)/$($file.path)"
+      if ($relative -match '(^|[/\\])\.\.([/\\]|$)' -or [IO.Path]::IsPathRooted([string]$file.path)) { throw 'Unsafe ASR model manifest path.' }
+      $canonicalSource = Join-Path $modelsSource $relative
+      $source = if (Test-Path -LiteralPath $canonicalSource -PathType Leaf) { $canonicalSource } else { Join-Path $modelsSource ([string]$file.path) }
+      $source = Resolve-File $source "existing ASR model $modelId"
+      if ((Get-Item -LiteralPath $source).Length -ne [long]$file.size_bytes -or (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash.ToLowerInvariant() -ne [string]$file.sha256) { throw "Existing ASR model fails exact product manifest identity: $modelId" }
+      $target = Join-Path (Join-Path $generation 'models') $relative
+      [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($target)) | Out-Null
+      [IO.File]::Copy($source, $target, $true)
+      if ((Get-Item -LiteralPath $target).Length -ne [long]$file.size_bytes -or (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash.ToLowerInvariant() -ne [string]$file.sha256) { throw "Qualified ASR model copy fails identity: $modelId" }
+      $modelRequired += "models/$relative"
+    }
+  }
   Copy-Tree $hfSource (Join-Path $generation 'cache\huggingface')
+  $dependencyManifest = Get-Content -Raw -LiteralPath $DependencyManifestPath | ConvertFrom-Json
+  $kokoro = $dependencyManifest.tts_neural_local_v1.kokoro_model
+  $kokoroRelativeRoot = 'cache/huggingface/hub/models--hexgrad--Kokoro-82M'
+  $kokoroRoot = Join-Path $generation $kokoroRelativeRoot
+  $kokoroRef = "$kokoroRelativeRoot/refs/main"
+  if ((Get-Content -Raw -LiteralPath (Join-Path $generation $kokoroRef)).Trim() -ne [string]$kokoro.revision) { throw 'Qualified Kokoro cache revision does not match the product pin.' }
+  $cacheRequired = @($kokoroRef)
+  foreach ($file in $kokoro.files) {
+    $relative = "$kokoroRelativeRoot/snapshots/$($kokoro.revision)/$($file.filename)"
+    $asset = Resolve-File (Join-Path $generation $relative) 'existing Kokoro asset'
+    if ((Get-Item -LiteralPath $asset).Length -ne [long]$file.file_bytes -or (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant() -ne [string]$file.sha256_hex) { throw "Qualified Kokoro asset does not match product pin: $($file.filename)" }
+    $cacheRequired += $relative
+  }
   Copy-Tree $voice (Join-Path $generation 'voice_backends')
 
   Test-PythonRuntime (Join-Path $pythonRoot 'runtime_main\python.exe') $MainImportModules 'main Python runtime'
@@ -352,6 +421,8 @@ try {
     'tools/python/runtime_main/python.exe',
     'tools/python/runtime_cosyvoice/python.exe'
   )
+  $required += $modelRequired
+  $required += $cacheRequired
   foreach ($candidate in @('tools/ffmpeg/ffmpeg.exe','tools/ffmpeg/bin/ffmpeg.exe')) {
     if (Test-Path -LiteralPath (Join-Path $generation $candidate)) { $required += $candidate; break }
   }

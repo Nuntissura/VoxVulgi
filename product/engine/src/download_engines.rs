@@ -1221,7 +1221,7 @@ mod tests {
         )
         .unwrap();
         let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
-        let status = std::process::Command::new(rustc)
+        let status = crate::cmd::command(rustc)
             .args([source.as_os_str(), "-o".as_ref(), path.as_os_str()])
             .status()
             .unwrap();

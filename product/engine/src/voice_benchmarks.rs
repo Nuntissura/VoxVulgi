@@ -1733,7 +1733,7 @@ mod tests {
     fn generate_voice_benchmark_report_writes_json_and_markdown() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
-        if std::process::Command::new(paths.ffmpeg_cmd())
+        if crate::cmd::command(paths.ffmpeg_cmd())
             .arg("-version")
             .output()
             .is_err()
@@ -1812,7 +1812,7 @@ mod tests {
     fn export_voice_benchmark_leaderboard_writes_json_markdown_and_csv() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
-        if std::process::Command::new(paths.ffmpeg_cmd())
+        if crate::cmd::command(paths.ffmpeg_cmd())
             .arg("-version")
             .output()
             .is_err()

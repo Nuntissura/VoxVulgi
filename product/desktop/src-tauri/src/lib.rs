@@ -1050,7 +1050,7 @@ mod offline_localization_proof_cli_tests {
             "offline_localization_proof_cli_tests::offline_proof_root_owner_child_process_probe";
 
         let marker = dir.path().join("owner_ready");
-        let mut owner = std::process::Command::new(&test_exe)
+        let mut owner = voxvulgi_engine::cmd::command(&test_exe)
             .args([test_name, "--exact", "--nocapture"])
             .env("VOXVULGI_OFFLINE_PROOF_TEST_CHILD_ROOT", &root)
             .env("VOXVULGI_OFFLINE_PROOF_TEST_CHILD_MARKER", &marker)
@@ -1066,7 +1066,7 @@ mod offline_localization_proof_cli_tests {
         assert!(owner.wait().expect("owner exit").success());
 
         let abandoned_marker = dir.path().join("abandoned_ready");
-        let mut abandoned_owner = std::process::Command::new(&test_exe)
+        let mut abandoned_owner = voxvulgi_engine::cmd::command(&test_exe)
             .args([test_name, "--exact", "--nocapture"])
             .env("VOXVULGI_OFFLINE_PROOF_TEST_CHILD_ROOT", &root)
             .env(
@@ -6763,6 +6763,15 @@ mod tests {
     use voxvulgi_engine::{config, db, paths::AppPaths};
 
     #[test]
+    fn quiet_shell_open_preserves_associated_file_argument() {
+        let path = std::path::Path::new(r"C:\media folder\日本語 & clip.mkv");
+        let command = windows_shell_open_command(path);
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(command.get_program(), std::ffi::OsStr::new("cmd"));
+        assert_eq!(args, vec![std::ffi::OsStr::new("/C"), std::ffi::OsStr::new("start"), std::ffi::OsStr::new(""), path.as_os_str()]);
+    }
+
+    #[test]
     fn visual_debugger_dump_adds_authoritative_runtime_state() {
         let enriched = enrich_visual_debugger_dump(
             r#"{"timestamp_ms":1,"viewport":{"width":800,"height":600}}"#,
@@ -9217,8 +9226,7 @@ fn run_shell_command(command: &mut std::process::Command, action: &str) -> Resul
 fn shell_open_target(path: &std::path::Path) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        let mut command = std::process::Command::new("cmd");
-        command.arg("/C").arg("start").arg("").arg(path.as_os_str());
+        let mut command = windows_shell_open_command(path);
         return run_shell_command(&mut command, "open path");
     }
 
@@ -9235,6 +9243,14 @@ fn shell_open_target(path: &std::path::Path) -> Result<(), String> {
         command.arg(path.as_os_str());
         return run_shell_command(&mut command, "open path");
     }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_shell_open_command(path: &std::path::Path) -> std::process::Command {
+    // Hide the intermediate console; the associated GUI application still opens.
+    let mut command = voxvulgi_engine::cmd::command("cmd");
+    command.arg("/C").arg("start").arg("").arg(path.as_os_str());
+    command
 }
 
 #[cfg(any(target_os = "windows", test))]

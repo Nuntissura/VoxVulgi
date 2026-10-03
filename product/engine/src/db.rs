@@ -18,7 +18,7 @@ pub use database_runtime::{
     WRITER_QUEUE_CAPACITY,
 };
 
-const CURRENT_SCHEMA_VERSION: u32 = 59;
+const CURRENT_SCHEMA_VERSION: u32 = 60;
 /// WP-0321 S6: bounded archived-attempt history kept in `job_attempt` per surviving `job` row
 /// once it is superseded by a later attempt for the same video (`job.target_key`). Older
 /// superseded rows beyond this count are still deduped and deleted during the v58 migration, but
@@ -270,8 +270,12 @@ pub(crate) const MIGRATION_STEPS: &[MigrationStep] = &[
         apply: apply_schema_v58,
     },
     MigrationStep {
-        version: CURRENT_SCHEMA_VERSION,
+        version: 59,
         apply: apply_schema_v59,
+    },
+    MigrationStep {
+        version: CURRENT_SCHEMA_VERSION,
+        apply: apply_schema_v60,
     },
 ];
 
@@ -3349,6 +3353,19 @@ pub(crate) fn apply_schema_v59(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// WP-0323: event rollups hold the writer reservation while deriving canonical counts.
+/// Index child-owned subscription identity so unrelated active payloads are never scanned.
+fn apply_schema_v60(conn: &Connection) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='job')",
+        [], |row| row.get(0),
+    )?;
+    if exists {
+        conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_job_subscription_activity ON job(CASE WHEN json_valid(params_json) THEN json_extract(params_json,'$.subscription_id') END,status,batch_id,started_at_ms DESC) WHERE type='download_direct_url';")?;
+    }
+    Ok(())
+}
+
 fn ensure_column(conn: &Connection, table: &str, column: &str, column_def: &str) -> Result<()> {
     let table_exists: bool = conn.query_row(
         "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name=?1",
@@ -3382,6 +3399,16 @@ pub fn ensure_schema(paths: &AppPaths) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn subscription_activity_index_accepts_legacy_invalid_json_and_is_idempotent() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE job(params_json TEXT,status TEXT,batch_id TEXT,started_at_ms INTEGER,type TEXT); INSERT INTO job VALUES('broken','queued','batch',1,'download_direct_url'),('{\"subscription_id\":null}',NULL,NULL,NULL,'download_direct_url'),('{\"subscription_id\":\"s\"}','running','batch',2,'download_direct_url');").unwrap();
+        super::apply_schema_v60(&conn).unwrap();
+        super::apply_schema_v60(&conn).unwrap();
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM job INDEXED BY idx_job_subscription_activity WHERE type='download_direct_url' AND CASE WHEN json_valid(params_json) THEN json_extract(params_json,'$.subscription_id') END='s'", [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM job", [], |row| row.get::<_, i64>(0)).unwrap(), 3);
+    }
     use super::*;
     use crate::paths::AppPaths;
     use rusqlite::{params, OptionalExtension};

@@ -5317,13 +5317,13 @@ pub(crate) fn refresh_subscription_activity_rollup_for_subscription_id(
     // caller can read counts, pause, and overwrite a newer caller's projection after it commits.
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let counts: (i64, i64, i64, i64) = tx.query_row(
-        "WITH active_batches AS MATERIALIZED (SELECT DISTINCT batch_id FROM job WHERE type='download_direct_url' AND status IN ('queued','running') AND batch_id IS NOT NULL AND json_extract(params_json,'$.subscription_id')=?1) SELECT COALESCE(SUM(status='queued'),0),COALESCE(SUM(status='running'),0),COALESCE(SUM(status='succeeded'),0),COALESCE(SUM(status IN ('failed','canceled')),0) FROM job INDEXED BY idx_job_batch_created WHERE type='download_direct_url' AND batch_id IN (SELECT batch_id FROM active_batches)",
+        "WITH active_batches AS MATERIALIZED (SELECT DISTINCT batch_id FROM job INDEXED BY idx_job_subscription_activity WHERE type='download_direct_url' AND status IN ('queued','running') AND batch_id IS NOT NULL AND CASE WHEN json_valid(params_json) THEN json_extract(params_json,'$.subscription_id') END=?1) SELECT COALESCE(SUM(status='queued'),0),COALESCE(SUM(status='running'),0),COALESCE(SUM(status='succeeded'),0),COALESCE(SUM(status IN ('failed','canceled')),0) FROM job INDEXED BY idx_job_batch_created WHERE type='download_direct_url' AND batch_id IN (SELECT batch_id FROM active_batches)",
         [subscription_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
     )?;
     let current: Option<(Option<String>, Option<f32>)> = tx
         .query_row(
-            "SELECT target_title,progress FROM job WHERE type='download_direct_url' AND status='running' AND json_extract(params_json,'$.subscription_id')=?1 ORDER BY started_at_ms DESC LIMIT 1",
+            "SELECT target_title,progress FROM job INDEXED BY idx_job_subscription_activity WHERE type='download_direct_url' AND status='running' AND CASE WHEN json_valid(params_json) THEN json_extract(params_json,'$.subscription_id') END=?1 ORDER BY started_at_ms DESC LIMIT 1",
             [subscription_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
@@ -9275,6 +9275,45 @@ VALUES (?1, ?2, ?3, ?4, 0.0, ?5, ?6, '', ?7)
         drop(conn);
         refresh_subscription_activity_rollup_for_job(&paths, "child-two").unwrap();
         assert!(subscription_download_activity(&paths).unwrap().is_empty());
+    }
+
+    #[test]
+    fn activity_refresh_does_not_scan_unrelated_subscription_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(dir.path().join("app_state"));
+        db::ensure_schema(&paths).unwrap();
+        let conn = db::open(&paths).unwrap();
+        let payload = serde_json::json!({"subscription_id":"unrelated", "padding":"x".repeat(1024 * 1024)}).to_string();
+        for index in 0..24 {
+            conn.execute("INSERT INTO job(id,batch_id,type,status,progress,params_json,created_at_ms,logs_path) VALUES(?1,'other-batch','download_direct_url','queued',0,?2,1,'')", params![format!("large-{index}"), payload]).unwrap();
+        }
+        conn.execute_batch("INSERT INTO job(id,batch_id,type,status,progress,params_json,created_at_ms,logs_path) VALUES('selected','selected-batch','download_direct_url','queued',0,'{\"subscription_id\":\"selected-sub\"}',1,'');").unwrap();
+        drop(conn);
+        let database = db::AppDatabase::for_paths(&paths).unwrap();
+        // Independent counterfactual: execute the literal pre-index query through
+        // the same production writer admission and immediate snapshot boundary.
+        let baseline_counts: (i64, i64, i64, i64) = database.write(
+            db::DatabaseOperationContext::new("wp0323_baseline_rollup", "subscriptions::tests::old_rollup_query"),
+            rusqlite::TransactionBehavior::Immediate,
+            |tx| Ok(tx.query_row(
+                "WITH active_batches AS MATERIALIZED (SELECT DISTINCT batch_id FROM job WHERE type='download_direct_url' AND status IN ('queued','running') AND batch_id IS NOT NULL AND json_extract(params_json,'$.subscription_id')=?1) SELECT COALESCE(SUM(status='queued'),0),COALESCE(SUM(status='running'),0),COALESCE(SUM(status='succeeded'),0),COALESCE(SUM(status IN ('failed','canceled')),0) FROM job INDEXED BY idx_job_batch_created WHERE type='download_direct_url' AND batch_id IN (SELECT batch_id FROM active_batches)",
+                ["selected-sub"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )?),
+        ).unwrap();
+        let baseline_snapshot = database.snapshot();
+        let baseline_bytes = baseline_snapshot.recent_receipts.last().unwrap().file_bytes_read.unwrap();
+        assert!(baseline_bytes > 3 * 1024 * 1024, "literal old query must fail the candidate's 3MiB IO budget: {baseline_bytes}");
+        refresh_subscription_activity_rollup_for_subscription_id(&paths, "selected-sub").unwrap();
+        let snapshot = database.snapshot();
+        let receipt = snapshot.recent_receipts.last().unwrap();
+        assert!(receipt.file_bytes_read.unwrap() < 3 * 1024 * 1024, "selected subscription must not scan 24MiB of unrelated payloads: {:?}", receipt.file_bytes_read);
+        let activity = subscription_download_activity(&paths).unwrap();
+        assert_eq!(activity.len(), 1);
+        assert_eq!(activity[0].subscription_id, "selected-sub");
+        assert_eq!(activity[0].queued, 1);
+        assert_eq!(baseline_counts, (activity[0].queued, activity[0].running, activity[0].succeeded, activity[0].failed));
+        eprintln!("WP0323 independent query IO comparison: baseline={} candidate={} counts={:?}", baseline_bytes, receipt.file_bytes_read.unwrap(), baseline_counts);
     }
 
     #[test]

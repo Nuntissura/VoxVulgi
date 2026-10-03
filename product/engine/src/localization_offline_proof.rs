@@ -312,7 +312,7 @@ fn validate_proof_mkv(paths: &AppPaths, path: &Path) -> Result<()> {
     .ok_or_else(|| {
         EngineError::InstallFailed("proof MKV validator ffprobe is missing".to_string())
     })?;
-    let output = std::process::Command::new(ffprobe)
+    let output = crate::cmd::command(ffprobe)
         .args([
             "-v",
             "error",

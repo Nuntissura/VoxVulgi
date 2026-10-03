@@ -3,7 +3,6 @@ use crate::{persistence, EngineError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -804,7 +803,7 @@ fn run_probe_command(
         &expand_token(first, root_dir, python_exe, model_dir),
         root_dir,
     );
-    let mut command = Command::new(&program);
+    let mut command = crate::cmd::command(&program);
     if let Some(root) = root_dir {
         command.current_dir(root);
     }

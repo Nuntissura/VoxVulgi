@@ -79,3 +79,15 @@ Ship one offline ISO for non-technical users by packaging an explicit already-bu
 Package-only app/runtime split and maintenance/migration implementation recorded. Remaining real runtime qualification and exact full ISO clean/offline/update/rollback acceptance; sole current installer authority retained, not declared production-qualified. Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
 
 </topic>
+
+<topic id="runtime-input-remediation-20261003" status="IN_PROGRESS" wp="WP-0329" updated_at="2026-10-03">
+
+Verified defect: old qualified runtime 0.1.204 copied flat Whisper files, while ModelStore/asr resolves models/<id>/<version>/<file>. Its required_files covered executables but omitted required ASR/Kokoro assets. Revised Phase Q uses exact existing model-manifest-bound bytes, creates canonical model paths, checks required Kokoro revision and three asset hashes, and includes them in required_files. Qualification identity now binds qualification recipe plus product model/dependency manifest hashes. Package-only script/old receipt remain unchanged.
+
+Implementation: tools.rs returns unknown after missing/failed capability probe, with regression test; generated ModelScope Git subprocess uses CREATE_NO_WINDOW only on Windows. runtimeAssetLayout.test.ts executes the actual normalization block with owned tiny fixture inputs and corrupt-file refusal. Root owns all test execution/Cargo cache.
+
+Exact live diagnostic: owned hidden Python PID216332 observed Torch import blocked at torch/__init__.py256 kernel32.LoadLibraryExW before CUDA query. Faulthandler logs under %TEMP%/vv_runtime_probe_20261003. Only this session-owned PID was stopped after bounded observation. Live Python base_prefix/sys.path points to an old repo release payload. This is not proof the stale path causes the DLL stall. Metadata torch2.10.0/torchaudio2.11.0 mismatch is recorded, not blindly repaired. Production app/process/runtime files remain untouched.
+
+Remaining: root focused bundled checks; real new qualification after latest yt-dlp selected-engine compatibility gate; active model/cache restoration at controlled installed-generation boundary; ModelStore/ASR resolution and actual ASR/translation/dub outputs; exact ISO acceptance. Old archives cannot be promoted by rewriting compatibility. Full-stack import proof alone is insufficient.
+
+</topic>

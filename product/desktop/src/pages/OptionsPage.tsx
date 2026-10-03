@@ -3444,7 +3444,7 @@ export function OptionsPage() {
               >
                 Open folder
               </button>
-              <button type="button" disabled={subscriptionExportBusy} onClick={() => exportSubscriptionsNow().catch(() => undefined)}>
+              <button type="button" data-agent-action-id="subscriptions.export-now" data-agent-effect-class="reversible_state_change" disabled={subscriptionExportBusy} onClick={() => exportSubscriptionsNow().catch(() => undefined)}>
                 Export now
               </button>
             </div>

@@ -200,7 +200,11 @@ Initial language focus: **Korean + Japanese → English**.
   - storage usage breakdown (library, cache, logs),
   - last job errors with copy/export.
 - Diagnostics dashboard summary (top of page):
-  - clickable status tiles: App version, Voice packages (installed/missing), FFmpeg (ready/missing), Storage (total MB), Recent failures (count),
+  - clickable compact status strip: App version, Voice packages (current readiness), FFmpeg (ready/missing), Storage (total MB), Recent failures (count),
+  - not-requested, queued/checking, failed/unknown and verified states remain distinct; failed capability probes never establish a missing package, CPU tier or CUDA absence,
+  - independently successful checks remain visible if another check fails; terminal failures expose named technical details without remaining indefinitely checking,
+  - installation-attempt history is separate from current package/model readiness; historic completed steps never establish present readiness,
+  - detail sections use native expandable disclosures with stable navigation anchors and semantic bridge access; no new cards, ordinary text wraps naturally and long paths/errors remain readable (WP-0327),
   - each tile scrolls to the corresponding detail section below,
   - color coding: green (ready), yellow (action needed), red (error/missing).
 - Startup and performance diagnostics:

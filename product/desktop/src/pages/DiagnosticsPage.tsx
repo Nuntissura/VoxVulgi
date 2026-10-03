@@ -16,6 +16,8 @@ import {
 import { copyPathToClipboard, openPathBestEffort, revealPath as revealFilesystemPath } from "../lib/pathOpener";
 import { loadYoutubeProtectionSnapshot } from "../lib/youtubeProtectionSnapshot";
 import { RootRebindControl } from "../components/RootRebindControl";
+import { collectDiagnosticsFieldResults, DiagnosticReadErrors, settleDiagnosticDemands, diagnosticPendingText, capabilityIsVerified } from "../lib/diagnosticsResults";
+import "./DiagnosticsPage.css";
 
 type RuntimeProvenance = {
   mode: "isolated" | "legacy_app_data" | "managed_offline";
@@ -913,10 +915,6 @@ function capabilityProbeProvenance(status: PerformanceTierStatus | DemucsPackSta
   return `${status.probe_state} · ${status.freshness}${verified}${pid}${shared} · source ${status.source_identity}`;
 }
 
-function probeText(value: boolean | null | undefined, ready: string, notReady: string): string {
-  if (value === null || value === undefined) return "checking…";
-  return value ? ready : notReady;
-}
 
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes)) return "-";
@@ -1295,16 +1293,61 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     });
   }, []);
 
+  const requestDiagnosticGroup = useCallback(async <T extends Record<string, unknown>>(
+    operationId: DiagnosticsOperationId,
+    reads: { [K in keyof T]: () => Promise<T[K]> },
+    section: DiagnosticsSectionKey,
+    force: boolean,
+    commitFields: (values: Partial<T>) => void,
+    resultTruth?: (values: Partial<T>) => DiagnosticsResultTruth,
+  ) => {
+    const result = await requestDemand(operationId, () => collectDiagnosticsFieldResults(reads), section, force, (group) =>
+      group.errors.length
+        ? { state: "failed", verifiedAtMs: null, error: group.errors.join("; ") }
+        : resultTruth?.(group.values) ?? { state: "ready", verifiedAtMs: Date.now(), error: null });
+    commitDemandResult(result.generation, () => commitFields(result.value.values));
+    if (result.value.errors.length) throw new DiagnosticReadErrors(result.value.errors, result.value.errors.join("; "));
+    // With no failures every declared field completed; preserve the exact field types.
+    return { ...result, value: result.value.values as T };
+  }, [commitDemandResult, requestDemand]);
+
   const loadBuildSection = useCallback(async (force = false) => {
+    const readGeneration = demandGenerationRef.current;
     try {
-      const { value, generation } = await requestDemand("diagnostics.build", async () => ({
-        nextInfo: await invoke<DiagnosticsInfo>("diagnostics_info"),
-        nextStartup: await invoke<StartupStatus>("startup_status"),
-        nextInventory: await invoke<ModelInventory>("models_inventory"),
-        nextBatchRules: await invoke<BatchOnImportRules>("config_batch_on_import_get"),
-        nextDiarizationOptional: await invoke<OptionalDiarizationBackendStatus>("config_diarization_optional_status"),
-        nextPolicy: await invoke<JobLogRetentionPolicy>("jobs_log_retention_policy"),
-      }), "build", force);
+      const { value, generation } = await requestDiagnosticGroup("diagnostics.build", {
+        nextInfo: () => invoke<DiagnosticsInfo>("diagnostics_info").then((value) => {
+          if (readGeneration) commitDemandResult(readGeneration, () => { setInfo(value); });
+          return value;
+        }),
+        nextStartup: () => invoke<StartupStatus>("startup_status").then((value) => {
+          if (readGeneration) commitDemandResult(readGeneration, () => { setStartup(value); });
+          return value;
+        }),
+        nextInventory: () => invoke<ModelInventory>("models_inventory").then((value) => {
+          if (readGeneration) commitDemandResult(readGeneration, () => { setInventory(value); });
+          return value;
+        }),
+        nextBatchRules: () => invoke<BatchOnImportRules>("config_batch_on_import_get").then((value) => {
+          if (readGeneration) commitDemandResult(readGeneration, () => { setBatchRules(value); });
+          return value;
+        }),
+        nextDiarizationOptional: () => invoke<OptionalDiarizationBackendStatus>("config_diarization_optional_status").then((value) => {
+          if (readGeneration) commitDemandResult(readGeneration, () => { setDiarizationOptional(value); setDiarizationOptionalDraft((prev) => prev ?? value.config); });
+          return value;
+        }),
+        nextPolicy: () => invoke<JobLogRetentionPolicy>("jobs_log_retention_policy").then((value) => {
+          if (readGeneration) commitDemandResult(readGeneration, () => { setPolicy(value); });
+          return value;
+        }),
+        }, "build", force, (values) => {
+          if (values.nextInfo !== undefined) setInfo(values.nextInfo);
+          if (values.nextStartup !== undefined) setStartup(values.nextStartup);
+          if (values.nextInventory !== undefined) setInventory(values.nextInventory);
+          if (values.nextBatchRules !== undefined) setBatchRules(values.nextBatchRules);
+          if (values.nextDiarizationOptional !== undefined) setDiarizationOptional(values.nextDiarizationOptional);
+          if (values.nextDiarizationOptional) setDiarizationOptionalDraft((prev) => prev ?? values.nextDiarizationOptional!.config);
+          if (values.nextPolicy !== undefined) setPolicy(values.nextPolicy);
+        });
       commitDemandResult(generation, () => {
         setInfo(value.nextInfo);
         setStartup(value.nextStartup);
@@ -1315,30 +1358,62 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         setPolicy(value.nextPolicy);
       });
     } catch (e) {
-      if (e instanceof DemandSupersededError) return;
+      if (e instanceof DemandSupersededError || !readGeneration || !demandGenerationOwnsCommit(demandGenerationRef.current, readGeneration)) return;
       updateSectionStatus("build", "failed", String(e));
       setError((prev) => prev ?? String(e));
     }
-  }, [commitDemandResult, requestDemand, updateSectionStatus]);
+  }, [commitDemandResult, requestDemand, requestDiagnosticGroup, updateSectionStatus]);
 
   const loadToolsCoreSection = useCallback(async (force = false) => {
+    const readGeneration = demandGenerationRef.current;
     try {
-      const [core, performance] = await Promise.all([
-        requestDemand("diagnostics.tools-core", async () => ({
-          nextFfmpeg: await invoke<FfmpegToolsStatus>("tools_ffmpeg_status", force ? { force: true } : undefined),
-          nextYtdlp: await invoke<YtDlpToolsStatus>("tools_ytdlp_status", force ? { force: true } : undefined),
-          nextJsRuntime: await invoke<JsRuntimeToolsStatus>("tools_js_runtime_status", force ? { force: true } : undefined),
-          nextPython: await invoke<PythonToolchainStatus>("tools_python_status", force ? { force: true } : undefined),
-          nextPortablePython: await invoke<PortablePythonStatus>("tools_python_portable_status", force ? { force: true } : undefined),
-          nextIntegrity: await invoke<PackIntegrityManifestStatus>("tools_pack_integrity_manifest_status"),
-        }), "tools", force),
+      const [core, performance] = await settleDiagnosticDemands([
+        requestDiagnosticGroup("diagnostics.tools-core", {
+          nextFfmpeg: () => invoke<FfmpegToolsStatus>("tools_ffmpeg_status", force ? { force: true } : undefined).then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => { setFfmpeg(value); });
+            return value;
+          }),
+          nextYtdlp: () => invoke<YtDlpToolsStatus>("tools_ytdlp_status", force ? { force: true } : undefined).then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => { setYtdlp(value); });
+            return value;
+          }),
+          nextJsRuntime: () => invoke<JsRuntimeToolsStatus>("tools_js_runtime_status", force ? { force: true } : undefined).then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => { setJsRuntime(value); });
+            return value;
+          }),
+          nextPython: () => invoke<PythonToolchainStatus>("tools_python_status", force ? { force: true } : undefined).then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => { setPython(value); });
+            return value;
+          }),
+          nextPortablePython: () => invoke<PortablePythonStatus>("tools_python_portable_status", force ? { force: true } : undefined).then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => { setPortablePython(value); });
+            return value;
+          }),
+          nextIntegrity: () => invoke<PackIntegrityManifestStatus>("tools_pack_integrity_manifest_status").then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => { setIntegrity(value); });
+            return value;
+          }),
+        }, "tools", force, (values) => {
+          if (values.nextFfmpeg !== undefined) setFfmpeg(values.nextFfmpeg);
+          if (values.nextYtdlp !== undefined) setYtdlp(values.nextYtdlp);
+          if (values.nextJsRuntime !== undefined) setJsRuntime(values.nextJsRuntime);
+          if (values.nextPython !== undefined) setPython(values.nextPython);
+          if (values.nextPortablePython !== undefined) setPortablePython(values.nextPortablePython);
+          if (values.nextIntegrity !== undefined) setIntegrity(values.nextIntegrity);
+        }),
         requestDemand(
           "capability.performance-tier",
-          () => invoke<PerformanceTierStatus>("tools_performance_tier_status"),
+          () => invoke<PerformanceTierStatus>("tools_performance_tier_status").then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => setPerfTier(value));
+            return value;
+          }),
           "tools",
           force,
           capabilityProbeResultTruth,
-        ),
+        ).then((result) => {
+          commitDemandResult(result.generation, () => setPerfTier(result.value));
+          return result;
+        }),
       ]);
       commitDemandResult(core.generation, () => {
         setFfmpeg(core.value.nextFfmpeg);
@@ -1350,31 +1425,67 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         setPerfTier(performance.value);
       });
     } catch (e) {
-      if (e instanceof DemandSupersededError) return;
+      if (e instanceof DemandSupersededError || !readGeneration || !demandGenerationOwnsCommit(demandGenerationRef.current, readGeneration)) return;
       updateSectionStatus("tools", "failed", String(e));
       setError((prev) => prev ?? String(e));
     }
-  }, [commitDemandResult, requestDemand, updateSectionStatus]);
+  }, [commitDemandResult, requestDemand, requestDiagnosticGroup, updateSectionStatus]);
 
   const loadToolsSupplementalData = useCallback(async (force = false) => {
+    const readGeneration = demandGenerationRef.current;
     try {
-      const [supplemental, demucsStatus] = await Promise.all([
-        requestDemand("capability.voice-backends", async () => ({
-          nextSpleeter: await invoke<SpleeterPackStatus>("tools_spleeter_status"),
-          nextDiarization: await invoke<DiarizationPackStatus>("tools_diarization_status"),
-          nextTtsPreview: await invoke<TtsPreviewPackStatus>("tools_tts_preview_status"),
-          nextTtsNeuralLocalV1: await invoke<TtsNeuralLocalV1PackStatus>("tools_tts_neural_local_v1_status"),
-          nextTtsVoicePreservingLocalV1: await invoke<TtsVoicePreservingLocalV1PackStatus>("tools_tts_voice_preserving_local_v1_status"),
-          nextVoiceBackendsSnapshot: await invoke<VoiceBackendsSnapshot>("voice_backends_snapshot"),
-          nextVoiceBackendAdapters: await invoke<VoiceBackendAdapterDetail[]>("voice_backend_adapters_list"),
-        }), "tools", force, (value) => capabilityProbeResultTruth(value.nextVoiceBackendsSnapshot.performanceTier)),
+      const [supplemental, demucsStatus] = await settleDiagnosticDemands([
+        requestDiagnosticGroup("capability.voice-backends", {
+          nextSpleeter: () => invoke<SpleeterPackStatus>("tools_spleeter_status").then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => { setSpleeter(value); });
+            return value;
+          }),
+          nextDiarization: () => invoke<DiarizationPackStatus>("tools_diarization_status").then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => { setDiarization(value); });
+            return value;
+          }),
+          nextTtsPreview: () => invoke<TtsPreviewPackStatus>("tools_tts_preview_status").then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => { setTtsPreview(value); });
+            return value;
+          }),
+          nextTtsNeuralLocalV1: () => invoke<TtsNeuralLocalV1PackStatus>("tools_tts_neural_local_v1_status").then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => { setTtsNeuralLocalV1(value); });
+            return value;
+          }),
+          nextTtsVoicePreservingLocalV1: () => invoke<TtsVoicePreservingLocalV1PackStatus>("tools_tts_voice_preserving_local_v1_status").then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => { setTtsVoicePreservingLocalV1(value); });
+            return value;
+          }),
+          nextVoiceBackendsSnapshot: () => invoke<VoiceBackendsSnapshot>("voice_backends_snapshot").then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => { setVoiceBackendCatalog(value.catalog); setVoiceBackendRecommendation(value.recommendation); });
+            return value;
+          }),
+          nextVoiceBackendAdapters: () => invoke<VoiceBackendAdapterDetail[]>("voice_backend_adapters_list").then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => { setVoiceBackendAdapters(value); });
+            return value;
+          }),
+        }, "tools", force, (values) => {
+          if (values.nextSpleeter !== undefined) setSpleeter(values.nextSpleeter);
+          if (values.nextDiarization !== undefined) setDiarization(values.nextDiarization);
+          if (values.nextTtsPreview !== undefined) setTtsPreview(values.nextTtsPreview);
+          if (values.nextTtsNeuralLocalV1 !== undefined) setTtsNeuralLocalV1(values.nextTtsNeuralLocalV1);
+          if (values.nextTtsVoicePreservingLocalV1 !== undefined) setTtsVoicePreservingLocalV1(values.nextTtsVoicePreservingLocalV1);
+          if (values.nextVoiceBackendsSnapshot) { setVoiceBackendCatalog(values.nextVoiceBackendsSnapshot.catalog); setVoiceBackendRecommendation(values.nextVoiceBackendsSnapshot.recommendation); }
+          if (values.nextVoiceBackendAdapters !== undefined) setVoiceBackendAdapters(values.nextVoiceBackendAdapters);
+        }, (values) => values.nextVoiceBackendsSnapshot ? capabilityProbeResultTruth(values.nextVoiceBackendsSnapshot.performanceTier) : { state: "failed", verifiedAtMs: null, error: "Voice capability snapshot missing" }),
         requestDemand(
           "capability.demucs",
-          () => invoke<DemucsPackStatus>("tools_demucs_status"),
+          () => invoke<DemucsPackStatus>("tools_demucs_status").then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => setDemucs(value));
+            return value;
+          }),
           "tools",
           force,
           capabilityProbeResultTruth,
-        ),
+        ).then((result) => {
+          commitDemandResult(result.generation, () => setDemucs(result.value));
+          return result;
+        }),
       ]);
       const {
         nextSpleeter,
@@ -1417,10 +1528,11 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         setVoiceBackendRecommendation(nextVoiceBackendsSnapshot.recommendation);
       });
     } catch (e) {
-      if (e instanceof DemandSupersededError) return;
-      // Keep the core tool section usable even if optional pack/adapter probes fail.
+      if (e instanceof DemandSupersededError || !readGeneration || !demandGenerationOwnsCommit(demandGenerationRef.current, readGeneration)) return;
+      updateSectionStatus("tools", "failed", String(e));
+      setError((prev) => prev ?? String(e));
     }
-  }, [commitDemandResult, requestDemand]);
+  }, [commitDemandResult, requestDemand, requestDiagnosticGroup, updateSectionStatus]);
 
   const loadToolsSection = useCallback(async (force = false) => {
     await loadToolsCoreSection(force);
@@ -1428,31 +1540,63 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   }, [loadToolsCoreSection, loadToolsSupplementalData]);
 
   const loadPhase2Section = useCallback(async (force = false) => {
+    const readGeneration = demandGenerationRef.current;
     try {
-      const { value, generation } = await requestDemand("diagnostics.phase2", async () => ({
-        nextPhase2Plan: await invoke<Phase2PackPlanItem[]>("tools_phase2_packs_install_plan"),
-        nextPhase2Latest: await invoke<Phase2InstallLatestState>("tools_phase2_packs_install_latest_state"),
-      }), "phase2", force);
+      const { value, generation } = await requestDiagnosticGroup("diagnostics.phase2", {
+        nextPhase2Plan: () => invoke<Phase2PackPlanItem[]>("tools_phase2_packs_install_plan").then((value) => {
+          if (readGeneration) commitDemandResult(readGeneration, () => { setPhase2Plan(value); });
+          return value;
+        }),
+        nextPhase2Latest: () => invoke<Phase2InstallLatestState>("tools_phase2_packs_install_latest_state").then((value) => {
+          if (readGeneration) commitDemandResult(readGeneration, () => { setPhase2Latest(value); });
+          return value;
+        }),
+        }, "phase2", force, (values) => {
+          if (values.nextPhase2Plan !== undefined) setPhase2Plan(values.nextPhase2Plan);
+          if (values.nextPhase2Latest !== undefined) setPhase2Latest(values.nextPhase2Latest);
+        });
       commitDemandResult(generation, () => {
         setPhase2Plan(value.nextPhase2Plan);
         setPhase2Latest(value.nextPhase2Latest);
       });
     } catch (e) {
-      if (e instanceof DemandSupersededError) return;
+      if (e instanceof DemandSupersededError || !readGeneration || !demandGenerationOwnsCommit(demandGenerationRef.current, readGeneration)) return;
       updateSectionStatus("phase2", "failed", String(e));
       setError((prev) => prev ?? String(e));
     }
-  }, [commitDemandResult, requestDemand, updateSectionStatus]);
+  }, [commitDemandResult, requestDemand, requestDiagnosticGroup, updateSectionStatus]);
 
   const loadStorageSection = useCallback(async (force = false) => {
+    const readGeneration = demandGenerationRef.current;
     try {
-      const { value, generation } = await requestDemand("diagnostics.storage", async () => ({
-        nextStorage: await invoke<StorageBreakdown>("diagnostics_storage_breakdown"),
-        nextThumbnailCache: await invoke<ThumbnailCacheStatus>("diagnostics_thumbnail_cache_status"),
-        nextPolicy: await invoke<JobLogRetentionPolicy>("jobs_log_retention_policy"),
-        nextArtifactRetentionPolicy: await invoke<ItemArtifactRetentionPolicy>("jobs_item_artifact_retention_policy"),
-        nextProviderTitleRepairStatus: await invoke<ProviderTitleRepairStatus>("provider_metadata_repair_status"),
-      }), "storage", force);
+      const { value, generation } = await requestDiagnosticGroup("diagnostics.storage", {
+        nextStorage: () => invoke<StorageBreakdown>("diagnostics_storage_breakdown").then((value) => {
+          if (readGeneration) commitDemandResult(readGeneration, () => { setStorage(value); });
+          return value;
+        }),
+        nextThumbnailCache: () => invoke<ThumbnailCacheStatus>("diagnostics_thumbnail_cache_status").then((value) => {
+          if (readGeneration) commitDemandResult(readGeneration, () => { setThumbnailCache(value); });
+          return value;
+        }),
+        nextPolicy: () => invoke<JobLogRetentionPolicy>("jobs_log_retention_policy").then((value) => {
+          if (readGeneration) commitDemandResult(readGeneration, () => { setPolicy(value); });
+          return value;
+        }),
+        nextArtifactRetentionPolicy: () => invoke<ItemArtifactRetentionPolicy>("jobs_item_artifact_retention_policy").then((value) => {
+          if (readGeneration) commitDemandResult(readGeneration, () => { setArtifactRetentionPolicy(value); });
+          return value;
+        }),
+        nextProviderTitleRepairStatus: () => invoke<ProviderTitleRepairStatus>("provider_metadata_repair_status").then((value) => {
+          if (readGeneration) commitDemandResult(readGeneration, () => { setProviderTitleRepairStatus(value); });
+          return value;
+        }),
+        }, "storage", force, (values) => {
+          if (values.nextStorage !== undefined) setStorage(values.nextStorage);
+          if (values.nextThumbnailCache !== undefined) setThumbnailCache(values.nextThumbnailCache);
+          if (values.nextPolicy !== undefined) setPolicy(values.nextPolicy);
+          if (values.nextArtifactRetentionPolicy !== undefined) setArtifactRetentionPolicy(values.nextArtifactRetentionPolicy);
+          if (values.nextProviderTitleRepairStatus !== undefined) setProviderTitleRepairStatus(values.nextProviderTitleRepairStatus);
+        });
       commitDemandResult(generation, () => {
         setStorage(value.nextStorage);
         setThumbnailCache(value.nextThumbnailCache);
@@ -1461,26 +1605,50 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         setProviderTitleRepairStatus(value.nextProviderTitleRepairStatus);
       });
     } catch (e) {
-      if (e instanceof DemandSupersededError) return;
+      if (e instanceof DemandSupersededError || !readGeneration || !demandGenerationOwnsCommit(demandGenerationRef.current, readGeneration)) return;
       updateSectionStatus("storage", "failed", String(e));
       setError((prev) => prev ?? String(e));
     }
-  }, [commitDemandResult, requestDemand, updateSectionStatus]);
+  }, [commitDemandResult, requestDemand, requestDiagnosticGroup, updateSectionStatus]);
 
   const loadTraceSection = useCallback(async (force = false) => {
+    const readGeneration = demandGenerationRef.current;
     const protectionGeneration = youtubeProtectionRequestRef.current + 1;
     youtubeProtectionRequestRef.current = protectionGeneration;
     try {
-      const [traceResult, protectionResult] = await Promise.all([
-        requestDemand("diagnostics.trace", async () => ({
-          nextDiagnosticsTraceDir: await invoke<DiagnosticsTraceDirStatus>("diagnostics_trace_dir_status"),
-          nextRecentTrace: await invoke<DiagnosticsTraceEntry[]>("diagnostics_trace_recent", { limit: 120 }),
-          nextDiagnosticsCapture: await invoke<DiagnosticsCaptureStatus>("diagnostics_capture_status"),
-          nextDatabaseRuntime: await invoke<DatabaseRuntimeStatus>("database_runtime_status"),
-        }), "trace", force),
+      const [traceResult, protectionResult] = await settleDiagnosticDemands([
+        requestDiagnosticGroup("diagnostics.trace", {
+          nextDiagnosticsTraceDir: () => invoke<DiagnosticsTraceDirStatus>("diagnostics_trace_dir_status").then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => { setDiagnosticsTraceDir(value); });
+            return value;
+          }),
+          nextRecentTrace: () => invoke<DiagnosticsTraceEntry[]>("diagnostics_trace_recent", { limit: 120 }).then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => { setRecentTrace(value); });
+            return value;
+          }),
+          nextDiagnosticsCapture: () => invoke<DiagnosticsCaptureStatus>("diagnostics_capture_status").then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => { setDiagnosticsCapture(value); });
+            return value;
+          }),
+          nextDatabaseRuntime: () => invoke<DatabaseRuntimeStatus>("database_runtime_status").then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => { setDatabaseRuntime(value); });
+            return value;
+          }),
+        }, "trace", force, (values) => {
+          if (values.nextDiagnosticsTraceDir !== undefined) setDiagnosticsTraceDir(values.nextDiagnosticsTraceDir);
+          if (values.nextRecentTrace !== undefined) setRecentTrace(values.nextRecentTrace);
+          if (values.nextDiagnosticsCapture !== undefined) setDiagnosticsCapture(values.nextDiagnosticsCapture);
+          if (values.nextDatabaseRuntime !== undefined) setDatabaseRuntime(values.nextDatabaseRuntime);
+        }),
         requestDemand(
           "protection.snapshot",
-          () => loadYoutubeProtectionSnapshot<YoutubeProtectionDiagnosticsStatus, YoutubeProtectionDiagnosticsHistory>("diagnostics", 100),
+          () => loadYoutubeProtectionSnapshot<YoutubeProtectionDiagnosticsStatus, YoutubeProtectionDiagnosticsHistory>("diagnostics", 100).then((value) => {
+            if (readGeneration) commitDemandResult(readGeneration, () => {
+              if (youtubeProtectionRequestRef.current !== protectionGeneration) return;
+              setYoutubeProtectionDiagnostics({ ...value, downloadReplay: null, enumerationReplay: null });
+            });
+            return value;
+          }),
           "trace",
           force,
         ),
@@ -1502,11 +1670,11 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         }
       });
     } catch (e) {
-      if (e instanceof DemandSupersededError) return;
+      if (e instanceof DemandSupersededError || !readGeneration || !demandGenerationOwnsCommit(demandGenerationRef.current, readGeneration)) return;
       updateSectionStatus("trace", "failed", String(e));
       setError((prev) => prev ?? String(e));
     }
-  }, [commitDemandResult, requestDemand, updateSectionStatus]);
+  }, [commitDemandResult, requestDemand, requestDiagnosticGroup, updateSectionStatus]);
 
   const replayYoutubeProtectionHistory = useCallback(async () => {
     const replayGeneration = youtubeProtectionRequestRef.current;
@@ -1681,6 +1849,12 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     };
   }, [sectionStatus]);
 
+  const probeText = (value: boolean | null | undefined, ready: string, notReady: string): string =>
+    value === null || value === undefined ? diagnosticPendingText(sectionStatus.tools.state) : value ? ready : notReady;
+  const toolsPendingText = diagnosticPendingText(sectionStatus.tools.state);
+  const performanceVerified = capabilityIsVerified(perfTier);
+  const demucsVerified = capabilityIsVerified(demucs);
+
   const toolLifecycleRows = useMemo(
     () => [
       {
@@ -1697,7 +1871,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       {
         name: "yt-dlp",
         state: !ytdlp
-          ? "checking…"
+          ? toolsPendingText
           : ytdlp.available
             ? ytdlp.bundled_installed
               ? "included and ready now"
@@ -1707,7 +1881,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       {
         name: "JS runtime for yt-dlp",
         state: !jsRuntime
-          ? "checking…"
+          ? toolsPendingText
           : jsRuntime.available
             ? jsRuntime.bundled_deno_installed
               ? "included and ready now"
@@ -1727,7 +1901,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         state: probeText(ttsVoicePreservingLocalV1?.installed, "installed and ready", "optional / not installed"),
       },
     ],
-    [jsRuntime?.available, jsRuntime?.bundled_deno_installed, jsRuntime?.preferred_runtime, portablePython?.installed, python?.venv_exists, startup?.offline_bundle_state, ttsVoicePreservingLocalV1?.installed, ytdlp?.available, ytdlp?.bundled_installed],
+    [toolsPendingText, jsRuntime?.available, jsRuntime?.bundled_deno_installed, jsRuntime?.preferred_runtime, portablePython?.installed, python?.venv_exists, startup?.offline_bundle_state, ttsVoicePreservingLocalV1?.installed, ytdlp?.available, ytdlp?.bundled_installed],
   );
 
   const recentFailures = useMemo(() => {
@@ -1780,33 +1954,20 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     ttsNeuralLocalV1?.installed && ttsVoicePreservingLocalV1?.installed,
   );
 
-  // WP-0320: an unloaded section (idle/queued/loading) is "Checking...", never a verdict.
-  const phase2SummaryLabel =
-    !phase2Latest && sectionStatus.phase2.state !== "failed"
-      ? "Checking..."
-      : phase2HasActive
-        ? "Installing..."
-        : voicePackagesRuntimeReady
-          ? "Installed"
-          : phase2HasProblem
-            ? "Interrupted"
-          : "Not installed";
+  // Unrequested, active and terminal failures are distinct; install history is not readiness.
+  const phase2SummaryLabel = phase2HasActive
+    ? "Installing…"
+    : !ttsNeuralLocalV1 || !ttsVoicePreservingLocalV1
+      ? diagnosticPendingText(sectionStatus.tools.state)
+      : voicePackagesRuntimeReady ? "Installed" : "Needs repair";
 
-  const ffmpegSummaryLabel =
-    !ffmpeg
-      ? sectionStatus.tools.state === "failed"
-        ? "Unknown"
-        : "Checking..."
-      : ffmpeg.installed
-        ? "Ready"
-        : "Missing";
+  const ffmpegSummaryLabel = !ffmpeg
+    ? diagnosticPendingText(sectionStatus.tools.state)
+    : ffmpeg.installed ? "Ready" : "Missing";
 
-  const storageSummaryLabel =
-    sectionStatus.storage.state === "loading" && !storage
-      ? "Calculating..."
-      : storage
-        ? `${Math.round((storage.total_bytes ?? 0) / 1024 / 1024)} MB`
-        : "...";
+  const storageSummaryLabel = storage
+    ? `${Math.round((storage.total_bytes ?? 0) / 1024 / 1024)} MB`
+    : diagnosticPendingText(sectionStatus.storage.state);
 
   usePollingLoop(
     async () => {
@@ -2812,43 +2973,42 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   ];
 
   return (
-    <section>
+    <section className="diagnostics-page">
       <h1>Diagnostics</h1>
 
-      {error ? <div className="error">{error}</div> : null}
-      {notice ? <div className="card">{notice}</div> : null}
+      {error ? <details className="error"><summary>Diagnostics action or check failed — show details</summary><pre>{error}</pre></details> : null}
+      {notice ? <div className="diagnostics-notice" role="status">{notice}</div> : null}
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 10, marginBottom: 16 }}>
-        <button type="button" className="card diag-summary-tile" data-testid="diagnostics-summary-build" data-agent-safe-action="true" aria-label="App version — go to Build details" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-build")?.scrollIntoView({ behavior: "smooth" })}>
+        <button type="button" className="diag-summary-tile" data-testid="diagnostics-summary-build" data-agent-safe-action="true" aria-label="App version — go to Build details" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => { const section = document.getElementById("diag-build"); if (section instanceof HTMLDetailsElement) section.open = true; section?.scrollIntoView({ behavior: "smooth" }); }}>
           <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>App version</div>
           <div style={{ fontWeight: 700, fontSize: 18 }}>{info?.app_version ?? "..."}</div>
         </button>
-        <button type="button" className="card diag-summary-tile" data-testid="diagnostics-summary-voice" data-agent-safe-action="true" aria-label="Voice packages — go to Voice cloning package details" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-phase2")?.scrollIntoView({ behavior: "smooth" })}>
+        <button type="button" className="diag-summary-tile" data-testid="diagnostics-summary-voice" data-agent-safe-action="true" aria-label="Voice packages — go to Voice cloning package details" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => { const section = document.getElementById("diag-phase2"); if (section instanceof HTMLDetailsElement) section.open = true; section?.scrollIntoView({ behavior: "smooth" }); }}>
           <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Voice packages</div>
-          <div style={{ fontWeight: 700, fontSize: 18, color: phase2HasActive ? "#92400e" : phase2Steps.length > 0 && phase2Steps.every((s: any) => s?.status === "succeeded") ? "#166534" : undefined }}>
+          <div style={{ fontWeight: 700, fontSize: 18, color: phase2HasActive ? "#92400e" : voicePackagesRuntimeReady ? "#166534" : undefined }}>
             {phase2SummaryLabel}
           </div>
         </button>
-        <button type="button" className="card diag-summary-tile" data-testid="diagnostics-summary-ffmpeg" data-agent-safe-action="true" aria-label="FFmpeg — go to Tools details" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-tools")?.scrollIntoView({ behavior: "smooth" })}>
+        <button type="button" className="diag-summary-tile" data-testid="diagnostics-summary-ffmpeg" data-agent-safe-action="true" aria-label="FFmpeg — go to Tools details" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => { const section = document.getElementById("diag-tools"); if (section instanceof HTMLDetailsElement) section.open = true; section?.scrollIntoView({ behavior: "smooth" }); }}>
           <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>FFmpeg</div>
           <div style={{ fontWeight: 700, fontSize: 18, color: ffmpegSummaryLabel === "Ready" ? "#166534" : ffmpegSummaryLabel === "Missing" ? "#dc2626" : undefined }}>
             {ffmpegSummaryLabel}
           </div>
         </button>
-        <button type="button" className="card diag-summary-tile" data-testid="diagnostics-summary-storage" data-agent-safe-action="true" aria-label="Storage — go to Storage details" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-storage")?.scrollIntoView({ behavior: "smooth" })}>
+        <button type="button" className="diag-summary-tile" data-testid="diagnostics-summary-storage" data-agent-safe-action="true" aria-label="Storage — go to Storage details" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => { const section = document.getElementById("diag-storage"); if (section instanceof HTMLDetailsElement) section.open = true; section?.scrollIntoView({ behavior: "smooth" }); }}>
           <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Storage</div>
           <div style={{ fontWeight: 700, fontSize: 18 }}>{storageSummaryLabel}</div>
         </button>
-        <button type="button" className="card diag-summary-tile" data-testid="diagnostics-summary-failures" data-agent-safe-action="true" aria-label="Recent failures — go to Recent failures details" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => document.getElementById("diag-failures")?.scrollIntoView({ behavior: "smooth" })}>
+        <button type="button" className="diag-summary-tile" data-testid="diagnostics-summary-failures" data-agent-safe-action="true" aria-label="Recent failures — go to Recent failures details" style={{ margin: 0, textAlign: "center", cursor: "pointer" }} onClick={() => { const section = document.getElementById("diag-failures"); if (section instanceof HTMLDetailsElement) section.open = true; section?.scrollIntoView({ behavior: "smooth" }); }}>
           <div style={{ fontSize: 12, textTransform: "uppercase", opacity: 0.6, marginBottom: 4 }}>Recent failures</div>
           <div style={{ fontWeight: 700, fontSize: 18, color: recentFailures.length > 0 ? "#dc2626" : "#166534" }}>
-            {recentFailures.length}
+            {sectionStatus.jobs.state === "ready" ? recentFailures.length : diagnosticPendingText(sectionStatus.jobs.state)}
           </div>
         </button>
       </div>
 
-      <div className="card">
-        <h2>Loading status</h2>
+      <details className="diagnostics-section" open><summary><h2>Loading status</h2></summary>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Diagnostics sections load independently so this page stays responsive. If a feature is
           still initializing, use the app-state snapshot below to see which dependency is blocking it.
@@ -2901,7 +3061,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                       ? `${formatTs(sectionStatus[key].verified_at_ms)} · ${Math.round(sectionStatus[key].freshness_ms / 1000)}s${sectionStatus[key].shared ? " · shared" : ""}`
                       : "not verified"}
                   </td>
-                  <td>{sectionStatus[key].error ?? "-"}</td>
+                  <td>{sectionStatus[key].error ? <details><summary>Check failed — details</summary><pre>{sectionStatus[key].error}</pre></details> : "-"}</td>
                   <td>
                     <button
                       type="button"
@@ -2917,10 +3077,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             </tbody>
           </table>
         </div>
-      </div>
+      </details>
 
-      <div className="card" id="diag-build">
-        <h2>Build</h2>
+      <details className="diagnostics-section" id="diag-build"><summary><h2>Build</h2></summary>
         <div className="kv">
           <div className="k">App</div>
           <div className="v">
@@ -2969,10 +3128,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             </table>
           </div>
         ) : null}
-      </div>
+      </details>
 
-      <div className="card">
-        <h2>Component status</h2>
+      <details className="diagnostics-section" open><summary><h2>Component status</h2></summary>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Included means shipped inside the installer. Ready means installed and usable.
           Installed means copied into app data but may not be fully configured.
@@ -2996,10 +3154,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             </tbody>
           </table>
         </div>
-      </div>
+      </details>
 
-      <div className="card">
-        <h2>Data and runtime</h2>
+      <details className="diagnostics-section"><summary><h2>Data and runtime</h2></summary>
         <div className="kv">
           <div className="k">App data dir</div>
           <div className="v">{info?.app_data_dir ?? "-"}</div>
@@ -3045,10 +3202,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             Refresh
           </button>
         </div>
-      </div>
+      </details>
 
-      <div className="card">
-        <h2>App state snapshot</h2>
+      <details className="diagnostics-section"><summary><h2>App state snapshot</h2></summary>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Point-in-time local export for operator handoff and LLM analysis. This collects startup,
           roots, tool state, library/job counts, recent trace rows, and feature-health summaries in
@@ -3168,10 +3324,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             ) : null}
           </>
         ) : null}
-      </div>
+      </details>
 
-      <div className="card" id="diag-trace">
-        <h2>YouTube protection diagnostics</h2>
+      <details className="diagnostics-section" id="diag-trace"><summary><h2>YouTube protection diagnostics</h2></summary>
         <div style={{ color: "#4b5563" }}>
           Read-only adaptive-policy evidence for the current authenticated runtime epoch. Counts are
           the bounded recent history shown here; saved pacing remains owned by Options.
@@ -3613,10 +3768,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             </tbody>
           </table>
         </div>
-      </div>
+      </details>
 
-      <div className="card" id="diag-tools">
-        <h2>Tools</h2>
+      <details className="diagnostics-section" id="diag-tools"><summary><h2>Tools</h2></summary>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Tool state is probed on demand and cached for 10 minutes; Refresh re-probes.
         </div>
@@ -3767,21 +3921,21 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
         <div className="kv">
           <div className="k">Demucs (separation optional)</div>
-          <div className="v">{probeText(demucs?.installed, "installed", "not installed")}</div>
+          <div className="v">{demucs?.probe_state === "missing_runtime" ? "Not installed — Python runtime missing" : demucs && !demucsVerified ? "Unknown — probe failed" : probeText(demucs?.installed, "installed", "not installed")}</div>
         </div>
         <div className="kv">
           <div className="k">demucs</div>
           <div className="v">{demucs?.demucs_version ?? "-"}</div>
         </div>
         {demucs ? <div className="muted">Demucs probe: {capabilityProbeProvenance(demucs)}</div> : null}
-        {demucs?.probe_error ? <div className="muted">Demucs probe failed: {demucs.probe_error}</div> : null}
+        {demucs?.probe_error ? <details><summary>Demucs check failed — technical details</summary><pre>{demucs.probe_error}</pre></details> : null}
 
         <div className="kv">
           <div className="k">Diarization (baseline)</div>
           <div className="v">
             {diarization
               ? diarization.state ?? (diarization.installed ? "installed" : "not installed")
-              : "checking…"}
+              : toolsPendingText}
           </div>
         </div>
         <div className="kv">
@@ -3840,7 +3994,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <div className="k">TTS preview (neural local)</div>
           <div className="v">
             {!ttsNeuralLocalV1
-              ? "checking…"
+              ? toolsPendingText
               : ttsNeuralLocalV1.installed
                 ? "installed"
                 : ttsNeuralLocalV1.repair_required
@@ -3871,7 +4025,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <div className="k">TTS voice-preserving (local)</div>
           <div className="v">
             {!ttsVoicePreservingLocalV1
-              ? "checking…"
+              ? toolsPendingText
               : ttsVoicePreservingLocalV1.installed
                 ? "installed"
                 : ttsVoicePreservingLocalV1.repair_required
@@ -4457,10 +4611,11 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             Refresh
           </button>
         </div>
-      </div>
+      </details>
 
-      <div className="card" id="diag-phase2">
-        <h2>Voice cloning packages (one-click)</h2>
+      <details className="diagnostics-section" id="diag-phase2"><summary><h2>Voice package readiness and installation history</h2></summary>
+        <div className="kv"><div className="k">Current readiness</div><div className="v">{phase2SummaryLabel}</div></div>
+        <p className="muted">Installation history below records the latest attempt; completed steps do not prove current packages or models are usable.</p>
         <div style={{ color: "#4b5563" }}>
           Installs all voice cloning Python packages in one flow. Offline-full installers already include
           these (this button is mainly for repair). No telemetry.
@@ -4494,7 +4649,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             step state, plus a 5-state headline that never lies (no more permanent
             "interrupted" label when nothing has even been attempted). */}
         <div className="kv">
-          <div className="k">Live progress</div>
+          <div className="k">Latest installation attempt</div>
           <div className="v">
             <div>{phase2HeadlineLabel}</div>
             {phase2Steps.length > 0 && (
@@ -4503,7 +4658,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                   value={phase2CompletedSteps}
                   max={phase2Steps.length}
                   style={{ width: 260, verticalAlign: "middle" }}
-                  aria-label={`Installed ${phase2CompletedSteps} of ${phase2Steps.length} voice packs`}
+                  aria-label={`Latest installation attempt completed ${phase2CompletedSteps} of ${phase2Steps.length} steps`}
                 />
                 <span style={{ marginLeft: 8, color: "#4b5563" }}>
                   {phase2CompletedSteps} / {phase2Steps.length}
@@ -4557,7 +4712,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                     <td>
                       {typeof step?.delta_bytes === "number" ? formatBytes(step.delta_bytes) : "-"}
                     </td>
-                    <td style={{ maxWidth: 520 }}>{step?.error ? String(step.error) : "-"}</td>
+                    <td style={{ maxWidth: 520 }}>{step?.error ? <details><summary>Attempt failed — technical details</summary><pre>{String(step.error)}</pre></details> : "-"}</td>
                     <td>
                       <div className="row" style={{ marginTop: 0 }}>
                         <button
@@ -4576,7 +4731,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                 phase2Plan.map((p) => (
                   <tr key={p.id}>
                     <td>{p.title}</td>
-                    <td>{p.supported ? "queued" : "skipped"}</td>
+                    <td>{p.supported ? "not started" : "unsupported"}</td>
                     <td>-</td>
                     <td>-</td>
                     <td>{p.estimated_bytes ? formatBytes(p.estimated_bytes) : "unknown"}</td>
@@ -4592,10 +4747,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             </tbody>
           </table>
         </div>
-      </div>
+      </details>
 
-      <div className="card">
-        <h2>Do these steps automatically on import</h2>
+      <details className="diagnostics-section"><summary><h2>Do these steps automatically on import</h2></summary>
         <div style={{ color: "#4b5563" }}>
           Off by default. When turned on, each video you import will automatically start the steps
           you tick below. Everything runs on your own computer.
@@ -4673,10 +4827,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             Refresh
           </button>
         </div>
-      </div>
+      </details>
 
-      <div className="card">
-        <h2>Advanced: speaker-labelling engine</h2>
+      <details className="diagnostics-section"><summary><h2>Advanced: speaker-labelling engine</h2></summary>
         <div style={{ color: "#4b5563" }}>
           Most people never need this. Open it only if you want to plug in your own advanced
           speaker-labelling engine.
@@ -4880,14 +5033,13 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           </button>
         </div>
         </details>
-      </div>
+      </details>
 
-      <div className="card">
-        <h2>Integrity + performance</h2>
+      <details className="diagnostics-section"><summary><h2>Integrity + performance</h2></summary>
 
         <div className="kv">
           <div className="k">Integrity manifest</div>
-          <div className="v">{integrity?.exists ? "present" : "not generated yet"}</div>
+          <div className="v">{integrity ? integrity.exists ? "present" : "not generated yet" : toolsPendingText}</div>
         </div>
         <div className="kv">
           <div className="k">Manifest path</div>
@@ -4914,7 +5066,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
 
         <div className="kv">
           <div className="k">Performance tier</div>
-          <div className="v">{perfTier ? perfTier.tier ?? "-" : "checking…"}</div>
+          <div className="v">{perfTier?.probe_state === "missing_runtime" ? "Unknown — Python runtime missing" : perfTier ? performanceVerified ? perfTier.tier ?? "unknown" : "Unknown — probe failed" : toolsPendingText}</div>
         </div>
         <div className="kv">
           <div className="k">GPUs</div>
@@ -4923,7 +5075,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         <div className="kv">
           <div className="k">Torch CUDA available</div>
           <div className="v">
-            {perfTier?.torch_cuda_available === null || perfTier?.torch_cuda_available === undefined
+            {!performanceVerified || perfTier?.torch_cuda_available === null || perfTier?.torch_cuda_available === undefined
               ? "unknown"
               : perfTier.torch_cuda_available
                 ? "yes"
@@ -4931,23 +5083,22 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           </div>
         </div>
         {perfTier ? <div className="muted">Performance probe: {capabilityProbeProvenance(perfTier)}</div> : null}
-        {perfTier?.probe_error ? <div className="muted">Performance probe failed: {perfTier.probe_error}</div> : null}
+        {perfTier?.probe_error ? <details><summary>Performance check failed — technical details</summary><pre>{perfTier.probe_error}</pre></details> : null}
         <div className="kv">
           <div className="k">Recommended separation</div>
-          <div className="v">{perfTier?.recommended_separation_backend ?? "-"}</div>
+          <div className="v">{performanceVerified ? perfTier?.recommended_separation_backend ?? "-" : "unknown"}</div>
         </div>
         <div className="kv">
           <div className="k">Recommended diarization</div>
-          <div className="v">{perfTier?.recommended_diarization_backend ?? "-"}</div>
+          <div className="v">{performanceVerified ? perfTier?.recommended_diarization_backend ?? "-" : "unknown"}</div>
         </div>
         <div className="kv">
           <div className="k">Recommended TTS/VC device</div>
-          <div className="v">{perfTier?.recommended_tts_vc_device ?? "-"}</div>
+          <div className="v">{performanceVerified ? perfTier?.recommended_tts_vc_device ?? "-" : "unknown"}</div>
         </div>
-      </div>
+      </details>
 
-      <div className="card">
-        <h2>Licensing report</h2>
+      <details className="diagnostics-section"><summary><h2>Licensing report</h2></summary>
         <div style={{ color: "#4b5563" }}>
           Best-effort dependency + model attribution report for installed packs/models (no legal
           advice).
@@ -4968,10 +5119,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             Reveal report
           </button>
         </div>
-      </div>
+      </details>
 
-      <div className="card" id="diag-storage">
-        <h2>Storage</h2>
+      <details className="diagnostics-section" id="diag-storage"><summary><h2>Storage</h2></summary>
         <div style={{ color: "#4b5563", marginBottom: 8 }}>
           Storage totals are best-effort and bounded so Diagnostics does not stall on very large artifact trees.
         </div>
@@ -5116,10 +5266,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             </div>
           </div>
         ))}
-      </div>
+      </details>
 
-      <div className="card" id="diag-failures">
-        <h2>Recent failures</h2>
+      <details className="diagnostics-section" id="diag-failures"><summary><h2>Recent failures</h2></summary>
         <div className="row" style={{ marginTop: 0, marginBottom: 12, flexWrap: "wrap" }}>
           <button
             type="button"
@@ -5181,10 +5330,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             </tbody>
           </table>
         </div>
-      </div>
+      </details>
 
-      <div className="card">
-        <h2>Export</h2>
+      <details className="diagnostics-section"><summary><h2>Export</h2></summary>
         <div className="kv">
           <div className="k">Bundle</div>
           <div className="v">Includes recent failed jobs + redacted logs (safe by default).</div>
@@ -5194,10 +5342,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             Export diagnostics bundle (zip)
           </button>
         </div>
-      </div>
+      </details>
 
-      <div className="card">
-        <h2>Models (local-first)</h2>
+      <details className="diagnostics-section"><summary><h2>Models (local-first)</h2></summary>
         <div style={{ color: "#4b5563" }}>
           Required runtime models should already be installed by the installer/offline bundle.
           Demo/test assets are optional and are not needed for real subtitle generation or
@@ -5394,7 +5541,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
             </div>
           </div>
         ) : null}
-      </div>
+      </details>
     </section>
   );
 }

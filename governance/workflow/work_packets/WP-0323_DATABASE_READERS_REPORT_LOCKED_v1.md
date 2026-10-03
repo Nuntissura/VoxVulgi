@@ -66,3 +66,14 @@ Operator direction 2026-09-24: VoxVulgi cargo builds slow down the higher-priori
 - Frontend failure/recovery and projection freshness checks: 41 passed. Engine operator_activity checks: 2 passed, including one-row read budget under 3 MiB with 32 MiB of stored payloads.
 - A second canonical read-only probe encountered SQLite database is locked; its additional row reconciliation did not pass. Do not infer that all read locks or admission failures are eliminated.
 - Current implementation preserves four-slot bounded admission and all historical requirements. Core rebuild and isolated app-boundary proof follow; installed-app 30-minute acceptance remains outstanding.
+
+### 2026-10-03 quiet export proof boundary
+
+- The existing Options Export now action lacks semantic bridge identity, blocking the original first-try export acceptance without foreground input. Declare that same non-destructive export button as `subscriptions.export-now` with reversible-state effect; use its existing command, receipt and independently reread exported canonical content. No new exporter or test-only path.
+
+### 2026-10-03 event-rollup indexed admission remediation
+
+- Canonical read-only query plan proves each subscription event scans JSON from all queued/running direct children while holding BEGIN IMMEDIATE: 13,535 queued and 8 running at inspection. Existing indexes filter type/status but cannot filter subscription identity without payload reads. Preserve child-owned subscription semantics and the writer-reservation snapshot regression; parent-only narrowing and pre-admission snapshots are rejected.
+- Independent canonical read-only reconciliation of all 194 active subscription aggregates equals both the minimal canonical projection and the guarded indexed query. Whole-set canonical aggregate took 3644 ms; a single warm canonical scan took43 ms. On the canonical-field projection the indexed per-subscription probe took0.24 ms, and EXPLAIN searches subscription expression plus status and batch instead of all active payloads. Projection timing is not a full live latency claim.
+- Add startup-only schema60 partial expression index for direct jobs, guarding malformed JSON with CASE/json_valid. Event counts/current job use that exact expression/index; writer reservation, status predicates, NULL subscription semantics, batch totals, admission limits and UI behavior remain unchanged. Invalid JSON rows cannot abort index creation. Original lock root-cause and30-minute/export gates remain open; this addresses an observed expensive writer query, not every SQLite lock.
+- Root coordinates focused migration/rollup/snapshot/IO-budget tests and packaged database-first startup proof. Evidence: build_target/tool_artifacts/wp_runs/WP-0323/20261003/subscription_index_probe.json. Full1.28 GB backup was unsuitable under load and stopped at its90-second bound; proof uses read-only canonical reconciliation and a minimal disposable canonical-field projection instead.

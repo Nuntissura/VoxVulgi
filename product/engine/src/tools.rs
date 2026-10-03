@@ -7838,7 +7838,7 @@ pub fn performance_tier_status(paths: &AppPaths) -> PerformanceTierStatus {
     let source_identity = capability_probe_source_identity(paths, "performance_tier_torch_cuda");
     if !venv_python_path(&paths.python_venv_dir()).exists() {
         return PerformanceTierStatus {
-            tier: "cpu".to_string(),
+            tier: "unknown".to_string(),
             gpu_names: Vec::new(),
             torch_cuda_available: None,
             recommended_separation_backend: "spleeter (baseline)".to_string(),
@@ -7871,11 +7871,11 @@ pub fn performance_tier_status(paths: &AppPaths) -> PerformanceTierStatus {
             .and_then(capability_probe_pid_from_error)
     });
 
-    let tier = if torch_cuda_available.unwrap_or(false) || !gpu_names.is_empty() {
-        "gpu".to_string()
-    } else {
-        "cpu".to_string()
-    };
+    let tier = verified_performance_tier(
+        outcome.error.is_some(),
+        torch_cuda_available,
+        !gpu_names.is_empty(),
+    ).to_string();
 
     // Defaults remain CPU-safe and deterministic.
     let recommended_separation_backend = if tier == "gpu" {
@@ -7905,6 +7905,16 @@ pub fn performance_tier_status(paths: &AppPaths) -> PerformanceTierStatus {
         child_pid,
         probe_state: outcome.probe_state.to_string(),
         probe_error: outcome.error,
+    }
+}
+
+fn verified_performance_tier(probe_failed: bool, cuda: Option<bool>, gpu_named: bool) -> &'static str {
+    if probe_failed || cuda.is_none() {
+        "unknown"
+    } else if cuda == Some(true) || gpu_named {
+        "gpu"
+    } else {
+        "cpu"
     }
 }
 
@@ -9573,15 +9583,15 @@ fn kokoro_warmup_probe_path(paths: &AppPaths) -> std::path::PathBuf {
     paths.python_models_dir().join("kokoro").join(".warmup_ok")
 }
 
+fn kokoro_cache_repo(paths: &AppPaths) -> PathBuf {
+    paths.huggingface_cache_dir().join("hub").join("models--hexgrad--Kokoro-82M")
+}
+
 fn kokoro_app_cache_ready(paths: &AppPaths) -> bool {
     let pin = &pinned_dependency_manifest::manifest()
         .tts_neural_local_v1
         .kokoro_model;
-    let repo = paths
-        .cache_dir()
-        .join("huggingface")
-        .join("hub")
-        .join("models--hexgrad--Kokoro-82M");
+    let repo = kokoro_cache_repo(paths);
     if std::fs::read_to_string(repo.join("refs").join("main"))
         .map(|value| value.trim() == pin.revision)
         .unwrap_or(false)
@@ -9603,11 +9613,7 @@ fn provision_pinned_kokoro_assets(paths: &AppPaths) -> Result<()> {
     let pin = &pinned_dependency_manifest::manifest()
         .tts_neural_local_v1
         .kokoro_model;
-    let repo = paths
-        .cache_dir()
-        .join("huggingface")
-        .join("hub")
-        .join("models--hexgrad--Kokoro-82M");
+    let repo = kokoro_cache_repo(paths);
     let snapshot = repo.join("snapshots").join(&pin.revision);
     for file in &pin.files {
         let relative = Path::new(&file.filename);
@@ -11280,7 +11286,7 @@ manifest_paths = {}
 git_env = dict(os.environ)
 git_env['GIT_LFS_SKIP_SMUDGE'] = '1'
 def run_git(*args, env=None):
-    return subprocess.run(['git', '-C', str(target), *args], check=True, capture_output=True, text=True, timeout=300, env=env)
+    return subprocess.run(['git', '-C', str(target), *args], check=True, capture_output=True, text=True, timeout=300, env=env, creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
 run_git('init', '--quiet')
 run_git('config', 'core.autocrlf', 'false')
 run_git('remote', 'add', 'origin', repo_url)
@@ -13091,6 +13097,14 @@ mod tests {
     }
 
     #[test]
+    fn performance_tier_does_not_turn_probe_failure_into_cpu_evidence() {
+        assert_eq!(verified_performance_tier(true, None, false), "unknown");
+        assert_eq!(verified_performance_tier(false, None, true), "unknown");
+        assert_eq!(verified_performance_tier(false, Some(false), false), "cpu");
+        assert_eq!(verified_performance_tier(false, Some(true), false), "gpu");
+    }
+
+    #[test]
     fn semantic_probe_failure_is_shared_once_then_a_later_request_can_retry() {
         let slot = std::sync::Arc::new(SemanticProbeSlot::<u32>::new());
         let starts = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -13313,6 +13327,7 @@ mod tests {
         assert!(code.contains(COSYVOICE_WETEXT_REVISION));
         assert!(code.contains("core.autocrlf', 'false"));
         assert!(code.contains("GIT_LFS_SKIP_SMUDGE"));
+        assert!(code.contains("creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0"));
         assert!(code.contains("'lfs', 'fetch', '--include=*', '--exclude='"));
         assert!(code.contains("resolved != expected_revision"));
         assert!(code.contains("shutil.copyfile(lfs_object, destination)"));
@@ -16824,8 +16839,8 @@ mod tests {
         fs::create_dir_all(repo.join("refs")).unwrap();
         fs::write(repo.join("refs").join("main"), sha).unwrap();
         assert!(
-            kokoro_app_cache_ready(&paths),
-            "refs/main + config + weights + default voice present must read as ready"
+            !kokoro_app_cache_ready(&paths),
+            "present files with incorrect bytes must not satisfy exact pinned cache readiness"
         );
 
         // Missing the default voice -> the offline job would fail loading it.
@@ -16836,5 +16851,15 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn kokoro_readiness_uses_selected_generation_not_retained_user_cache() {
+        let base = std::env::temp_dir().join("voxvulgi_kokoro_user_root");
+        let generation = std::env::temp_dir().join("voxvulgi_kokoro_generation");
+        let managed = AppPaths::managed_for_test(base.clone(), generation.clone());
+        assert_eq!(kokoro_cache_repo(&managed), generation.join("cache/huggingface/hub/models--hexgrad--Kokoro-82M"));
+        assert_ne!(kokoro_cache_repo(&managed), base.join("cache/huggingface/hub/models--hexgrad--Kokoro-82M"));
+        assert_eq!(kokoro_cache_repo(&AppPaths::new(base.clone())), base.join("cache/huggingface/hub/models--hexgrad--Kokoro-82M"));
     }
 }

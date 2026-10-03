@@ -177,7 +177,8 @@ def clean_environment() -> dict[str, str]:
 
 def run_pip(arguments: list[str], label: str) -> None:
     command = [sys.executable, "-I", "-m", "pip", "--isolated", "--disable-pip-version-check", "--no-input", *arguments]
-    result = subprocess.run(command, env=clean_environment(), check=False)
+    result = subprocess.run(command, env=clean_environment(), check=False,
+                            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
     if result.returncode != 0:
         raise RuntimeError(f"{label} failed with exit code {result.returncode}")
 

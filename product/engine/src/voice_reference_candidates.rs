@@ -685,7 +685,7 @@ mod tests {
     }
 
     fn ffmpeg_available() -> bool {
-        std::process::Command::new("ffmpeg")
+        crate::cmd::command("ffmpeg")
             .arg("-version")
             .output()
             .map(|output| output.status.success())

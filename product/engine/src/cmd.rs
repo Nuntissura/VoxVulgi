@@ -445,6 +445,28 @@ mod tests {
     use std::process::Stdio;
     use std::time::{Duration, Instant};
 
+    #[test]
+    fn quiet_command_console_probe_helper() {
+        let Some(path) = std::env::var_os("VOXVULGI_QUIET_CONSOLE_PROBE") else { return; };
+        #[link(name = "kernel32")]
+        extern "system" { fn GetConsoleWindow() -> *mut std::ffi::c_void; }
+        let console = unsafe { GetConsoleWindow() };
+        std::fs::write(path, if console.is_null() { "no-console" } else { "console-attached" }).unwrap();
+    }
+
+    #[test]
+    fn quiet_command_starts_console_child_without_console_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = dir.path().join("console_probe.txt");
+        let status = command(std::env::current_exe().unwrap())
+            .args(["--exact", "cmd::tests::quiet_command_console_probe_helper"])
+            .env("VOXVULGI_QUIET_CONSOLE_PROBE", &result)
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+            .status().unwrap();
+        assert!(status.success());
+        assert_eq!(std::fs::read_to_string(result).unwrap(), "no-console");
+    }
+
     fn wait_for_terminated(child: &mut std::process::Child) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
@@ -616,7 +638,7 @@ mod tests {
             pid_path: pid_path.clone(),
         };
         let mut helper =
-            std::process::Command::new(std::env::current_exe().expect("current test exe"))
+            command(std::env::current_exe().expect("current test exe"))
                 .args([
                     "--exact",
                     "cmd::tests::yt_dlp_app_lifecycle_immediate_descendant_helper",
@@ -675,7 +697,7 @@ mod tests {
                 .as_nanos()
         ));
         let mut helper =
-            std::process::Command::new(std::env::current_exe().expect("current test exe"))
+            command(std::env::current_exe().expect("current test exe"))
                 .args([
                     "--exact",
                     "cmd::tests::crash_lifecycle_helper",

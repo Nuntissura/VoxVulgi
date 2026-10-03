@@ -1,0 +1,1241 @@
+[
+  {
+    "id": "WP-0143",
+    "title": "Localization Studio operator flow and output recovery",
+    "requirements": "Localization home now renders as a first-screen dashboard with current-item continuation, workflow framing, outputs handoff, and recent localization items instead of a mostly empty ingest stub; pending live operator smoke that the main feature now feels present and usable end-to-end. Blocker: live operator end-to-end smoke. Update 2026-09-30 (WP-0326): Operator home/handoff/progress/output implementation is recorded. Remaining is current installed first-screen continuation and output usability smoke; WP-0289 owns the actual first-dub deliverable, without replacing this packet's UI checks.",
+    "packet_path": "governance/workflow/work_packets/WP-0143_LOCALIZATION_STUDIO_OPERATOR_FLOW_AND_OUTPUT_RECOVERY.md",
+    "packet_sha256": "60ff0df4c3f53af65c928140be193d0398ad5d99a3a6afc4da6f9d39f680884b",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance criteria",
+        "line": 30,
+        "content": "- A normal in-app Localization Studio flow produces a visible non-silent English-dubbed MP4 on installer state.\n- Operators can find and open the source video, subtitle files, dubbed audio, artifact folder, and exported video from Localization Studio itself.\n- The start/progress contract is understandable enough that operators can set options before work begins without guessing.\n- Localization root/path information is visible and consistent with Options."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0143-PROOF-01",
+        "scenario": "Installed first-screen current-item continuation, run/progress controls, localization root agreement with Options, recent items and output handoff.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0143-PROOF-02",
+        "scenario": "Open source/subtitles/dubbed audio/artifact folder/final managed MKV from Localization itself; retain original non-silent English output acceptance shared with WP-0289.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "localization_real_media",
+    "proof_mode": "isolated_packaged_media_workflow",
+    "dependency_or_blocker": "WP-0329 verified managed runtime and real model/cache readiness; exact Queen/Haerin/original media must be located and independently identified (availability not inspected here); bridge action capability; owned disposable job/output roots.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0146",
+    "title": "Window move affordance regression repair",
+    "requirements": "The chrome cluster now uses a compact top-right grip with pointer-driven drag, and the shell exposes explicit edge/corner resize hit zones plus a Rust resize-drag fallback; pending operator confirmation on live drag/select/scroll/resize behavior. Blocker: operator live drag/select/scroll/resize confirmation. Update 2026-09-30 (WP-0326): Move/resize repairs are recorded and compiled. Remaining is installed native drag, double-click maximize, selection, scroll, edge/corner resize and top-right controls proof; not an unimplemented shell fix.",
+    "packet_path": "governance/workflow/work_packets/WP-0146_WINDOW_MOVE_AFFORDANCE_REGRESSION_REPAIR.md",
+    "packet_sha256": "c56e0a2ec593033d79e0e036c46fe242c12bf8de205e3cd22f4f8e4d651cb67f",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance criteria",
+        "line": 28,
+        "content": "- The app can be moved reliably with the intended affordance.\n- The move affordance is grouped with the minimize/maximize/close controls in the intended top-right chrome cluster rather than drifting to another area of the shell.\n- Text selection, panel scrolling, and corner resize behavior remain intact after the repair.\n- No hidden background drag-region regression reappears."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0146-PROOF-01",
+        "scenario": "Native intended top-right grip drag and double-click maximize, text selection, scrolling, every edge/corner resize, and no background drag region.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "native_window_and_open",
+    "proof_mode": "operator_or_authorized_native_boundary",
+    "dependency_or_blocker": "Native drag/resize/adjacent-window clicks or Explorer success are required. Hidden semantic snapshots alone cannot prove OS hit-testing or actual visible Explorer behavior; routine foreground automation is forbidden.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0148",
+    "title": "Frameless window bounds and fullscreen correctness",
+    "requirements": "The shell now infers full-window mode from the live viewport when native maximize state lags, keeps the visible chassis stretched to the native surface, and removes the oversized move control that was pushing chrome out of place; pending operator side-by-side validation that the invisible blocked native area is gone. Blocker: operator side-by-side invisible-bounds validation. Update 2026-09-30 (WP-0326): Bounds/layout repairs are recorded and compiled. Remaining is installed maximize/restore/fullscreen, side-by-side invisible click-block area and controls proof. No runtime success inferred from age.",
+    "packet_path": "governance/workflow/work_packets/WP-0148_FRAMELESS_WINDOW_BOUNDS_AND_FULLSCREEN_CORRECTNESS.md",
+    "packet_sha256": "44f8b372c9f58de2dd840859a8468f5b8134de46132827fe5939fab3d63fd0eb",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance criteria",
+        "line": 30,
+        "content": "- Maximizing the app produces a true edge-aligned usable surface instead of only stretching in one dimension.\n- No invisible portion of the native window blocks clicks on other visible applications beside or behind VoxVulgi.\n- Frameless presentation remains intact after the bounds fix.\n- The move affordance and window control cluster remain in the intended top-right location in restored and maximized states.\n- The fix works together with move, resize, text selection, and scroll interactions."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0148-PROOF-01",
+        "scenario": "Native maximize/restore/fullscreen and restored/maximized side-by-side layouts: visible surface equals native bounds, adjacent applications remain clickable, top-right controls stay anchored, selection/scroll/resize work.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "native_window_and_open",
+    "proof_mode": "operator_or_authorized_native_boundary",
+    "dependency_or_blocker": "Native drag/resize/adjacent-window clicks or Explorer success are required. Hidden semantic snapshots alone cannot prove OS hit-testing or actual visible Explorer behavior; routine foreground automation is forbidden.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0156",
+    "title": "Voice clone truthfulness and fallback disclosure",
+    "requirements": "Runtime and operator surfaces are being updated so plain TTS fallback no longer looks like cloned-voice success; explicit clone outcome state is being wired through manifests, reports, and operator-facing benchmark/current-item surfaces. Update 2026-09-30 (WP-0326): Manifest/report, benchmark, artifact and current-item clone-truth wiring landed. Remaining is genuine converted plus fallback/error output and UI evidence, including explicit fallback policy; historical wording about wiring in progress is superseded by later implementation notes.",
+    "packet_path": "governance/workflow/work_packets/WP-0156_VOICE_CLONE_TRUTHFULNESS_AND_FALLBACK_DISCLOSURE.md",
+    "packet_sha256": "53006b8cfe6ecdb3c94d7622f1ec152ab89bd255a6d35c96bc061c91d233d3bf",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance criteria",
+        "line": 29,
+        "content": "- Localization Studio, artifact metadata, and reports clearly distinguish real converted output from plain TTS fallback.\n- A voice-preserving run that falls back no longer looks identical to a successful cloned-voice result.\n- The chosen fallback policy is explicit in spec/design and reflected in runtime behavior."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0156-PROOF-01",
+        "scenario": "One genuine converted dub and one explicit fallback/error case: compare TTS manifest/report clone outcomes with current-item, artifacts and benchmark display.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0156-PROOF-02",
+        "scenario": "Verify preserved fallback policy is explicit and plain TTS cannot appear as cloned success.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "localization_real_media",
+    "proof_mode": "isolated_packaged_media_workflow",
+    "dependency_or_blocker": "WP-0329 verified managed runtime and real model/cache readiness; exact Queen/Haerin/original media must be located and independently identified (availability not inspected here); bridge action capability; owned disposable job/output roots.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0160",
+    "title": "Legacy YouTube subscription continuity state decoupling",
+    "requirements": "App-managed continuity state, legacy archive merge, migrated-subscription operator smoke, and target clarity are implemented. The selected subscription now distinguishes its physical target from VoxVulgi-managed already-downloaded tracking; focused contracts pass 13/13. Remaining: governed build plus packaged visual proof on a pinned/migrated target. Update 2026-09-30 (WP-0326): App-managed continuity, legacy merge and target/tracking clarity implemented; 13 focused contracts recorded green. Remaining is packaged pinned/migrated-target visual and app-boundary proof, not storage redesign.",
+    "packet_path": "governance/workflow/work_packets/WP-0160_LEGACY_YOUTUBE_SUBSCRIPTION_CONTINUITY_STATE_DECOUPLING.md",
+    "packet_sha256": "8039625d00ea71add63714bbd9f3e36e06f54515e29ba58007b43bd082b73e46",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance criteria",
+        "line": 29,
+        "content": "- Imported legacy YouTube subscriptions continue refreshing against their existing mapped NAS folders even when the global download root differs.\n- \"Already downloaded\" tracking survives independently of the output folder location.\n- Existing NAS-side `voxvulgi_youtube_archive.txt` state is preserved by merge into the app-managed continuity state.\n- Operator-facing UX makes it clear that legacy mapped folders remain the output target while tracking state lives in VoxVulgi-managed storage."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0160-PROOF-01",
+        "scenario": "Packaged migrated/pinned NAS target shows Target separately from app-managed Already-downloaded tracking.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0160-PROOF-02",
+        "scenario": "Independently reconcile target override and continuity archive merge/preservation; reuse recorded engine proof only for unchanged inputs.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "migrated_subscription_continuity",
+    "proof_mode": "read_only_live_case_plus_isolated_replica",
+    "dependency_or_blocker": "Identify exact migrated/pinned-target subscription and reachable NAS path. Observe canonical target/archive without mutation; owned replica for refresh/merge; final packaged UI.",
+    "automation_availability": "CONDITIONAL_ON_FINAL_CANDIDATE_AND_PRODUCT_CAPABILITIES",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0169",
+    "title": "Options Page Consolidation",
+    "requirements": "4 feature-root cards replaced with single table (Feature/Path/Status/Actions), auth UX improved with help text and clear button. Update 2026-09-30 (WP-0326): 2026-09-30 status reconciliation: NEEDS_VALIDATION. WP-0301 explicitly preserves Options consolidation and has packaged proof, but no WP-0169 proof bundle or complete original-criterion mapping exists. Remaining: Reconcile original feature-root table, authentication guidance/selection, free-disk-space display and override persistence against current Options; record exact missing behavior or qualifying successor proof. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.",
+    "packet_path": "governance/workflow/work_packets/WP-0169_OPTIONS_PAGE_CONSOLIDATION.md",
+    "packet_sha256": "c7192b0742ba2e554a4451834eb309db83a4d9cf460f599d22c131b597a90392",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance criteria",
+        "line": 32,
+        "content": "- Feature roots are shown in a single table instead of 4 separate cards.\n- YouTube auth has radio-button selection with help text.\n- Free disk space is visible next to storage paths.\n- `npm run build` passes."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0169-PROOF-01",
+        "scenario": "Options original feature-root single-table criterion, auth selection/help, free-disk-space display, and path override persistence across page switches; map WP-0301 successor proof criterion by criterion.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "packaged_isolated_ui",
+    "proof_mode": "semantic_bridge_and_snapshot",
+    "dependency_or_blocker": "Exact final governed candidate; PID-validated bridge/manual/capabilities; disposable root; actual controls/actions must exist. WP-0212 restart/hydration requires owned isolated process and runtime.",
+    "automation_availability": "CONDITIONAL_ON_FINAL_CANDIDATE_AND_PRODUCT_CAPABILITIES",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0179",
+    "title": "Translation Style Settings",
+    "requirements": "Style selector (Neutral/Formal/Informal) + honorific handling (keep/translate/drop) in Track card; persists in localStorage. Update 2026-09-30 (WP-0326): 2026-09-30 status reconciliation: NEEDS_VALIDATION. 2026-08-14 implementation and focused checks are complete; the packet explicitly records remaining packaged/audio proof. Remaining: Governed packaged UI inspection and audio-backed translation comparison proving style affects installed Whisper output. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.",
+    "packet_path": "governance/workflow/work_packets/WP-0179_TRANSLATION_STYLE_SETTINGS.md",
+    "packet_sha256": "31f40e0b93faeb0297e9cda16b224efd7652fc3260e27a47d2414b1019c2ab9d",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance criteria",
+        "line": 27,
+        "content": "- Operators can select translation style before running Translate.\n- Honorific handling option is available.\n- Style choice affects translation output.\n- `cargo check` + `npm run build` pass."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0179-PROOF-01",
+        "scenario": "Packaged translation style/honorific/custom instruction controls and persisted choice before Translate.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0179-PROOF-02",
+        "scenario": "Audio-backed comparison using installed Whisper proves style changes output beyond deterministic punctuation/honorific cleanup.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "localization_real_media",
+    "proof_mode": "isolated_packaged_media_workflow",
+    "dependency_or_blocker": "WP-0329 verified managed runtime and real model/cache readiness; exact Queen/Haerin/original media must be located and independently identified (availability not inspected here); bridge action capability; owned disposable job/output roots.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0198",
+    "title": "Localization import handoff and workspace visibility recovery",
+    "requirements": "Fix the Localization-only import path so operator imports actually enter the localization workspace, appear in Current Item/Localization Library, and preserve an obvious handoff after import rather than disappearing into Jobs alone. Update 2026-09-30 (WP-0326): 2026-09-30 status reconciliation: NEEDS_VALIDATION. 2026-04-24 records the import handshake/workspace fix and compile checks; no own proof bundle was found. Remaining: Exact Localization import workspace/current-item/recent-item visibility plus pending/success/failure/canceled-duplicate handoff proof. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.",
+    "packet_path": "governance/workflow/work_packets/WP-0198_LOCALIZATION_IMPORT_HANDOFF_AND_WORKSPACE_VISIBILITY_RECOVERY.md",
+    "packet_sha256": "1203f73b58094967d7b5e75195b2762f408dc1da24f2e5a9f19577a97a1f19f2",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance criteria",
+        "line": 28,
+        "content": "- Importing a file from Localization Studio adds it to the localization workspace every time.\n- The imported file appears in `Continue current item` and `Localization Library` without requiring a separate Media Library navigation step.\n- Localization Studio shows a visible handoff state while import is pending and a visible completion or failure state after import finishes.\n- The kept import is distinguishable from canceled duplicate imports in operator-facing UI."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0198-PROOF-01",
+        "scenario": "Exact Localization local import: pending handoff then successful workspace/current/recent visibility and added_to_localization_workspace=true log.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0198-PROOF-02",
+        "scenario": "Failure and canceled duplicate handoff states remain distinct from kept intake.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "localization_real_media",
+    "proof_mode": "isolated_packaged_media_workflow",
+    "dependency_or_blocker": "WP-0329 verified managed runtime and real model/cache readiness; exact Queen/Haerin/original media must be located and independently identified (availability not inspected here); bridge action capability; owned disposable job/output roots.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0201",
+    "title": "Localization empty-transcript fail-fast and stage truth",
+    "requirements": "ASR/translation now fail before persisting empty tracks, stale empty source/translated tracks block downstream continuation, and automated proof is captured; pending live Queen-sample/operator smoke before DONE. Update 2026-09-30 (WP-0326): 2026-09-30 status reconciliation: NEEDS_VALIDATION. Opened WP-0201/20260425_004344/summary.md: focused guards/checks pass; exact Queen/operator smoke remains explicitly pending. Remaining: Rerun the original empty Queen-sample path and verify truthful failed/blocked states in Jobs and Localization. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.",
+    "packet_path": "governance/workflow/work_packets/WP-0201_LOCALIZATION_EMPTY_TRANSCRIPT_FAILFAST_AND_STAGE_TRUTH.md",
+    "packet_sha256": "31926b02f34c126ec05ab1d443739a6b65b96760ec44d2d4237d3a3d6b1a5549",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance criteria",
+        "line": 29,
+        "content": "- A file that yields zero usable ASR segments fails `asr_local` with an explicit empty-transcript error instead of producing a persisted empty `source` track.\n- `translate_local` does not insert a translated subtitle track when the translated output is empty.\n- Localization does not queue diarization, dub, mix, or export stages off an empty prerequisite track.\n- Operator-facing surfaces describe the run as failed or blocked at the real stage instead of implying completion.\n- Logs contain enough detail to distinguish \"no speech detected\", \"all segments filtered empty\", and other zero-output paths."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0201-PROOF-01",
+        "scenario": "Original Queen sample zero-output path: ASR fails explicitly, no empty source/translated tracks persist, no diarization/dub/mix/export children start.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0201-PROOF-02",
+        "scenario": "Jobs and Localization show actual failure/blocked stage and distinguish no-speech vs filtered-empty paths.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "localization_real_media",
+    "proof_mode": "isolated_packaged_media_workflow",
+    "dependency_or_blocker": "WP-0329 verified managed runtime and real model/cache readiness; exact Queen/Haerin/original media must be located and independently identified (availability not inspected here); bridge action capability; owned disposable job/output roots.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0202",
+    "title": "Diarization pack dependency integrity and self-repair",
+    "requirements": "Pins, runtime validation, Diagnostics repair state, live venv repair, and Queen-media diarization probe completed; proof under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0202/2026-04-25_0315_wp0202_0204/`. Update 2026-09-30 (WP-0326): 2026-09-30 status reconciliation: NEEDS_VALIDATION. Opened April proof and managed_diarization_repair_20260815_2335/summary.md: exact 37-pin live repair and VoiceEncoder construction passed; packaged gate remains pending. Remaining: Current governed packaged Diagnostics broken/readiness/repair proof and offline hydration of the validated pins. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.",
+    "packet_path": "governance/workflow/work_packets/WP-0202_DIARIZATION_PACK_DEPENDENCY_INTEGRITY_AND_SELF_REPAIR.md",
+    "packet_sha256": "09c3da995e1892e6071ede33443a93c82736ad21c0df9a6cdda836c8c09cd1f7",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance criteria",
+        "line": 28,
+        "content": "- A broken managed diarization environment is surfaced as broken in Diagnostics instead of appearing healthy.\n- Diagnostics or the installer-state pack surface shows enough detail for the operator to understand that repair/reinstall is required.\n- Running the repair/reinstall path results in a compatible diarization environment on installer state.\n- The Queen-sample diarization stage gets past Python startup and dependency import with the repaired pack.\n- Offline-bundled installs hydrate the same validated dependency set instead of recreating the broken combination."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0202-PROOF-01",
+        "scenario": "Packaged Diagnostics on broken/mismatched diarization fixture reports broken/repair-required, then governed repair achieves actual import readiness.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0202-PROOF-02",
+        "scenario": "Repaired Queen sample passes diarization startup; offline hydrated runtime uses same validated current pins.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "managed_pack_recovery_and_progress",
+    "proof_mode": "owned_isolated_runtime_install",
+    "dependency_or_blocker": "WP-0329 repaired/qualified current runtime; current hashed lockfiles/wheel cache; real complete install/repair jobs. Failure/interruption may stop only session-owned children. WP-0245 read-only Jobs batching can run before costly install scenario.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0203",
+    "title": "Localization import cancellation and duplicate queue containment",
+    "requirements": "Same-path active import reuse, existing-item reuse, batch cancel propagation, and Queen-sample duplicate containment smoke completed; proof under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0203/2026-04-25_0315_wp0202_0204/`. Update 2026-09-30 (WP-0326): 2026-09-30 status reconciliation: NEEDS_VALIDATION. Opened April Queen proof; 2026-08-15 packet records both enqueue/cancel race fixes and passing independent counterfactuals. Remaining: Combined final-state governed packaged import/reuse/cancellation/progress UI proof. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.",
+    "packet_path": "governance/workflow/work_packets/WP-0203_LOCALIZATION_IMPORT_CANCELLATION_AND_DUPLICATE_QUEUE_CONTAINMENT.md",
+    "packet_sha256": "d8e8521ce3d49ba5b30304bcbc7820e62d45d8967f2deb571331fb68fdbd73f8",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance criteria",
+        "line": 28,
+        "content": "- Canceling duplicate local imports does not leave unexpected child localization stages running afterward.\n- Importing the same file repeatedly does not silently create multiple indistinguishable active items.\n- Long-running imports expose truthful stage/progress information instead of looking idle or frozen.\n- Jobs and Localization clearly distinguish kept, canceled, and duplicate intake attempts."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0203-PROOF-01",
+        "scenario": "Packaged same-file three-import/cancel-two scenario keeps one active item/job, suppresses canceled child stages, and shows stage/progress and kept/canceled/duplicate identities.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0203-PROOF-02",
+        "scenario": "Final concurrent same-path enqueue and cancellation-before-child invariants reconcile to unchanged existing counterfactual proof.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "localization_real_media",
+    "proof_mode": "isolated_packaged_media_workflow",
+    "dependency_or_blocker": "WP-0329 verified managed runtime and real model/cache readiness; exact Queen/Haerin/original media must be located and independently identified (availability not inspected here); bridge action capability; owned disposable job/output roots.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0212",
+    "title": "Safe Mode pill placement and exit-rehydrate notice",
+    "requirements": "Governed v0.1.165 hidden proof passed: full chrome audit, OFF→ON, queue pause, persisted-ON restart, skipped hydration, ON→OFF, queue resume, inline notice, safe X dismiss, and clean OFF restart; bridge 8/8, TypeScript, and Rust startup gate 1/1 passed. Remaining blocker: one installed non-headless OFF restart showing `offline_bundle=ready`; headless intentionally skips hydration and foreground agent launch is forbidden. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0212/20260815-0905_v0_1_165/summary.md`. Update 2026-09-30 (WP-0326): Hidden Safe Mode transitions and UI passed. Remaining is installed non-headless Safe Mode OFF restart with offline_bundle=ready; headless intentionally skips hydration. A missing proof scenario is distinguished from a product implementation blocker.",
+    "packet_path": "governance/workflow/work_packets/WP-0212_SAFE_MODE_PILL_AND_EXIT_REHYDRATE_NOTICE.md",
+    "packet_sha256": "88f3c2028a9b33c594a7b58b9870adc3ba38f26b331d1fded4d059fa3b7a24ff",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance criteria",
+        "line": 31,
+        "content": "- The topbar no longer renders the `Recovery` label. A smaller pill sits at the right end of the topbar (after the page nav) and shows `\"Safe Mode OFF\"` or `\"Safe Mode ON\"` reflecting `safeMode.enabled`.\n- Clicking the pill while OFF enters Safe Mode immediately (no notice appears). Clicking while ON exits Safe Mode immediately and surfaces the in-app dismiss-with-X notice.\n- The notice is rendered in-app (no native window/modal), is non-blocking, and persists until the user clicks the X or restarts the app.\n- The \"Safe Mode is ON\" banner copy mentions restart-on-exit.\n- `cargo check` (engine + tauri) and desktop `npm run build` pass.\n- Diagnostics startup card still reports `skipped_safe_mode` when the offline bundle was skipped during a Safe Mode boot (no regression)."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0212-PROOF-01",
+        "scenario": "Safe Mode OFF/ON pill, enter without notice, exit with in-app dismissible notice, queue state and restart-on-exit copy.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0212-PROOF-02",
+        "scenario": "Owned isolated restart in safe mode shows skipped_safe_mode; next normal owned launch hydrates ready and notice is absent.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "packaged_isolated_ui",
+    "proof_mode": "semantic_bridge_and_snapshot",
+    "dependency_or_blocker": "Exact final governed candidate; PID-validated bridge/manual/capabilities; disposable root; actual controls/actions must exist. WP-0212 restart/hydration requires owned isolated process and runtime.",
+    "automation_availability": "CONDITIONAL_ON_FINAL_CANDIDATE_AND_PRODUCT_CAPABILITIES",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0222",
+    "title": "Reveal media file exit code truthfulness",
+    "requirements": "Implementation ships in v0.1.19+ and is now regression-covered: Rust branch test 1/1 and frontend recovery contract 2/2 pass in source v0.1.160. Exit 1 is accepted only for file-selection reveals; folder reveals and every other failure remain strict; clipboard recovery is preserved. Remaining explicit gate: operator-run installed-app `Open folder` smoke, because an agent-triggered Explorer launch would violate the no-focus-steal test rule. Partial proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0222/20260815_0530_v0_1_160/summary.md`. Update 2026-09-30 (WP-0326): Exit-one file-selection handling and clipboard recovery are regression-covered. Remaining is installed file/folder reveal smoke; no intermediate-console fix is claimed (the new popup report is separate).",
+    "packet_path": "governance/workflow/work_packets/WP-0222_REVEAL_MEDIA_FILE_EXIT_CODE_TRUTHFULNESS.md",
+    "packet_sha256": "bacb8bbcdb32588c73c30c28ffe3d490626872e8ef74bbcb71e32779e0c799bb",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance Criteria",
+        "line": 54,
+        "content": "- Reveal Media File on a Library item that exists on disk no longer surfaces an error toast on Windows when Explorer opens successfully.\n- A reveal call on a path that does not exist still produces the error toast and copies the path to clipboard (LibraryPage existing behavior unchanged).\n- `cargo build --release` in `product/desktop/src-tauri` succeeds."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0222-PROOF-01",
+        "scenario": "Installed existing-file reveal opens Explorer without false error; missing-file reveal retains error and clipboard fallback.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0222-PROOF-02",
+        "scenario": "Folder/file exit semantics remain distinct; overlap with WP-0328 console-window proof does not replace actual Explorer success proof.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "native_window_and_open",
+    "proof_mode": "operator_or_authorized_native_boundary",
+    "dependency_or_blocker": "Native drag/resize/adjacent-window clicks or Explorer success are required. Hidden semantic snapshots alone cannot prove OS hit-testing or actual visible Explorer behavior; routine foreground automation is forbidden.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0229",
+    "title": "Phase2 install short-circuit when packs already present",
+    "requirements": "Implementation and automated proof passed: frontend 21/21, TypeScript, focused Rust, desktop check, full engine 542 passed / 4 ignored. Governed v0.1.163 build reused the verified payload; packaged headless audit returned 115 elements with 0 missing names and visual proof confirmed both actions. Pending only the installed-app normal-versus-force runtime/log smoke required by Acceptance Criterion 5. Update 2026-09-30 (WP-0326): Six-pack short-circuit/force routing implemented, tested and packaged. Remaining is installed normal no-pip versus force/full-pip runtime and log proof (Acceptance Criterion 5).",
+    "packet_path": "governance/workflow/work_packets/WP-0229_PHASE2_INSTALL_SHORT_CIRCUIT_WHEN_PACKS_PRESENT.md",
+    "packet_sha256": "67b750162970743021962d615a7fa42f43f1e0ea5c63ba1a6072107d4e59b458",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance Criteria",
+        "line": 112,
+        "content": "- `cargo build --release` succeeds in `product/engine` and `product/desktop/src-tauri`.\n- Existing tests pass without modification: `cargo test --manifest-path product/engine/Cargo.toml`.\n- Five new wrapper functions exist in `product/engine/src/tools.rs`:\n  - `install_spleeter_pack_if_needed`\n  - `install_diarization_pack_if_needed`\n  - `install_tts_preview_pack_if_needed`\n  - `install_tts_neural_local_v1_pack_if_needed`\n  - `install_tts_voice_preserving_local_v1_pack_if_needed`\n  Each follows the exact pattern in the Implementation Plan below.\n- `InstallPhase2PacksV1Params` in `product/engine/src/jobs.rs:323` gains a `#[serde(default)] force: bool` field.\n- The Phase2 install job handler's `match step_id.as_str()` block at `jobs.rs:9810-9854` branches on `p.force`: calls the `_if_needed` wrapper when `!p.force`, calls the bare function when `p.force`.\n- The Tauri command `jobs_enqueue_install_phase2_packs_v1` in `product/desktop/src-tauri/src/lib.rs:6708-6713` accepts an optional `force: bool` request body field (defaulting to `false`) and threads it into `InstallPhase2PacksV1Params`.\n- The Diagnostics page (`product/desktop/src/pages/DiagnosticsPage.tsx:3237-3250`) gains a \"Force reinstall all packs\" button next to the existing \"Install Voice cloning packages\" button. The new button invokes `jobs_enqueue_install_phase2_packs_v1` with `{ force: true }`.\n- After the build is installed, a single operator workflow proves the short-circuit:\n  1. Get one Phase2 install to complete successfully (all steps `done` in `latest.json`).\n  2. Click \"Install Voice cloning packages\" again.\n  3. Watch the per-step `.log` files. They should remain empty for the newly-clicked job, OR contain only the `begin step=…` lines without the pip output. Total job runtime should be sub-30-seconds total instead of multi-minute.\n  4. Click \"Force reinstall all packs\".\n  5. Watch the per-step `.log` files. They should now contain the full pip install output as before (forced execution)."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0229-PROOF-01",
+        "scenario": "Current six-pack successful normal install followed by normal reinstall proves no pip work and sub-30-second short-circuit from per-step logs.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0229-PROOF-02",
+        "scenario": "Force reinstall invokes full pip execution with explicit force=true; reconcile job/runtime/log identity and current actual readiness.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "managed_pack_recovery_and_progress",
+    "proof_mode": "owned_isolated_runtime_install",
+    "dependency_or_blocker": "WP-0329 repaired/qualified current runtime; current hashed lockfiles/wheel cache; real complete install/repair jobs. Failure/interruption may stop only session-owned children. WP-0245 read-only Jobs batching can run before costly install scenario.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0230",
+    "title": "Phase2 install progress bar and status truthfulness",
+    "requirements": "Operator: \"i want a progress bar for all voicepacks when installing i am just watching the same 'Live progress: interrupted' badge, not really comforting\". Pure frontend (DiagnosticsPage.tsx) change — replace the one-word badge with a `<progress>` bar, current-step strip with elapsed time, per-pack icons, and an auto-poll every 2 s while a job is active. Headline text resolves to one of five honest states (not yet installed / queued / installing step X of M / interrupted N of M complete / all M done) instead of just \"interrupted\". **2026-05-18 scope extension**: also surface real bytes/sec/ETA by parsing pip stdout + hooking HF Hub `tqdm` callbacks; same progress feed consumed by the WP-0235 first-run flow. See WP file \"Scope Extension\". Blocker: WP-0239 operator verification. Update 2026-09-30 (WP-0326): Base progress/headline/elapsed-time slice implemented and tested. Remaining base gate is real-install visual evidence under WP-0239. The explicitly carved-out byte/speed/ETA scope WP-0230b has no packet/board row and remains preserved as unresolved carried work in this packet; this reconciliation does not declare that extension delivered.",
+    "packet_path": "governance/workflow/work_packets/WP-0230_PHASE2_INSTALL_PROGRESS_BAR_AND_STATUS_TRUTHFULNESS.md",
+    "packet_sha256": "dd47f71b7226f2ee61d475b066cb63ab59c7069e2616b2ea9e17210f111dd518",
+    "acceptance_source_sections": [
+      {
+        "heading": "Scope Decision (2026-05-18 23:50)",
+        "line": 21,
+        "content": "The pre-extension WP scope (frontend truthfulness — progress bar + 5 honest headline states + per-pack icons + elapsed time on running row) is implementable in one session against today's `tools_phase2_packs_install_latest_state` data without any backend changes.\n\nThe extension below (live bytes/sec/ETA from pip stdout + HF tqdm) requires switching `run_python_checked` from `.output()` (post-completion capture) to `.spawn()` + a reader thread + a new event channel + new state fields on each step. That is its own WP-sized effort and is carved out as **WP-0230b** rather than half-implemented here.\n\nThis WP delivers the truthfulness half today; WP-0230b delivers the byte-level streaming half later."
+      },
+      {
+        "heading": "Acceptance Criteria",
+        "line": 136,
+        "content": "- `npm run build` in `product/desktop` succeeds.\n- When no Phase2 install has ever been run, the section headline says \"Voice packs not yet installed\" and the progress bar shows 0 of M.\n- When the operator clicks \"Install Voice cloning packages\", within 2 s the headline flips to \"Installing voice packs — step 1 of M (Portable Python …)\" (or the first non-skipped step). The progress bar reflects the per-step `done` count and updates as steps complete.\n- The \"Running for: X\" text under the bar updates every second while a step is `running`.\n- When the install completes, within 2 s the headline flips to \"Voice packs installed — all M of M complete\" and the bar shows 100%.\n- When the install is interrupted (operator force-quits or app crashes), the next launch of the section shows the headline \"Voice packs installation interrupted — N of M complete\" with N reflecting actual `done` steps. The badge no longer says only \"interrupted\" with no context.\n- The per-pack table shows a leading status icon column with the icon set listed in Selected Approach."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0230-PROOF-01",
+        "scenario": "Real install: never-started, queued, running, completed and interrupted attempt headlines, per-step bar/counts and 1-second elapsed counter; terminal transitions within 2 seconds.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0230-PROOF-02",
+        "scenario": "Retain carved-out WP-0230b byte/speed/ETA extension as unresolved carried work; no matching packet existed in inspected reconciliation.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "managed_pack_recovery_and_progress",
+    "proof_mode": "owned_isolated_runtime_install",
+    "dependency_or_blocker": "WP-0329 repaired/qualified current runtime; current hashed lockfiles/wheel cache; real complete install/repair jobs. Failure/interruption may stop only session-owned children. WP-0245 read-only Jobs batching can run before costly install scenario.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0231",
+    "title": "Neural TTS pack hf_hub/transformers pin and recovery",
+    "requirements": "Operator-reported failure 2026-05-18: Kokoro warmup fails with `ImportError: huggingface-hub>=1.5.0,<2.0 is required … but found huggingface-hub==1.4.1`, cascading to OpenVoice. Root cause: `tts_neural_local_v1` group in `pinned_dependency_manifest.json` does not pin `transformers` or `huggingface_hub`, so resolver drift + a leftover hf_hub 1.4.1 from a pre-WP-0189 install break the import-time version check. Fix: pin `transformers==5.8.1` + `huggingface_hub==1.5.0` in the Kokoro group, switch its `pip install` to `--upgrade`, and add a one-shot `--force-reinstall --no-deps` recovery on warmup failure. No new installer build; release is gated on operator request. Blocker: WP-0239 real-venv operator verification. Update 2026-09-30 (WP-0326): Dependency/recovery implementation and later all-pack warmups exist; old exact May pins are historical and WP-0262 records the later compatible environment. Remaining is current managed-environment import/warmup and recovery evidence under the rebased WP-0239; do not reinstall obsolete pins.",
+    "packet_path": "governance/workflow/work_packets/WP-0231_NEURAL_TTS_HF_HUB_TRANSFORMERS_PIN_AND_RECOVERY.md",
+    "packet_sha256": "b0d5592929b79119a9f9e9e8102c4b3882ddb7e88be38ec963b642d6bbbcce5c",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance Criteria",
+        "line": 76,
+        "content": "- `tts_neural_local_v1.pinned` in the manifest includes both `huggingface_hub==1.5.0` and `transformers==5.8.1`; `tts_neural_local_v1.unpinned_fallback` includes both bare names.\n- `install_tts_neural_local_v1_pack` uses `pip install --upgrade` on the pinned set.\n- `install_tts_neural_local_v1_pack` performs at most one `--force-reinstall --no-deps` recovery step on warmup failure, limited to `transformers/huggingface_hub/kokoro`, and retries warmup once after.\n- `install_tts_voice_preserving_local_v1_pack` uses `pip install --upgrade` on its pinned set (this is already the case as of the current code — confirm during implementation and document).\n- `cargo test -p voxvulgi_engine` (or the engine workspace test command) passes locally.\n- Diagnostics rows for \"Neural TTS local (Kokoro)\" and \"Voice-preserving dub (OpenVoice V2)\" can complete successfully on a reproduction venv where hf_hub was previously stuck at 1.4.1.\n- Proof bundle written under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0231/<timestamp>/summary.md` per `governance/workflow/PROOF_STANDARD.md`."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0231-PROOF-01",
+        "scenario": "Current managed lockfile import/warmup and bounded one-step repair evidence in reproduction venv; historic May exact pins are not reinstall targets.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0231-PROOF-02",
+        "scenario": "Neural Kokoro and voice-preserving Diagnostics actual successful readiness after repair.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "managed_pack_recovery_and_progress",
+    "proof_mode": "owned_isolated_runtime_install",
+    "dependency_or_blocker": "WP-0329 repaired/qualified current runtime; current hashed lockfiles/wheel cache; real complete install/repair jobs. Failure/interruption may stop only session-owned children. WP-0245 read-only Jobs batching can run before costly install scenario.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0233",
+    "title": "CI / pre-build warmup gate for every Python pack",
+    "requirements": "Tier-1 hardening. New `governance/scripts/pack_warmup_gate.ps1` runs each `install_*_pack` + warmup probe in a throwaway venv before `build_desktop_target.ps1` can produce an installer. Catches resolver drift on the developer side instead of the user's machine. Release blocker; documented in `build_rules.md`. CI workflow added if a runner is available. Reuses `voxvulgi_offline_bundle_prep` as the execution engine. Blocker: WP-0239 full-stack operator gate run. Update 2026-09-30 (WP-0326): Warmup gate implemented; later release records report all six packs passing, so expected Spleeter failure and first-full-stack prerequisite are historical. Remaining is current-input full gate reuse/reconciliation and controlled gate-enforcement proof. Core-only builds are outside the pack gate per build_rules.md.",
+    "packet_path": "governance/workflow/work_packets/WP-0233_CI_WARMUP_GATE_FOR_PYTHON_PACKS.md",
+    "packet_sha256": "875c10901ab4d47be5e6acd2c50b3c9c44423aef680dc6c942128bd85a4dc6a1",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance Criteria",
+        "line": 38,
+        "content": "- Running `pack_warmup_gate.ps1` on a clean repo passes for every pack currently shipped.\n- Deliberately breaking one pack (e.g., revert WP-0231's pin) causes the gate to exit non-zero with the offending pack named in the markdown summary.\n- `build_desktop_target.ps1` refuses to produce a release artifact when the gate fails (unless `-SkipWarmupGate` is passed and a `RELEASE_NOTES_SKIPPED_GATE.md` reason file is committed).\n- `build_rules.md` documents the gate as a release prerequisite.\n- Gate run takes < 20 minutes on the operator's build host (record actual time in the WP Notes after first run; if longer, profile + reduce or move to background).\n- Proof bundle under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0233/...`."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0233-PROOF-01",
+        "scenario": "Current-input selected-pack/full-stack warmup reports cover all intended packs; reusable only when every asserted input is unchanged.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0233-PROOF-02",
+        "scenario": "Owned controlled failing dependency input proves applicable gate fails and prevents publication; core-only build remains outside pack gate.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0233-PROOF-03",
+        "scenario": "Record gate wall time and reconcile original performance requirement rather than treating old expected Spleeter failure as success.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "managed_pack_recovery_and_progress",
+    "proof_mode": "owned_isolated_runtime_install",
+    "dependency_or_blocker": "WP-0329 repaired/qualified current runtime; current hashed lockfiles/wheel cache; real complete install/repair jobs. Failure/interruption may stop only session-owned children. WP-0245 read-only Jobs batching can run before costly install scenario.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0234",
+    "title": "Atomic per-pack install with staging and rollback",
+    "requirements": "Tier-1 hardening. **2026-05-18 scope decision**: operator picked the smallest implementation (install-state journaling + auto force-reinstall on detected bad state) over the full staging or per-pack venv split. Journals `{lockfile_sha, started_at_ms, finished_at_ms, last_outcome}` per pack; on next install, if prior state is `in_progress` (crashed) or `failed`, promotes `--upgrade` to `--force-reinstall` so broken state is overwritten instead of layered on. Full staging / per-pack-venv split remain valuable but are deferred until field evidence shows they are needed. Blocker: WP-0239 real-install recovery verification. Update 2026-09-30 (WP-0326): Operator-selected Option-C journal/force-reinstall implementation is recorded. Full staging/per-pack venv remains deferred by the original scope decision. Remaining is real interrupted/failed install journal and recovery proof under WP-0239.",
+    "packet_path": "governance/workflow/work_packets/WP-0234_ATOMIC_PER_PACK_INSTALL_WITH_STAGING_AND_ROLLBACK.md",
+    "packet_sha256": "1b034face9135721ef95273d0462398a261a9e3a6def34b409a35b9492ac180c",
+    "acceptance_source_sections": [
+      {
+        "heading": "Scope Decision (2026-05-18)",
+        "line": 11,
+        "content": "The original WP describes three implementation strategies (staging via `pip install --target`, per-pack venv split, snapshot). Operator picked the smallest one — **install-state journaling + auto force-reinstall on detected bad state** — for this WP. It is honest about what it delivers:\n\n- It does NOT prevent the live venv from entering a half-broken state during install.\n- It DOES detect that the prior install ended in a bad state (mid-crash or failed) on the next install attempt, and automatically promotes the pip install to `--force-reinstall` so the broken state is overwritten instead of layered on top.\n- It journals per-pack `{lockfile_sha, started_at_ms, finished_at_ms, last_outcome}` to a JSON file under `<APPDATA>/tools/python/install_state/<pack>.json` so the next install + the WP-0236 Repair surface + freeze diagnostics all see the same source of truth.\n\nThe full per-pack venv split (true atomicity via `MoveFileEx` directory rename) and the `pip install --target` staging path remain valuable but are out of scope for this WP. If field evidence after WP-0232 (lockfiles) + WP-0237 (bundled wheels) + this journaling lands shows mid-install crashes are still a meaningful failure mode, a follow-up WP can promote one of those approaches."
+      },
+      {
+        "heading": "Acceptance Criteria",
+        "line": 44,
+        "content": "- Killing an install partway (Ctrl+C, simulated network drop, killed pip process) leaves the previously-installed pack import-able. A second install attempt does not need to \"clean up\" anything; staging is the only thing that needs cleanup.\n- A failed warmup inside a fresh install does not leave broken site-packages in the live venv; staging is discarded.\n- A successful install replaces the previous pack atomically (no observable intermediate state where some packages have been swapped and others haven't).\n- Engine `cargo test` passes including a new test that simulates a mid-install failure and asserts the previous state is intact.\n- Proof bundle under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0234/...`."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0234-PROOF-01",
+        "scenario": "Operator-selected Option-C completed/failed/interrupted install journal states and forced-repair recovery in owned disposable runtime.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0234-PROOF-02",
+        "scenario": "Preserve original full staging/per-pack venv intent as deferred by explicit scope decision; do not claim Option-C establishes atomic staging guarantees.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "managed_pack_recovery_and_progress",
+    "proof_mode": "owned_isolated_runtime_install",
+    "dependency_or_blocker": "WP-0329 repaired/qualified current runtime; current hashed lockfiles/wheel cache; real complete install/repair jobs. Failure/interruption may stop only session-owned children. WP-0245 read-only Jobs batching can run before costly install scenario.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0239",
+    "title": "Operator verification of voice-pack reliability build (v0.1.27)",
+    "requirements": "Test checklist covering WP-0231 + WP-0232 + WP-0233 + WP-0234 + WP-0230 against the v0.1.27 desktop build that bundles them. Sections A (gate enforcement), B (lockfile + hf_hub), C (install state journal + crash recovery), D (progress UI truthfulness), E (end-to-end voice clone). Spleeter failure in A.2 is expected and tracked separately. Acts as the gate to flip the upstream WPs from IN_PROGRESS to DONE. Blocker: operator execution of the preserved checklist. Update 2026-09-30 (WP-0326): Historical 0.1.27 checklist rebased to current retained-version artifact and runtime authority; all A-E acceptance dimensions preserved. Expected Spleeter failure is obsolete; no test is recorded newly passed. Remaining cases must reconcile to current-input evidence before upstream DONE changes.",
+    "packet_path": "governance/workflow/work_packets/WP-0239_OPERATOR_VERIFICATION_VOICE_PACK_RELIABILITY_BUILD.md",
+    "packet_sha256": "dc47c5bdee583cd84586afc194f4c05d1737dab99e14ee6a98cfdcf30378a992",
+    "acceptance_source_sections": [
+      {
+        "heading": "Current validation target — 2026-09-30",
+        "line": 15,
+        "content": "The following current checklist supersedes obsolete build/version/expected-failure instructions in the preserved historical checklist below. It retains the original A–E proof dimensions; no case was executed by this reconciliation.\n\n- [WP-0239-T0] Identify the exact current artifact, assigned version and managed runtime through the PID-validated bridge and current installer authority. The inspected installed artifact is 0.1.205, matching the 2026-09-29 core-only published build except its installer marker. Do not install 0.1.27, restore old dependency pins, bump a version, or use an old runtime path from the historical checklist.\n- [WP-0239-CURRENT-A] Reconcile current-input selected-pack and full-stack gate reports. Successful full-stack acceptance requires all intended packs to pass; the historical expected Spleeter failure/exit 1 is obsolete (later BUILD_CHANGELOG records all-six-pack PASS). A core-only app build does not ship or certify a dependency pack; a historical PASS is reusable only when its asserted inputs remain unchanged.\n- [WP-0239-A3] Prove gate enforcement with a controlled failing dependency input in an owned isolated fixture. Do not manufacture failure by restoring obsolete Spleeter dependencies or modifying the operator runtime. Preserve the original requirement that a failed applicable gate prevents publication; current build_rules.md determines where the gate applies.\n- [WP-0239-CURRENT-B] Prove current hashed lockfile consumption, actual Kokoro warmup and hash refusal. Five current lockfiles do not prove the missing Spleeter hashed-install contract complete. Hash-corruption proof uses an owned disposable copy; never corrupt the operator runtime or canonical lockfiles. The historical optional B3 designation remains optional unless the upstream packet independently requires that proof.\n- [WP-0239-CURRENT-C] Prove completed/failed/interrupted journal and repair recovery in an owned disposable install. Only terminate children started by the proving session; do not execute the historical Task Manager kill instruction against an existing app or unrelated process. Current process-stop authority applies if a different exact target is required.\n- [WP-0239-CURRENT-D] Prove queued, installing, interrupted and all-done progress/headline/elapsed-time states through the current product surface. Preserve the byte/speed/ETA extension explicitly carved into WP-0230b; no matching packet was found, so it remains carried work in WP-0230 and the reconciliation receipt rather than silently disappearing.\n- [WP-0239-E1] Prove one complete managed voice-preserving dub with output identity and truthful clone-versus-fallback labeling. Resolve paths from current runtime/artifact receipts. New managed video output must follow the MKV policy; historical MP4 remains a valid input.\n- [WP-0239-CLOSURE] Reconcile A–E observations to each upstream packet's own acceptance criteria and PROOF_STANDARD.md before changing any packet to DONE. All-pack warmup does not by itself prove recovery, UI progress, hashed coverage or complete dubbing."
+      },
+      {
+        "heading": "Acceptance Criteria",
+        "line": 172,
+        "content": "- All tests in Sections A–E pass (Spleeter failure in A.2 is expected and does not block).\n- For any failed test, the failure is captured (log path, error text, snapshot) and reported back so Claude can fix under the upstream WP.\n- After all tests pass, the operator (or Claude on operator instruction) marks WP-0231, WP-0232, WP-0233, WP-0234, WP-0230 as `DONE` and updates each WP's Notes with a pointer to this WP-0239 record."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0239-PROOF-01",
+        "scenario": "Execute current rebased T0 and A-E checklist: exact artifact/runtime, full-stack gate/reuse and refusal, current hashed installs/Kokoro/hash refusal, interrupted journal recovery, UI progress and complete voice-preserving dub.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0239-PROOF-02",
+        "scenario": "Reconcile each upstream own acceptance; no obsolete 0.1.27 install, obsolete pins, expected Spleeter failure or canonical-runtime corruption.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "managed_pack_recovery_and_progress",
+    "proof_mode": "owned_isolated_runtime_install",
+    "dependency_or_blocker": "WP-0329 repaired/qualified current runtime; current hashed lockfiles/wheel cache; real complete install/repair jobs. Failure/interruption may stop only session-owned children. WP-0245 read-only Jobs batching can run before costly install scenario.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0245",
+    "title": "Jobs/Library batched queries and install-command tracing",
+    "requirements": "Operator goal 2026-05-22 (\"make my app work\"). v0.1.50 freeze trace contained 1,071 `command_slow` rows dominated by 672× `library_get` and 227× `item_outputs`, plus zero install-related rows. JobsPage now hydrates job/item context through two new batched commands (`library_get_many`, `item_outputs_many`); pack-install Tauri commands gain `InvokeTimer` and the four sync ones become `async` + `spawn_blocking`. Engine + Tauri `cargo test` + 50 desktop contract tests green. Operator-relayed install + new-trace proof bundle pending. Blocker: operator-relayed install and new-trace proof. Update 2026-09-30 (WP-0326): Batched Jobs/Library commands and async install tracing implemented and recorded tested. Installing historical 0.1.50 is not a current prerequisite; remaining is current installed batching/command trace proof against the packet acceptance.",
+    "packet_path": "governance/workflow/work_packets/WP-0245_JOBS_LIBRARY_BATCHED_QUERIES_AND_INSTALL_TRACE.md",
+    "packet_sha256": "ac4b222c7e716411949fc2f9923cdfdf27bac016283a1bf9edd07b4680eda459",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance Criteria",
+        "line": 81,
+        "content": "- `library::list_items_by_ids` exists and is unit-tested for: empty input → empty output; missing ids → skipped without error; correct ordering tolerated by callers.\n- `library_get_many` and `item_outputs_many` Tauri commands exist, both async + `spawn_blocking` + `InvokeTimer`, registered in the Tauri builder.\n- `JobsPage.tsx` no longer issues `Promise.all` over `library_get` or `item_outputs`; both fan-outs replaced with single batched calls.\n- Six pack-install Tauri commands carry `InvokeTimer::start` so trace rows are emitted on every invocation:\n  - `tools_tts_neural_local_v1_install`\n  - `tools_tts_voice_preserving_local_v1_install`\n  - `install_demucs_pack` (or wrapper)\n  - `install_spleeter_pack` (or wrapper)\n  - `install_diarization_pack` (or wrapper)\n  - `install_tts_preview_pack` (or wrapper)\n- Engine + Tauri `cargo test` and desktop `npm run test:contracts` all pass locally.\n- Post-deploy trace shows zero `command_slow` rows whose `cmd` is `library_get` or `item_outputs` while Jobs page is active (replaced by single batched rows).\n- Post-deploy trace shows `command_completed` rows for the install commands when Reinstall is clicked.\n- Proof bundle under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0245/<timestamp>/summary.md`.\n- TASK_BOARD.md row added with status IN_PROGRESS → DONE after operator-relayed verification."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0245-PROOF-01",
+        "scenario": "Installed Jobs hydration emits batched library_get_many/item_outputs_many receipts without per-row library_get/item_outputs fan-out.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0245-PROOF-02",
+        "scenario": "Invoke actual governed pack repair/install in owned runtime and inspect command_completed timing receipts for all six commands.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "managed_pack_recovery_and_progress",
+    "proof_mode": "owned_isolated_runtime_install",
+    "dependency_or_blocker": "WP-0329 repaired/qualified current runtime; current hashed lockfiles/wheel cache; real complete install/repair jobs. Failure/interruption may stop only session-owned children. WP-0245 read-only Jobs batching can run before costly install scenario.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0246",
+    "title": "Localization Studio Spleeter deadlock fix, job-spawn timeout/cancel hardening, stuck-job watchdog",
+    "requirements": "Operator 2026-05-29: Localization Studio \"never worked\", a few-second clip stuck 5+ h. Root cause (live process tree + job DB): `separate_audio_spleeter` deadlocked because the embedded script used `Separator(\"spleeter:2stems\")` whose default `multiprocess=True` spawns an `os.cpu_count()` `Pool()` — ~33 workers each re-import TensorFlow under Windows spawn, then deadlock (job pinned at `progress=0.25`, idle workers + blocked ffmpeg pipe). Fix: `multiprocess=False`. Hardened all 7 Python-model/ffmpeg spawn sites (spleeter, demucs, pyannote+fallback diarize, pyttsx3, neural TTS, voice-preserving TTS, vocal-cleanup) onto `run_command_output_with_control` (timeouts 1800/3600 s, cancellable). Added `run_job_stall_watchdog` on the runner heartbeat: WARN at 600 s no-progress, auto-fail backstop at 7200 s (above the longest command timeout so healthy jobs are never killed). Shipped in desktop build 0.1.54. Operator install + verification on the test clip pending. Blocker: operator install and exact test-clip verification. Update 2026-09-30 (WP-0326): Spleeter nonmultiprocess and controlled child timeout/cancel/watchdog implementation recorded; later WP-0288 records successful separation. Historical 0.1.54 install prerequisite is obsolete. Remaining is exact installed clip plus timeout, cancellation and watchdog boundary proof; separation success alone is insufficient.",
+    "packet_path": "governance/workflow/work_packets/WP-0246_LOCALIZATION_SPLEETER_DEADLOCK_JOB_TIMEOUT_WATCHDOG.md",
+    "packet_sha256": "fad220c296a80a2fc619895b4fea70c2f13f9aae168c8444b304ef2e78c06cac",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance Criteria",
+        "line": 81,
+        "content": "- Spleeter embedded script constructs `Separator(\"spleeter:2stems\", multiprocess=False)`.\n- All seven listed spawn sites run under `run_command_output_with_control` with the documented timeouts; each maps `Spawn`/`Wait`/`Canceled`/`TimedOut` explicitly, with `Canceled` logging `job_canceled` and returning `Ok(())`.\n- `run_job_stall_watchdog` runs on the runner heartbeat: WARN to the job log at `JOB_STALL_WARN_SECS`, auto-fail at `JOB_STALL_FAIL_SECS`, and never fails a job whose progress is still advancing.\n- Engine compiles clean; desktop build 0.1.54 produces NSIS + MSI installers; `BUILD_CHANGELOG.md` entry references WP-0246.\n- Operator-relayed verification: Localization Studio separation completes on the test clip; proof bundle under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0246/<timestamp>/summary.md`.\n- TASK_BOARD.md row added (IN_PROGRESS → DONE after operator verification)."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0246-PROOF-01",
+        "scenario": "Exact original short separation clip completes under installed controlled runtime with no Windows multiprocess fan-out.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0246-PROOF-02",
+        "scenario": "Owned job children exercise timeout/cancel/watchdog boundaries, warn/fail correctly, and preserve advancing jobs; later separation success alone is insufficient.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "localization_real_media",
+    "proof_mode": "isolated_packaged_media_workflow",
+    "dependency_or_blocker": "WP-0329 verified managed runtime and real model/cache readiness; exact Queen/Haerin/original media must be located and independently identified (availability not inspected here); bridge action capability; owned disposable job/output roots.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0251",
+    "title": "Localization dub Kokoro offline-cache honest readiness",
+    "requirements": "Operator 2026-06-15: Localization Studio \"never worked, not even close to producing an audio file or subs\" (Haerin KO single-speaker clip). Root cause (canonical job DB row `5b648db6...`, status `failed`): `dub_voice_preserving_v1` dies at the first Kokoro synth — `KPipeline` `hf_hub_download('hexgrad/Kokoro-82M')` resolves from the app-local HF cache (`HF_HOME=<appdata>/cache/huggingface`, `HF_HUB_OFFLINE=1`) which was EMPTY; Kokoro only ever landed in the user `.cache`, and a stale `.warmup_ok` marker made the readiness gate report \"installed\" so re-provisioning was skipped → `OfflineModeIsEnabled`/`LocalEntryNotFoundError`, exit 1, no audio/subs, follow-up separation/mix/mux/subtitles never ran. Fix (`tools.rs`): `kokoro_app_cache_ready` mirrors the offline resolver (refs/main→sha→config+pth+af_heart voice) and now gates both Kokoro pack statuses; warmup writer refuses a dishonest marker; regression unit test added; `cargo check`+test green. Render-level proof: exact Haerin request now yields `clone_preserved` cloned segment. Live app cache populated so operator can retry now. Quality upgrades split to WP-0252. Build gated on WP-0252. Update 2026-09-30 (WP-0326): Kokoro offline-readiness fix was included in 0.1.81 per WP-0262; earlier waiting-for-rebuild note is historical. Remaining is full managed dub-job offline/cache/error proof, not only a standalone segment/import.",
+    "packet_path": "governance/workflow/work_packets/WP-0251_LOCALIZATION_DUB_KOKORO_OFFLINE_CACHE_HONEST_READINESS.md",
+    "packet_sha256": "5ef161804f4768c16f36aeac30958a293dff3bffd310c46dbd9c0be290e0b822",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance Criteria",
+        "line": 70,
+        "content": "- `kokoro_app_cache_ready` exists and is required by both `tts_neural_local_v1_pack_status.installed` and `tts_voice_preserving_local_v1_pack_status.installed`.\n- The warmup writer refuses to write `.warmup_ok` when the app cache lacks an offline-resolvable Kokoro snapshot.\n- `cargo test -p voxvulgi_engine` passes, including `kokoro_app_cache_ready_requires_snapshot_files_not_just_marker`.\n- A `dub_voice_preserving_v1` run on the Haerin item produces a non-silent dub segment with `voice_clone_outcome=\"clone_preserved\"` (render-level proof obtained; full-job proof pending operator retry or smoke run).\n- Proof bundle under `product/desktop/build_target/tool_artifacts/wp_runs/WP-0251/<timestamp>/summary.md`."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0251-PROOF-01",
+        "scenario": "Exact Haerin full managed voice-preserving dub succeeds offline with app-local Kokoro resolver and non-silent clone_preserved output.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0251-PROOF-02",
+        "scenario": "Missing cache/wrong marker error path refuses readiness and warmup marker; full job logs/UI prove honest failure then recovery.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "localization_real_media",
+    "proof_mode": "isolated_packaged_media_workflow",
+    "dependency_or_blocker": "WP-0329 verified managed runtime and real model/cache readiness; exact Queen/Haerin/original media must be located and independently identified (availability not inspected here); bridge action capability; owned disposable job/output roots.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0254",
+    "title": "Lane-based job scheduling + startup subscription auto-sync",
+    "requirements": "Operator 2026-06-15: \"vv can't do 2 things at once / single videos blocked by playlists; the parallelism setting is global and wrong.\" Verified root cause: one global FIFO pool (live `jobs_max_concurrency=2`), playlist refresh fans out ~1000 child downloads into the shared queue (jobs.rs:6504) → starves single videos + localization. Replace with per-lane budgets (Single 3 / Recurring 1 / Localization 1), recurring-lane = conservative anti-bot, + 4KVDP-style startup auto-check+auto-download of due subs into the recurring lane. Engine-first; supersedes WP-0165 Quick/Advanced gate for the archiver. WP: `work_packets/WP-0254_JOB_LANES_SCHEDULING_AND_STARTUP_AUTO_SYNC.md`. Update 2026-09-30 (WP-0326): Engine scheduling/resume/startup auto-sync complete, tested and built per packet. Remaining is actual lane parallelism, conservative recurring behavior, persisted interrupted-work resume and startup auto-sync proof. WP-0320 later lane/pacing evidence may be reused only where it covers these exact criteria.",
+    "packet_path": "governance/workflow/work_packets/WP-0254_JOB_LANES_SCHEDULING_AND_STARTUP_AUTO_SYNC.md",
+    "packet_sha256": "1789767116806967d6b2783c56ebd0acd859837307cbaa06b91f53cc3d9866bd",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance Criteria",
+        "line": 66,
+        "content": "- v17 migration runs additively on the real DB (additive `lane` column + backfill; no row deletes; idempotent `ensure_column` + user_version step). `cargo test -p voxvulgi_engine` green.\n- A queued single download runs while a recurring playlist refresh + its child downloads are in flight (recurring capped at 1, single lane free) — proven by a runner/scheduling unit test.\n- A localization job and a download job run concurrently (separate lanes) and neither blocks the other.\n- Per-lane limits persist and are clamped; legacy global `jobs_max_concurrency` still honored as fallback (no reset of the operator's current value).\n- Startup auto-check enqueues only **due** subscriptions, staggered, into the recurring lane, and is disablable via config.\n- No user library/subscription/playlist data deleted or reset."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0254-PROOF-01",
+        "scenario": "Actual recurring and single download lanes plus localization job run concurrently with per-lane/global limits retained.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0254-PROOF-02",
+        "scenario": "Owned interrupted work resumes with stable identities; normal startup auto-sync enqueues only due subscriptions, staggered and disablable without resetting operator config.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "actual_provider_runner_and_export",
+    "proof_mode": "exact_case_provider_and_read_only_observation",
+    "dependency_or_blocker": "Current authenticated provider capability and exact source jobs/subscriptions; WP-0323 database reliability; preserve canonical queue and histories. Export needs >=1-hour timer, runner I/O needs 30-minute real workload. Credentials/source availability not assumed.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0277",
+    "title": "Recoverable NAS duplicate cleanup",
+    "requirements": "Schema v28 bounded inventory, staged exact hashes, keeper review, quarantine, relink, and rollback pass disposable-fixture tests and v0.1.113 build/visual proof. Complete packaged UI approval/quarantine/rollback smoke remains; no operator media was mutated. Refinement: `work_packets/WP-0277_RECOVERABLE_NAS_DUPLICATE_CLEANUP_v1_REFINEMENT.md`. Update 2026-09-30 (WP-0326): 2026-09-30 status reconciliation: NEEDS_VALIDATION. Opened WP-0277/summary.md: fixture/engine/build/collapsed visual proof passes; complete packaged workflow explicitly remains pending. Remaining: Disposable packaged inventory/group review/keeper approval/quarantine/rollback proof. No operator media mutation is authorized. Original requirements and dated history are retained; no product/runtime verification was rerun in this status-only pass.",
+    "packet_path": "governance/workflow/work_packets/WP-0277_RECOVERABLE_NAS_DUPLICATE_CLEANUP_v1.md",
+    "packet_sha256": "92cde5e55d52b94418507b099f13ef784f9bbc779ccfe52210bb2aecaac0497c",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance criteria",
+        "line": 28,
+        "content": "- All refinement acceptance and controls pass.\n- Inventory performs no filesystem mutation.\n- Reconciliation deletes neither media nor library metadata, does not overwrite existing files, and\n  applies only one-to-one evidence matches automatically.\n- Automated tests use disposable fixtures only.\n- A successful quarantine action leaves no `library_item.media_path` pointing at its moved source;\n  preserved redundant rows resolve to the verified keeper path in the same database transaction as\n  identity relinking and action-state publication.\n- Rollback restores the source file, original redundant library path, and recorded identity links\n  together; a failed database handoff compensates the filesystem move or remains explicitly\n  recoverable as `attention`.\n- Permanent deletion remains a separate explicit operator action.\n- Proof bundle satisfies `PROOF_STANDARD.md` before `DONE`."
+      }
+    ],
+    "refinement_contracts": [
+      {
+        "path": "governance/workflow/work_packets/WP-0277_RECOVERABLE_NAS_DUPLICATE_CLEANUP_v1_REFINEMENT.md",
+        "sha256": "bd0751ebf3601352dc6e6892685d967e8b9b462108a22d64b3187d464a4f2137",
+        "proof_sections": [
+          {
+            "heading": "Verification and acceptance",
+            "line": 79,
+            "content": "- Exact duplicate, same-ID different-encode, hash collision simulation, changing-file, unreachable NAS, cross-volume failure, cancel/resume, crash/recovery, and rollback fixtures pass.\n- Disposable apply/rollback proof asserts library rows never reference a moved-away source after a\n  successful apply and return to their original path after rollback.\n- No live operator media is mutated in automated proof.\n- Inventory is read-only and apply is impossible without an explicit reviewed run.\n- Path reconciliation dry-run and apply counts are reproducible from the same canonical root and\n  database preimage; unmatched/ambiguous rows remain present and no library record is deleted.\n- Every applied action is recoverable from the manifest.\n\n</topic>"
+          }
+        ]
+      }
+    ],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0277-PROOF-01",
+        "scenario": "Disposable packaged inventory/group review and explicit keeper approval followed by quarantine and rollback; independently reconcile file paths, identity links and action receipts.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0277-PROOF-02",
+        "scenario": "Failure-compensation/attention state remains recoverable; inventory is read-only, no overwrite/deletion or operator media mutation.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "disposable_cleanup_quarantine_rollback",
+    "proof_mode": "explicit_disposable_product_action",
+    "dependency_or_blocker": "Verified keeper/duplicate fixture paths and canonical independent reconciliation. Product destructive action contract/bridge availability required; no operator media mutations or permanent deletion authorized by proof batch.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0283",
+    "title": "Canonical queued identity compaction and execution gate",
+    "requirements": "Corrects the unproven queued-versus-queued gap in WP-0276: full canonical dry-run/apply, deterministic keeper, durable memberships/history, and last-moment execution ownership before network/yt-dlp. Queue stays paused. Refinement: `work_packets/WP-0283_CANONICAL_QUEUED_IDENTITY_COMPACTION_AND_EXECUTION_GATE_v1_REFINEMENT.md`. Update 2026-09-30 (WP-0326): Canonical 7,588-job backup/dry-run/apply and independent invariants passed in recorded proof. Remaining is reconciled combined final-state governed desktop and packaged execution-gate proof; later build existence alone is insufficient. No new compaction/apply needed by this status pass.",
+    "packet_path": "governance/workflow/work_packets/WP-0283_CANONICAL_QUEUED_IDENTITY_COMPACTION_AND_EXECUTION_GATE_v1.md",
+    "packet_sha256": "f513ba077bb6c7fb307736bd357e713f444506aa16232730cfdc135e66297d56",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance criteria",
+        "line": 29,
+        "content": "- All refinement verification requirements pass.\n- Reconciliation scans the full canonical queued set irrespective of UI/filter/page state.\n- Every identifiable non-present identity has at most one queued/running keeper after apply.\n- Every present identity has zero queued/running download jobs after apply.\n- All source memberships and job/batch history survive compaction.\n- A stale non-owner or already-present direct YouTube job cannot transition to running or start a downloader process.\n- Missing and unreachable media remain distinct; neither is silently treated as present.\n- Live apply uses a verified online SQLite backup and keeps the queue paused.\n- Proof bundle includes `summary.md` and satisfies `governance/workflow/PROOF_STANDARD.md`.\n\n</topic>\n\n<topic id=\"status-updates\" status=\"active\" version=\"v1\" wp=\"WP-0283\" updated_at=\"2026-07-27\">"
+      }
+    ],
+    "refinement_contracts": [
+      {
+        "path": "governance/workflow/work_packets/WP-0283_CANONICAL_QUEUED_IDENTITY_COMPACTION_AND_EXECUTION_GATE_v1_REFINEMENT.md",
+        "sha256": "18bb1a157ea08e53c70acbc8fa891c1349ce9f774e6b721a1e1a83bea8eb43d9",
+        "proof_sections": [
+          {
+            "heading": "Verification",
+            "line": 103,
+            "content": "- RED then GREEN focused engine tests for queued-vs-queued alias grouping, present suppression, deterministic active/source-priority/newest keeper selection, cross-batch/track membership preservation, full-set behavior beyond one page, stale execution suppression, and unreachable storage.\n- Compile the engine and desktop command boundary.\n- Verify live queue remains paused and no direct jobs are running before backup/apply.\n- Produce and verify an online SQLite backup.\n- Compare dry-run and apply receipts; audit invariant: at most one queued/running direct YouTube job per canonical identity.\n- Verify all pre-apply source memberships and batch/job history rows remain present.\n- Verify suppressed execution creates no downloader process and records the reason."
+          }
+        ]
+      }
+    ],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0283-PROOF-01",
+        "scenario": "Final packaged execution gate refuses stale non-owner and already-present queued jobs before downloader starts.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0283-PROOF-02",
+        "scenario": "Reconcile previous canonical 7588-job backup/dry-run/apply against combined final source and preserved invariants; do not repeat live compaction merely to obtain new status.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "packaged_isolated_ui",
+    "proof_mode": "semantic_bridge_and_snapshot",
+    "dependency_or_blocker": "Exact final governed candidate; PID-validated bridge/manual/capabilities; disposable root; actual controls/actions must exist. WP-0212 restart/hydration requires owned isolated process and runtime.",
+    "automation_availability": "CONDITIONAL_ON_FINAL_CANDIDATE_AND_PRODUCT_CAPABILITIES",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0299",
+    "title": "Secure downloader runtime and adaptive YouTube protection",
+    "requirements": "Code-level adversarial review passed after two remediations. Packaged v0.1.169 headless surfaces are readable, but exposed a PATH-fallback status defect: global nightly yt-dlp was labeled pinned when bundled bytes were absent. Source now requires the bundled path plus exact `2026.07.04` version/size/SHA for runtime availability and epoch truth. Remaining: Rust proof, governed hydrated/offline build and truthful headless re-audit, restart/canary app-boundary proof, exact controlled canary, and summary. WP: `work_packets/WP-0299_SECURE_DOWNLOADER_RUNTIME_AND_ADAPTIVE_YOUTUBE_PROTECTION_v1.md`. Refinement: `work_packets/WP-0299_SECURE_DOWNLOADER_RUNTIME_AND_ADAPTIVE_YOUTUBE_PROTECTION_v1_REFINEMENT.md`. Update 2026-09-30 (WP-0326): Source/runtime trust and adaptive protection work recorded implemented and reviewed. Remaining offline packaged, exact authenticated canary, restart/replay/recovery and UI proof; foreign-compilation delay was historical. Current version/changelog retention rules override historical increment instructions.",
+    "packet_path": "governance/workflow/work_packets/WP-0299_SECURE_DOWNLOADER_RUNTIME_AND_ADAPTIVE_YOUTUBE_PROTECTION_v1.md",
+    "packet_sha256": "eb1ce742ca4390c8da445b5dc3c71bb65aabe04e3978175df4ee0941ff84b2bc",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance and proof",
+        "line": 40,
+        "content": "- The refinement is the normative implementation and red-team contract.\n- No adaptive path may use unknown/unclassified failures as rate-limit proof.\n- No status may be `DONE` before the dependency/security, offline payload, deterministic replay, effective-command, exact-source, and UI proof gates pass.\n\n</topic>\n\n<topic id=\"status-updates\" status=\"active\" version=\"v1\" wp=\"WP-0299\" updated_at=\"2026-08-13\">"
+      }
+    ],
+    "refinement_contracts": [
+      {
+        "path": "governance/workflow/work_packets/WP-0299_SECURE_DOWNLOADER_RUNTIME_AND_ADAPTIVE_YOUTUBE_PROTECTION_v1_REFINEMENT.md",
+        "sha256": "39ebf0c4e17cced3e4b9cd8f43dcc581c788d1205f9718c78cb8b93038be53ac",
+        "proof_sections": [
+          {
+            "heading": "Risks, failure scenarios, controls, and verification",
+            "line": 117,
+            "content": "- False rate classification slows healthy work.\n  - Control: strict classifier, distinct targets, minimum event separation, unknown bucket, manual baseline return.\n  - Verify: table-driven stderr/status fixtures and replay.\n- Controller oscillates.\n  - Control: hysteresis, minimum dwell, bounded one-step transitions, sustained recovery window.\n  - Verify: alternating success/failure simulations and state invariants.\n- Old runtime evidence controls a changed extractor.\n  - Control: epoch key and explicit history comparison only.\n  - Verify: simulated version/plugin/capability upgrade.\n- Auth failure silently becomes slower downloads.\n  - Control: auth classifier enters hold and links sign-in recovery; no pacing transition.\n  - Verify: expired/missing/working browser-session cases.\n- PO provider fails and repeated canaries cause blocks.\n  - Control: capability health/TTL and hold; no canary until capability is ready.\n  - Verify: provider absent, unhealthy, recovered, and token-refresh cases without persisting tokens.\n- Adaptive overlay overrides an explicit operator safety choice.\n  - Control: documented precedence and bounded overlay; display both baseline/effective; never increase beyond operator maximum concurrency/rate.\n  - Verify: persistence/restart and precedence matrix.\n- Outcome DB becomes a new performance problem.\n  - Control: indexed current-state access, raw retention, batched compaction, rollups.\n  - Verify: synthetic million-event migration/query budget and interrupted compaction recovery.\n- Dependency update breaks offline packaging or arguments.\n  - Control: hash pin, clean payload validation, versioned command-capture tests, release notes/advisory review.\n  - Verify: network-blocked tool invocation from packaged payload and exact YouTube/Instagram/TikTok smoke probes."
+          },
+          {
+            "heading": "Acceptance and proof gates",
+            "line": 155,
+            "content": "- Bundled yt-dlp is at a reviewed current pin not affected by the identified advisory, with verified hash/offline payload.\n- Every adaptive transition cites eligible stored outcomes in the same provider/operation/auth/runtime epoch.\n- Auth, PO capability, content, network, storage/tool, rate, success, and unknown paths behave distinctly.\n- Operator baseline is unchanged by adaptation; effective overlay and command receipt are visible and restart-safe.\n- Raw retention/compaction and durable rollups/transitions pass scale and interruption tests.\n- Shared gate spacing and both YouTube tracks are proven through command-capture tests; no test requires uncontrolled mass downloads.\n- Settings/Diagnostics headless audit, exact controlled source test, governed build, changelog, and proof `summary.md` pass.\n\n</topic>"
+          }
+        ]
+      }
+    ],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0299-PROOF-01",
+        "scenario": "Packaged exact pinned downloader trust, offline capability readiness and UI after current source changes.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0299-PROOF-02",
+        "scenario": "Exact authenticated controlled provider canary, restart/replay/recovery and effective-command receipts; current simplified WP-0321 policies supersede old adaptive mode design only where explicitly recorded.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "actual_provider_runner_and_export",
+    "proof_mode": "exact_case_provider_and_read_only_observation",
+    "dependency_or_blocker": "Current authenticated provider capability and exact source jobs/subscriptions; WP-0323 database reliability; preserve canonical queue and histories. Export needs >=1-hour timer, runner I/O needs 30-minute real workload. Credentials/source availability not assumed.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0300",
+    "title": "Canonical provider metadata and multilingual title repair",
+    "requirements": "Implementation exists in `c02468b`, `e18273d`, and `b5f0b8c`: canonical schema/resolver/provenance, strict UTF-8 structured parsing, bounded repair/status UI, repair runner, and lineage hardening; focused frontend contracts pass 11/11. Remaining: current Rust/migration/interruption proof, independent adversarial review, exact live damaged/missing dry-run/apply evidence, governed build, and packaged cross-surface visual proof. WP: `work_packets/WP-0300_CANONICAL_PROVIDER_METADATA_MULTILINGUAL_TITLE_REPAIR_v1.md`. Refinement: `work_packets/WP-0300_CANONICAL_PROVIDER_METADATA_MULTILINGUAL_TITLE_REPAIR_v1_REFINEMENT.md`. Update 2026-09-30 (WP-0326): Metadata schema/resolver/repair/UI implementation and frontend contracts recorded. Remaining Rust migration/interruption, independent review, exact damaged/missing dry-run/apply and packaged cross-surface proof; no canonical-data repair performed here.",
+    "packet_path": "governance/workflow/work_packets/WP-0300_CANONICAL_PROVIDER_METADATA_MULTILINGUAL_TITLE_REPAIR_v1.md",
+    "packet_sha256": "7b0fbe345093bcf1e9259f0503bcaf39558326f40cdccbfd53089cbb6bfdee1d",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance and proof",
+        "line": 38,
+        "content": "- The refinement is normative.\n- A non-null job title is not by itself proof that the title is authoritative.\n- `DONE` requires exact current-case and all lifecycle-path proof; build-only or frontend-only remediation is insufficient.\n\n</topic>\n\n<topic id=\"status-updates\" status=\"active\" version=\"v1\" wp=\"WP-0300\" updated_at=\"2026-08-09\">"
+      }
+    ],
+    "refinement_contracts": [
+      {
+        "path": "governance/workflow/work_packets/WP-0300_CANONICAL_PROVIDER_METADATA_MULTILINGUAL_TITLE_REPAIR_v1_REFINEMENT.md",
+        "sha256": "05e960840c19c39841dec0f12b209af4c919ea0378151cade23a1cf9d60877f5",
+        "proof_sections": [
+          {
+            "heading": "Risks, failure scenarios, controls, and verification",
+            "line": 117,
+            "content": "- Operator title is overwritten.\n  - Control: explicit override provenance and immutable priority.\n  - Verify: override before/after ingestion, repair, retry, and reimport.\n- Wrong media receives metadata because URLs changed or overlap.\n  - Control: service + normalized extractor/media ID only; URL aliases are evidence, not identity.\n  - Verify: redirect/short URL, playlist/channel overlap, and conflicting identity fixtures.\n- Structured parsing still loses Unicode.\n  - Control: explicit UTF-8 arguments, raw byte fixture, JSON decoder failure rather than lossy conversion.\n  - Verify: multilingual exact-string round trips and invalid-byte error receipt.\n- Backfill blocks the live DB or provider.\n  - Control: bounded checkpoints, read batches, short write transactions, pause/resume, local-first repair before network enrichment, provider gate.\n  - Verify: large copy benchmark, interruption/restart, concurrent UI reads, and request-count receipt.\n- Metadata quality regresses after extractor change.\n  - Control: source quality/version/observed time and non-destructive history/receipt.\n  - Verify: older/newer/conflicting observation matrix.\n- Search index drifts from metadata.\n  - Control: WP-0305 owns index synchronization; this packet exposes deterministic metadata change hooks and integrity counts.\n  - Verify: hook receipt and later WP-0305 rebuild parity."
+          },
+          {
+            "heading": "Acceptance and proof gates",
+            "line": 148,
+            "content": "- No new title path uses lossy stdout decoding or delimiter splitting for structured provider metadata.\n- One canonical resolver controls display-title precedence across all named surfaces.\n- Missing, placeholder, damaged, filename-only, override, conflict, and unavailable cases are explicitly classified.\n- Operator titles and all canonical identity/membership/job/library records are preserved.\n- Exact known damaged/missing current cases are repaired or explicitly reported with the blocking missing evidence.\n- Failed, never-started, queued, running, partial-success, retried, succeeded, imported, deleted, missing, and unreachable paths pass focused proof.\n- Rust/frontend tests, migration/backfill interruption tests, TypeScript/build, governed desktop version/changelog, quiet headless screenshots/dumps/audit, and proof `summary.md` pass.\n\n</topic>"
+          }
+        ]
+      }
+    ],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0300-PROOF-01",
+        "scenario": "Exact damaged/missing multilingual title raw bytes and authoritative observations, dry-run then attributable repair apply with before/after canonical reconciliation.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0300-PROOF-02",
+        "scenario": "Lifecycle cases failed/never-started/queued/running/partial/retried/succeeded/imported/deleted/missing/unreachable retain reliable metadata source across Jobs/Archiver/Library.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0300-PROOF-03",
+        "scenario": "Rust migration/backfill interruption and independent adversarial review proof, packaged cross-surface snapshots and semantic checks.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "provider_metadata_repair",
+    "proof_mode": "canonical_dry_run_then_authorized_apply",
+    "dependency_or_blocker": "Exact damaged/missing canonical IDs and raw provider observations; verified online backup and independent before/after reconciliation for apply; provider access, final candidate and independent reviewer.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0311",
+    "title": "Diagnostics demand orchestration, command lifetime, and probe single-flight",
+    "requirements": "Demand ownership, semantic Torch/Demucs single-flight, source invalidation, bounded protection projection, and suspended-before-assignment yt-dlp lifecycle containment are implemented in governed v0.1.182; Windows descendant, engine, desktop, build, headless, and adversarial gates passed. Remaining closure is the contract-required disposable-VM normal-window `vvwatch` proof. The two-Python-heavy limit applies only to the capability-probe domain and cannot throttle production jobs. WP-0298 remains the integration owner. WP: `work_packets/WP-0311_DIAGNOSTICS_DEMAND_ORCHESTRATION_COMMAND_LIFETIME_AND_PROBE_SINGLE_FLIGHT_v1.md`. Refinement: `work_packets/WP-0311_DIAGNOSTICS_DEMAND_ORCHESTRATION_COMMAND_LIFETIME_AND_PROBE_SINGLE_FLIGHT_v1_REFINEMENT.md`. Update 2026-09-30 (WP-0326): Implemented and packaged; remaining contract-required disposable-VM normal-window vvwatch proof. Headless results cannot replace it.",
+    "packet_path": "governance/workflow/work_packets/WP-0311_DIAGNOSTICS_DEMAND_ORCHESTRATION_COMMAND_LIFETIME_AND_PROBE_SINGLE_FLIGHT_v1.md",
+    "packet_sha256": "b2ed2a92626dd4ee9f9bea56b5e3844694ae08d0caa031dbe893ec9cc88c705b",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance and proof",
+        "line": 69,
+        "content": "- The refinement is the normative evidence, research, architecture, ROI, red-team, microtask, acceptance, and proof contract.\n- Ordinary page entry must have zero duplicate semantic probes, at most one Torch child, at most one Demucs child, no automatic full-history replay, and at most two Python-heavy tasks inside the capability-probe admission domain without changing production-job concurrency.\n- Diagnostics-to-Options proof must show queued work removed, safe cancellation or one shared terminal flight, no stale commit, and exact trace/child-PID receipts.\n- No agent-started proof launch may resolve to canonical app data: headless runs must prove the disposable override is effective, normal-window runs must stay inside the disposable VM, and any current-profile cell observes only an already operator-started process without agent launch, navigation, mutation, or stop.\n- Build-only or synthetic-only proof cannot close this packet.\n- `governance/workflow/PROOF_STANDARD.md` and `build_rules.md` apply.\n\n</topic>\n\n<topic id=\"status-updates\" status=\"active\" version=\"v1\" wp=\"WP-0311\" updated_at=\"2026-08-24\">"
+      }
+    ],
+    "refinement_contracts": [
+      {
+        "path": "governance/workflow/work_packets/WP-0311_DIAGNOSTICS_DEMAND_ORCHESTRATION_COMMAND_LIFETIME_AND_PROBE_SINGLE_FLIGHT_v1_REFINEMENT.md",
+        "sha256": "de0ee95b0eacd7312aa1949d5285eac0b4464339d63405eacf61819adcf9e867",
+        "proof_sections": [
+          {
+            "heading": "Red-team risks, scenarios, controls, and verification",
+            "line": 152,
+            "content": "- A single-flight entry deadlocks or remains permanently occupied after panic/error.\n  - Control: RAII/finally cleanup, terminal outcome for success/error/panic/cancel, bounded waiter timeout, and retry after terminal failure.\n  - Verify: injected error, panic boundary, timeout, canceled waiter, and subsequent successful retry.\n- Cancellation occurs inside a safety-critical transaction and leaves partial state.\n  - Control: check cancellation before opening a transaction and after commit/rollback, never between invariant-dependent statements unless rollback is guaranteed.\n  - Verify: injected cancellation at every defined checkpoint plus canonical state reread.\n- An old result overwrites current Options or Diagnostics state.\n  - Control: page/module generation and semantic query key must be rechecked at commit; trace stale suppression.\n  - Verify: deliberately reorder responses across two navigations and two module selections.\n- Cache invalidation misses an install, repair, Python override, GPU/runtime change, or payload update.\n  - Control: versioned identity key and explicit invalidation calls from every mutation path; fail stale rather than ready when identity cannot be established.\n  - Verify: mutate each supported identity input only inside an owned disposable fixture/root and prove a new probe runs exactly once; never alter the operator's installed runtime, payload, or canonical configuration for this test.\n- Bounded scheduling starves a low-priority section forever.\n  - Control: aging/fairness within cost classes, visible queued state, and a maximum wait receipt.\n  - Verify: sustained cheap traffic cannot prevent an admitted heavy request from eventually running.\n- Consolidating protection data changes download/enumeration meaning.\n  - Control: preserve operation-specific IDs, totals, history ordering, and canonical source queries in one snapshot contract.\n  - Verify: parity fixture compares old operation-specific outputs to the new projection before retiring old auto-load calls.\n- A non-cancellable child process survives navigation and a replacement starts.\n  - Control: owned child handle plus single-flight key; no replacement until terminal/kill-at-safe-boundary; trace PID and owner.\n  - Verify: navigate during a deliberately slow owned probe and observe at most one PID.\n- UI appears faster only because data silently stopped loading.\n  - Control: every section retains explicit `idle/queued/loading/ready/stale/failed` truth, freshness, and manual refresh.\n  - Verify: headless semantic audit plus visual inspection at supported viewports.\n- A proof launch silently initializes or mutates the canonical app database.\n  - Control: every agent-started `--agent-headless` launch sets `VOXVULGI_AGENT_HEADLESS_BASE_DIR` to a preflighted owned disposable absolute root; every agent-started normal-window launch runs only inside an owned disposable VM/snapshot; `--safe-mode` is never described as read-only because visible safe mode writes queue-pause state. Current-profile evidence is observation-only on an already operator-started process.\n  - Verify: resolved-path/non-alias receipt, disposable bridge/database/config/trace sidecars, `agent_headless=true`, canonical-target before/after non-access evidence for agent-owned runs, VM/snapshot identity, and explicit process-initiation/ownership receipt. Missing isolation proof keeps the packet not-DONE.\n\n</topic>\n\n<topic id=\"microtasks-acceptance-and-proof\" status=\"active\" version=\"v1\" wp=\"WP-0311\" updated_at=\"2026-08-23\">"
+          },
+          {
+            "heading": "Acceptance criteria",
+            "line": 201,
+            "content": "- Ordinary Diagnostics entry launches no duplicate semantic probe.\n- At most one Torch/performance-tier child and one Demucs-import child exist for concurrent Diagnostics/Options consumers; no more than two Python-heavy tasks run inside the capability-probe admission domain. Production localization/downloader/job-runner Python work is outside this packet's governor and retains its existing authority.\n- Page entry no longer starts both full protection-history replays. Download and enumeration retain distinct request/span identity and output semantics.\n- Diagnostics-to-Options navigation removes queued Diagnostics work. After cancellation is observed, no new Diagnostics-owned child launch begins and no stale Diagnostics result commits into current UI state.\n- A running non-cancellable shared operation produces one PID/computation, one terminal result, and explicit `superseded_completion` for owners that left; it never causes a replacement flight.\n- Every section exposes truthful loading/queued/stale/error/freshness state and remains discoverable without new cards.\n- Scheduler receipts reconcile queue wait, execution, child ownership, cancellation, deduplication, and completion for the exact incident.\n- The shell and Options render remain responsive during the controlled scenario; no acceptance claim uses a post-window screenshot freeze as navigation evidence.\n- Existing tool readiness, repair/update invalidation, protection history, and download/enumeration policy tests remain green."
+          },
+          {
+            "heading": "Proof contract",
+            "line": 213,
+            "content": "- Verification class: manual/UI-heavy plus app-boundary.\n- Required proof root: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0311/<run-id>/`.\n- Required `summary.md` and `evidence.json` name the exact target, expected state, observed state, command/scenario, app version, PID, request/span IDs, semantic probe counts, child PIDs, maximum overlap, cancellation outcomes, and watcher path.\n- Required automated proof: RED-to-GREEN focused frontend tests, Rust single-flight/cancellation/invalidation tests, TypeScript, desktop contracts, and affected engine tests.\n- Required app-boundary proof: packaged headless semantic audit/dump with `VOXVULGI_AGENT_HEADLESS_BASE_DIR` resolving to an owned disposable absolute root, plus a controlled normal-window Diagnostics-to-Options run with `vvwatch` inside an owned disposable VM/snapshot. Any current-profile evidence is separately labelled operator-initiated/agent-observation-only and cannot replace isolation receipts.\n- Independent adversarial review is required before `DONE`.\n- WP-0311 remains `BACKLOG` until implementation begins and cannot become `DONE` until its proof passes and its handoff is recorded for WP-0298 integration. WP-0298 itself does not need to be `DONE` first.\n\n</topic>"
+          }
+        ]
+      }
+    ],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0311-PROOF-01",
+        "scenario": "Disposable VM normal-window vvwatch matrix across Diagnostics/Options proves bounded shared Torch/Demucs flights, queue removal/supersession, no stale commits and exact child receipts.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0311-PROOF-02",
+        "scenario": "Packaged disposable headless behavior remains supporting evidence; it cannot replace required normal-window VM proof.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "disposable_vm_normal_window",
+    "proof_mode": "owned_vm_matrix",
+    "dependency_or_blocker": "Owned disposable Windows VM/snapshot and full qualified runtime/payload. Required normal-window vvwatch matrix cannot be replaced by headless proof. WP-0312 also needs independent SQLite clone/backup/restore; WP-0313 complete payload integrity/provider gate.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0312",
+    "title": "SQLite runtime access boundary and lock attribution",
+    "requirements": "The bounded `DatabaseRuntime`, serialized writer/read admission, contention receipts, startup-only migration guards, production caller migration, and external-I/O/CAS hardening are implemented in governed v0.1.182; engine/desktop/build/headless/adversarial gates passed. Remaining closure is the exact isolated-clone bundle, observation-only current-profile cell, and disposable-VM normal-window proof. WP-0315 stays blocked by this hard predecessor. WP: `work_packets/WP-0312_SQLITE_RUNTIME_ACCESS_BOUNDARY_AND_LOCK_ATTRIBUTION_v1.md`. Refinement: `work_packets/WP-0312_SQLITE_RUNTIME_ACCESS_BOUNDARY_AND_LOCK_ATTRIBUTION_v1_REFINEMENT.md`. Update 2026-09-30 (WP-0326): Bounded DB runtime implemented and packaged. Remaining isolated-clone contention/backup/restore, observation-only current-profile and VM normal-window proof. WP-0315 is DONE with reject decision; its old blocked sentence is historical. Current read-admission complaint remains unresolved, not fixed by status change.",
+    "packet_path": "governance/workflow/work_packets/WP-0312_SQLITE_RUNTIME_ACCESS_BOUNDARY_AND_LOCK_ATTRIBUTION_v1.md",
+    "packet_sha256": "dfdd5292f14daa4619f5583d239461dd1cd4e71da8c8e1717fa702eab5f58855",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance and proof",
+        "line": 58,
+        "content": "- The refinement is normative.\n- No ordinary post-ready production migration or read-oriented read-write open may remain.\n- All production app-database access must use the bounded service while preserving the fresh implementation-start schema and objects (dated 2026-08-23 baseline: v54), triggers, immediate-transaction invariants, backups, canonical records, and watcher behavior.\n- Writer queue capacity, admission timeout, overload result, cancellation boundary, shutdown drain, lane priority/fairness, batching, checkpoint, read-pool, query/index, and no-starvation rules are frozen and proven before the baseline is handed to WP-0315; no accepted canonical write may be silently dropped or block indefinitely.\n- Exact isolated-clone write/contention proof, disposable-root packaged proof, observation-only current-profile evidence, and independent adversarial proof are required; build-only proof is insufficient. Visible `--safe-mode` is not read-only because startup writes queue-pause state. The agent may not start or drive the current-profile process; any live current-profile mutation requires separate explicit operator authority and before/after reconciliation.\n- `governance/workflow/PROOF_STANDARD.md`, user-data preservation rules, and `build_rules.md` apply.\n\n</topic>\n\n<topic id=\"status-updates\" status=\"active\" version=\"v1\" wp=\"WP-0312\" updated_at=\"2026-08-24\">"
+      }
+    ],
+    "refinement_contracts": [
+      {
+        "path": "governance/workflow/work_packets/WP-0312_SQLITE_RUNTIME_ACCESS_BOUNDARY_AND_LOCK_ATTRIBUTION_v1_REFINEMENT.md",
+        "sha256": "5d3396b1ad0d7308f03b0ad53000c122c585f67aab37d273197f57e802a01411",
+        "proof_sections": [
+          {
+            "heading": "Red-team risks, scenarios, controls, and verification",
+            "line": 142,
+            "content": "- Writer actor becomes a global bottleneck, starves a lane, drops an accepted write, blocks indefinitely, or deadlocks through nested database calls.\n  - Control: pre-frozen queue capacity/admission timeout/overload result, per-lane oldest-wait and fairness receipts, no nested admission, context-aware domain methods, deterministic cancellation boundary, bounded shutdown drain, and fail-fast detection of re-entry.\n  - Verify: nested-call adversarial test; saturation/overload/cancel/shutdown fixtures; and nine-track/ten-slot observed-replay, backlog-burst, and starvation stress with canonical reconciliation.\n- Port changes the atomicity of job/identity claims.\n  - Control: preserve `TransactionBehavior::Immediate`, canonical predicates, trigger behavior, and one-transaction ownership update.\n  - Verify: simultaneous claim race tests with exactly one owner and canonical reread.\n- Read pool reuses a connection across threads unsafely.\n  - Control: one connection per executor/lease according to rusqlite thread guarantees; never share a raw connection concurrently.\n  - Verify: thread sanitizer where available plus high-concurrency stress and deterministic lease tests.\n- Cancellation or timeout abandons an open transaction.\n  - Control: RAII rollback and terminal registry cleanup; no cancellation checkpoint inside an uncommitted invariant block unless rollback is guaranteed.\n  - Verify: injected cancel/panic at every transaction phase.\n- Retry duplicates a non-idempotent write.\n  - Control: explicit idempotency classification/key and retry allowlist; default is no retry.\n  - Verify: conflict injection proves one canonical mutation/receipt.\n- Operation registry itself becomes high-volume contention or leaks sensitive SQL/data.\n  - Control: bounded in-memory entries, low-cardinality operation names, no SQL values/secrets/paths beyond existing redaction policy.\n  - Verify: load test, retention bound, and redaction fixtures.\n- Checkpoint maintenance stalls readers or grows WAL without bound.\n  - Control: measured bounded checkpoint policy, no foreground checkpoint, and health thresholds derived from the current workload.\n  - Verify: long-reader fixture, WAL growth/recovery, restart, and checkpoint timing receipt.\n- Database-boundary conversion corrupts or weakens trigger/invariant behavior.\n  - Control: port access only, not schema semantics; isolated clone; backups; `quick_check`/integrity; trigger and invariant adversarial suite.\n  - Verify: acquire and reconcile the fresh implementation-start schema version and complete object inventory, canonical record counts, backup hash, restore, and exact negative-path trigger tests; schema v54 and its recorded object counts are only the dated 2026-08-23 comparison baseline.\n- External watcher still times out because host I/O is saturated rather than SQLite locked.\n  - Control: report phase-specific timeout/host evidence, not a fabricated lock owner.\n  - Verify: separate injected lock and injected disk-delay fixtures.\n- A proof labelled read-only mutates canonical queue state during startup.\n  - Control: treat visible `--safe-mode` as mutating; require the headless disposable-base override for every agent-started headless process, require an owned disposable VM/snapshot for every agent-started normal-window process, and restrict current-profile work to independent read-only observation of an already operator-started process.\n  - Verify: source guard for safe-mode queue-pause mutation; resolved-root/non-alias and disposable sidecar/database receipts; VM identity; process ownership/initiation receipt; and no agent-driven current-profile launch, navigation, mutation, or stop.\n\n</topic>\n\n<topic id=\"microtasks-acceptance-and-proof\" status=\"active\" version=\"v1\" wp=\"WP-0312\" updated_at=\"2026-08-23\">"
+          },
+          {
+            "heading": "Acceptance criteria",
+            "line": 195,
+            "content": "- After WP-0310 reports database ready, no ordinary production path calls `db::migrate`; only the documented startup, maintenance/CLI, and test exceptions remain.\n- No read-oriented protection, Diagnostics, Options, Jobs, Library, or subscription status projection opens the app database read-write.\n- Production app-database callers use the bounded service; raw connection/transaction values do not cross its defined module boundary.\n- Writer admission is bounded and observable, preserves every immediate-transaction/trigger invariant, and performs no avoidable filesystem/network/child work while holding a transaction.\n- The frozen queue/admission contract names capacity, per-lane priority/fairness, admission timeout, overload result, cancellation boundary, shutdown drain, batching, checkpoint, read-pool, query/index, and retry settings. Saturation proves bounded waiting, no starvation, and no silently dropped accepted canonical write; shutdown independently reconciles every admitted operation to a terminal receipt and canonical state.\n- The exact combined protection projection returns download/enumeration parity from one read boundary and maintains distinct operation identity.\n- Injected internal contention produces a receipt with active internal candidates and phase timings. External/unknown contention remains explicitly labeled unknown.\n- The isolated-clone/disposable-root concurrent Diagnostics/Options/auto-sync fixture has no unexplained `database is locked` failure. Any failure names the exact phase and candidate set.\n- A five-minute exact watcher run has successful DB probes or a truthful phase-specific non-lock explanation; DB probe work remains suppressed during schema migration per WP-0309.\n- The fresh implementation-start schema and object inventory (dated baseline: v54 with 67 tables, 77 indexes, 24 triggers, and 47 foreign-key entries) plus queue/identity semantics, backups, restore, and canonical records reconcile on the isolated clone. Later schema growth is recorded and preserved rather than forced into the dated counts.\n- No user media, subscriptions, playlists, library metadata, job history, or third-party database is deleted or overwritten."
+          },
+          {
+            "heading": "Proof contract",
+            "line": 209,
+            "content": "- Verification class: high-risk code plus isolated-write app-boundary proof, disposable-root headless/VM normal-window proof, and agent-observation-only current-profile evidence.\n- Required proof root: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0312/<run-id>/`.\n- Required `summary.md` and `evidence.json` include source inventory/exception registry, schema/object counts, query-plan receipts, concurrent-operation traces, injected-lock evidence, backup/restore hashes, canonical reconciliation, exact commands, app version, and watcher path.\n- Every agent-started headless process sets `VOXVULGI_AGENT_HEADLESS_BASE_DIR` to a preflighted owned disposable absolute root; every agent-started normal-window process runs only in an owned disposable VM/snapshot. Current-profile work occurs only after isolated-clone proof and is restricted to independent read-only observation of an already operator-started process; visible `--safe-mode` is explicitly mutating and is forbidden as a read-only proof path. Live auto-sync, driven navigation, or any other current-profile mutation requires separate explicit operator authorization naming the exact unchanged case plus before/after independent canonical reconciliation; ordinary \"normal app behavior\" is not authorization.\n- Independent adversarial review is mandatory before `DONE`.\n- Build-only, unit-only, a higher timeout, or absence of one lock error cannot close this packet.\n\n</topic>"
+          }
+        ]
+      }
+    ],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0312-PROOF-01",
+        "scenario": "Isolated clone contention/write admission/backup/restore and canonical data/schema/invariant preservation under exact final runtime.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0312-PROOF-02",
+        "scenario": "Disposable VM normal-window observations plus observation-only existing current-profile evidence; no live process launch/drive/mutation absent separate authority.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "disposable_vm_normal_window",
+    "proof_mode": "owned_vm_matrix",
+    "dependency_or_blocker": "Owned disposable Windows VM/snapshot and full qualified runtime/payload. Required normal-window vvwatch matrix cannot be replaced by headless proof. WP-0312 also needs independent SQLite clone/backup/restore; WP-0313 complete payload integrity/provider gate.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0313",
+    "title": "Offline hydration scheduling, attestation, and startup observability",
+    "requirements": "Shared verification, event-driven readiness, fresh-process attestation, source invalidation, and full heartbeat timing are integrated in governed v0.1.182. The v0.1.180 disposable-root proof verified 5,873 files/85,488,791 bytes and five callers joining one scan; v0.1.182 independently passed packaged hidden-headless version/bridge/navigation/audit/structural-action/snapshot proof after all six offline pack warmups passed. Remaining closure is the exact complete-payload timing/resource/provider-execution gate and disposable-VM normal-window proof. WP-0314 remains blocked on completed WP-0311/WP-0312/WP-0313 proof. WP: `work_packets/WP-0313_OFFLINE_HYDRATION_SCHEDULING_ATTESTATION_AND_STARTUP_OBSERVABILITY_v1.md`. Refinement: `work_packets/WP-0313_OFFLINE_HYDRATION_SCHEDULING_ATTESTATION_AND_STARTUP_OBSERVABILITY_v1_REFINEMENT.md`. Update 2026-09-30 (WP-0326): Attestation/hydration implementation and partial payload/headless proof recorded. Remaining complete-payload timing/resource/provider execution and VM normal-window proof; no new payload qualification implied.",
+    "packet_path": "governance/workflow/work_packets/WP-0313_OFFLINE_HYDRATION_SCHEDULING_ATTESTATION_AND_STARTUP_OBSERVABILITY_v1.md",
+    "packet_sha256": "de4f6939dcb5d7933316f2c270bd4028421612541bf313aaf9ad4522e7d517b4",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance and proof",
+        "line": 57,
+        "content": "- The refinement is normative.\n- The 575,965-ms incident is recorded as a successful but excessively long verification with delayed heartbeat persistence—not a permanent hang.\n- Exact full payload, integrity/tamper, responsiveness, heartbeat delivery, and provider execution-gate proof are mandatory.\n- Every agent-started headless proof must set and verify `VOXVULGI_AGENT_HEADLESS_BASE_DIR`; every agent-started normal-window proof must remain in an owned disposable VM/snapshot. Optional current-profile evidence observes only an already operator-started process.\n- Toy trees, build-only checks, or a persisted receipt cannot close this packet.\n- `governance/workflow/PROOF_STANDARD.md`, offline payload policy, WP-0310 ordering, and user-data preservation rules apply.\n\n</topic>\n\n<topic id=\"status-updates\" status=\"active\" version=\"v1\" wp=\"WP-0313\" updated_at=\"2026-08-24\">"
+      }
+    ],
+    "refinement_contracts": [
+      {
+        "path": "governance/workflow/work_packets/WP-0313_OFFLINE_HYDRATION_SCHEDULING_ATTESTATION_AND_STARTUP_OBSERVABILITY_v1_REFINEMENT.md",
+        "sha256": "c838ae1c09004d2b3adc19305b7ef546798a32410d395d9161f0c7854550309f",
+        "proof_sections": [
+          {
+            "heading": "Red-team risks, scenarios, controls, and verification",
+            "line": 141,
+            "content": "- Incremental verification accepts modified executable bytes.\n  - Control: no incremental trust until file-identity/content invalidation is proven against every supported mutation on an owned disposable payload clone/fixture; fail closed to full verification. The operator's installed/bundled exact payload is verification-only and must never be the mutation target.\n  - Verify: same-size/mtime-restored tamper, replace, rename, hardlink/reparse, interrupted write, manifest mismatch, and payload-version change on the disposable clone, plus before/after identity proof that the installed/bundled payload was only read.\n- Background scheduling starves verification forever.\n  - Control: bounded priority with progress/fairness and visible held reason; foreground pressure reduces chunks but cannot silently abandon the flight.\n  - Verify: sustained foreground fixture still reaches terminal ready within its documented budget.\n- Verification starves UI/bridge or trace writer.\n  - Control: bounded chunk time/bytes, yields, thread-scoped background mode if proven, separate bounded trace queue, and foreground-priority signal.\n  - Verify: bridge latency, navigation, heartbeat receive/persist lag, disk/CPU samples during exact payload scan.\n- Startup event listener misses the initial or terminal state.\n  - Control: subscribe plus canonical snapshot/revision handshake; events carry monotonic revision and are idempotent.\n  - Verify: listener attaches before, during, and after terminal transition; reconnect obtains canonical state.\n- Heartbeat clocks are compared incorrectly.\n  - Control: use wall-clock only for cross-boundary approximate latency, sequence for ordering, and per-process monotonic clocks only within their origin; record clock source.\n  - Verify: clock-skew fixture and sequence-based reconstruction.\n- Trace flush barrier blocks the UI or loses rows on shutdown.\n  - Control: native bounded queue, nonblocking producer, explicit overflow counter, bounded terminal flush on owned shutdown.\n  - Verify: queue saturation, abrupt owned-process termination, restart, and overflow receipt.\n- Provider execution races attestation publication.\n  - Control: one atomic readiness generation and execution gate; stale generation cannot authorize a newer/different payload.\n  - Verify: launch attempt before/during/after verification and payload identity change.\n- Faster toy fixture is used as completion proof.\n  - Control: exact packaged payload and current machine conditions are mandatory; toy fixture is RED/GREEN only.\n  - Verify: proof summary records payload ID, file/byte totals, machine/source/destination, security state, and exact timestamps.\n- A full-payload proof launch migrates or mutates canonical app data before background gating.\n  - Control: every agent-started headless launch sets the supported base-dir override to a preflighted owned disposable absolute root; every agent-started normal-window launch runs only in an owned disposable VM/snapshot; optional current-profile evidence observes only an already operator-started process without agent navigation, mutation, or stop.\n  - Verify: resolved-root/non-alias receipt, disposable database/config/trace/bridge sidecars, `agent_headless=true`, VM/snapshot identity, process-initiation receipt, and host/canonical non-access evidence for agent-owned runs.\n\n</topic>\n\n<topic id=\"microtasks-acceptance-and-proof\" status=\"active\" version=\"v1\" wp=\"WP-0313\" updated_at=\"2026-08-23\">"
+          },
+          {
+            "heading": "Acceptance criteria",
+            "line": 190,
+            "content": "- Offline bundle/provider verification has stable named phases, progress, one semantic flight, and exactly one terminal `ready/error/skipped` outcome.\n- Full current-process authenticated readiness remains mandatory before provider execution; no persisted receipt alone grants execution.\n- Concurrent startup, Diagnostics, Options, catalogue, and job-readiness consumers trigger exactly one tree verification for one payload identity.\n- Exact packaged verification records file/byte progress and either safely reuses proven content work or performs one bounded full scan. A toy fixture cannot substitute.\n- Main and Worker heartbeat rows carry sequence, emitted, received, persisted, source-acknowledged, acknowledgement-stage, queue-dwell, and outcome fields. Generated-during-scan events do not appear later as an unexplained multi-interval burst, and an acknowledgement never claims durability unless its declared stage is `persisted`.\n- During exact payload verification, bridge health remains available, page navigation and job-start controls remain responsive, and foreground activity receives the selected scheduling priority without weakening integrity.\n- Startup progress is event-driven with canonical snapshot/revision recovery; adaptive polling is bounded and does not issue unchanged requests every 1.2 seconds for the full scan.\n- Tamper, replacement, reparse, interrupted verification, payload change, and stale generation fail closed and require re-verification on owned disposable clones/fixtures. Exact installed/bundled full-payload proof is read/verify-only, with independent before/after identity evidence that no operator payload bytes changed.\n- WP-0310 database-first order remains green and no database transaction spans file verification."
+          },
+          {
+            "heading": "Proof contract",
+            "line": 202,
+            "content": "- Verification class: high-risk app-boundary plus full-payload runtime.\n- Required proof root: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0313/<run-id>/`.\n- Required evidence includes exact payload/build ID, file/byte totals, before/after phase timings, scan count, progress revisions, status poll/event counts, bridge latency, navigation timings, emitted/received/persisted/acknowledged heartbeat boundary latencies and acknowledgement stages, resource samples, tamper/interruption results, and provider pre/post-attestation execution verdicts.\n- Required scenarios include packaged headless with `VOXVULGI_AGENT_HEADLESS_BASE_DIR` resolving to an owned disposable absolute root and controlled normal-window runs inside an owned disposable VM/snapshot, with concurrent `vvwatch` and no network access. Any current-profile evidence is separately labelled operator-initiated/agent-observation-only; the packet must not describe that live process as read-only, and agent-owned proof performs no live-user-data mutation.\n- Independent adversarial review is mandatory before `DONE`.\n- Duration improvement, responsive UI, or integrity cannot be claimed unless its exact canonical proof surface advances.\n\n</topic>"
+          }
+        ]
+      }
+    ],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0313-PROOF-01",
+        "scenario": "Complete exact qualified payload timing/resource/full-byte attestation, tamper refusal, heartbeat emitted-to-ack delivery, and provider execution gate.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0313-PROOF-02",
+        "scenario": "Disposable VM normal-window matrix; toy provider trees/persisted receipts/headless partial payload are insufficient.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "disposable_vm_normal_window",
+    "proof_mode": "owned_vm_matrix",
+    "dependency_or_blocker": "Owned disposable Windows VM/snapshot and full qualified runtime/payload. Required normal-window vvwatch matrix cannot be replaced by headless proof. WP-0312 also needs independent SQLite clone/backup/restore; WP-0313 complete payload integrity/provider gate.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0316",
+    "title": "Managed offline runtime and package-only installer",
+    "requirements": "Sole active offline-installer packet. App/runtime split, strict resolution, qualification/package-only entrypoints, Inno generation promotion, and focused/tiny-ISO proof are implemented. `WP-0316-A002` fixed normal keep-data reinstall; `WP-0316-A003` removed automatic version/changelog mutation; `WP-0316-A004` fixed the exact mixed HKLM v0.1.179/HKCU v0.1.204 failure by confining current-user installs to LocalAppData, preserving 14/14 protected files, removing the stale machine install/payload, passing installed-app health/version proof, and passing all 330 contracts without a build or version change. Real runtime qualification and exact-ISO clean/offline/update/rollback acceptance remain open. WP: `work_packets/WP-0316_MANAGED_OFFLINE_RUNTIME_AND_PACKAGE_ONLY_INSTALLER_v1.md`. Refinement: `work_packets/WP-0316_MANAGED_OFFLINE_RUNTIME_AND_PACKAGE_ONLY_INSTALLER_v1_REFINEMENT.md`. Update 2026-09-30 (WP-0326): Package-only app/runtime split and maintenance/migration implementation recorded. Remaining real runtime qualification and exact full ISO clean/offline/update/rollback acceptance; sole current installer authority retained, not declared production-qualified.",
+    "packet_path": "governance/workflow/work_packets/WP-0316_MANAGED_OFFLINE_RUNTIME_AND_PACKAGE_ONLY_INSTALLER_v1.md",
+    "packet_sha256": "89725b105c69c58ff7a732dae81e4c505f710ee8b72b53e941194ff940d8d30f",
+    "acceptance_source_sections": [],
+    "refinement_contracts": [
+      {
+        "path": "governance/workflow/work_packets/WP-0316_MANAGED_OFFLINE_RUNTIME_AND_PACKAGE_ONLY_INSTALLER_v1_REFINEMENT.md",
+        "sha256": "2c9ea3bc99249eb3eb2dfcf23b705331f945d1fe49e034a972515febbd80a15d",
+        "proof_sections": [
+          {
+            "heading": "Acceptance surface",
+            "line": 59,
+            "content": "- The app exposes separate roaming user-data and local managed-runtime roots, immutable selected generation identity, manifest hash/status, compatibility, and fallback policy in Diagnostics and `GET /agent/state` without adding a card.\n- Managed mode resolves tools, models, Hugging Face cache, voice backends, and both Python runtimes only from the selected generation and never silently falls back or downloads.\n- Qualification produces reusable non-solid component archives plus a machine-readable runtime manifest and independent offline relocation/default-workflow proof.\n- Packaging produces exactly one UDF ISO with root `Install_VoxVulgi.exe`, README, release manifest, qualified-runtime manifest, and component archives. It does not rebuild or modify product/runtime inputs or bump the app version.\n- The exact ISO hash passes clean-profile blocked-network install, first-run default localization, update, reinstall-keep, rollback/interruption, long-path, nontechnical UX, and user-data-preservation checks before publication.\n- WP state records every attempt, input identity, failure phase, diagnosis, and next action. WP-0265 and WP-0308 remain historical and are superseded, not reused as active procedure.\n\n</topic>"
+          }
+        ]
+      }
+    ],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0316-PROOF-01",
+        "scenario": "Real immutable runtime qualification and exact complete public ISO blocked-network clean install/default workflow.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0316-PROOF-02",
+        "scenario": "Exact ISO update/keep-data hashes/full-action boundary/rollback/interruption matrix, production-root sentinel and independent artifact listing/hash plus adversarial review.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "exact_full_offline_iso",
+    "proof_mode": "isolated_blocked_network_installer_matrix",
+    "dependency_or_blocker": "offline-installer-runtime/GUIDE.md conforming entrypoints; matching exact app/runtime qualification identities; package-only frozen inputs; owned disposable Windows target and blocked-network/install/update/rollback matrix.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0322",
+    "title": "Actionable errors and automatic subscription export",
+    "requirements": "Installed 2026-09-24 01:49; operator validates in daily use (export after retry fix, error buttons, daily export, audio-language retag) because VoxVulgi cargo work is paused for Handshake. Status call 26–78 s → <1 s (yt-dlp identity cache). Operator 2026-09-23: daily subscription export to app data by default (folder selectable in Options, Export now button, keep 30); every error states what happened, who acts (you or the app), what the app does next and when, and one-click fixes; engine fixes for app-internal errors shown as user problems (database-busy retries, MKV audio language tag). WP: `work_packets/WP-0322_ACTIONABLE_ERRORS_AND_SUBSCRIPTION_EXPORT_v1.md`. Update 2026-09-30 (WP-0326): Installed errors/export changes await exact export-after-retry, daily export, one-click errors and audio-language checks. Historical cargo pause is not a newly verified blocker.",
+    "packet_path": "governance/workflow/work_packets/WP-0322_ACTIONABLE_ERRORS_AND_SUBSCRIPTION_EXPORT_v1.md",
+    "packet_sha256": "05a241d20ef2cbba129e60b09207cb5a9b8fa0138e5aa3e161732f89bfa1175e",
+    "acceptance_source_sections": [
+      {
+        "heading": "Acceptance",
+        "line": 56,
+        "content": "- Classifier unit tests: every normalized message from the evidence section maps to the intended class (fixture list in the test).\n- Live: after install, re-run the grouped inventory; the Video Archiver strip shows the split counts; the 58 app-busy subscriptions are no longer labelled \"Network problem\"; a snapshot of a subscription in each of `wrong_link`, `source_gone`, `youtube_not_responding` shows plain text + buttons.\n- Export: Export now writes a file in the default folder; changing folder in Options persists; automatic export test (tempdir) keeps 30.\n- B1/B2 engine tests; one bundled test/build run; version retained."
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0322-PROOF-01",
+        "scenario": "Current grouped classification inventory and split strip; exact wrong_link/source_gone/youtube_not_responding controls and truthful who-acts text.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0322-PROOF-02",
+        "scenario": "Export now after busy-db retry plus default/changed folder persistence, first daily automatic export after >=1 hour and 30-file retention in owned temp root.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0322-PROOF-03",
+        "scenario": "Real managed MKV download retains correctly retagged selected audio languages.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "actual_provider_runner_and_export",
+    "proof_mode": "exact_case_provider_and_read_only_observation",
+    "dependency_or_blocker": "Current authenticated provider capability and exact source jobs/subscriptions; WP-0323 database reliability; preserve canonical queue and histories. Export needs >=1-hour timer, runner I/O needs 30-minute real workload. Credentials/source availability not assumed.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  },
+  {
+    "id": "WP-0324",
+    "title": "Continuous read I/O: provider re-hash per poll, database read attribution",
+    "requirements": "Implemented 2026-09-24, not compiled or tested (operator: no cargo, other projects share the QLC C: disk). Live evidence: desktop.exe 148.9 GB logical reads since 02:07, mostly served from cache; C: saturation is from other writers. (1) Provider install status re-hashed node.exe 88.5 MB + npm/plugin/server/lock and spawned node/npm --version on every call, including once per queued YouTube candidate in the runner loop; polling now reuses it by size+mtime stamps with a 10-min full re-hash, single-flight; launches still re-hash (`tools.rs`). (2) 4 KB page-read bursts unattributed: runtime contexts now record `page_bytes_read` (SQLITE_DBSTATUS_CACHE_MISS) and emit `database_heavy_read` trace rows at >=16 MiB with the call site (`database_runtime.rs`). WP: `work_packets/WP-0324_CONTINUOUS_READ_IO_PROVIDER_REHASH_AND_DB_READ_ATTRIBUTION_v1.md`. Update 2026-09-24: operator-directed build 0.1.205 (version bumped; changelog waits for DONE), installed via silent Update; item 2 reimplemented as a read-counting SQLite VFS (`file_bytes_read`) after its test showed the page-cache counter misses direct overflow reads; focused 19/19, full engine 714/22 with all 22 explained (19 parallel timing, 3 pre-existing at HEAD); headless A/B 6 gate polls: 0.1.204 662.7 MB / up to 42.6 s vs 0.1.205 131.4 MB / 24–31 ms. Pending: live runner path + `database_heavy_read` attribution in normal use. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0324/summary.md`. Update 2026-09-30 (WP-0326): Provider cache and read-counting VFS built/installed; original uncompiled/page-cache statements are historical. Current session observed repeated database_heavy_read at jobs.rs:5344 (operator_activity_page); this proves attribution is emitted, not the timeout cause or complete live runner acceptance. Remaining runner I/O/cache proof and follow-up remediation of measured reads.",
+    "packet_path": "governance/workflow/work_packets/WP-0324_CONTINUOUS_READ_IO_PROVIDER_REHASH_AND_DB_READ_ATTRIBUTION_v1.md",
+    "packet_sha256": "8e0200261faead975afee223a407310485c2a17610d3683ece289c6669c05187",
+    "acceptance_source_sections": [
+      {
+        "heading": "Remaining (operator runs the installed 0.1.205 normally)",
+        "line": 88,
+        "content": "1. With YouTube jobs queued for ~30 min, `desktop.exe` IO Read Bytes/sec shows no ~90–110 MB large-block bursts per runner tick or gate poll, and `jobs_track_runtime_get` p50 is under 1 s.\n2. `database_heavy_read` rows in `diagnostics_trace.jsonl` name the call site(s) behind the 4 KB bursts; open a follow-up WP to fix them.\n3. Then mark DONE and add the 0.1.205 changelog entry."
+      },
+      {
+        "heading": "Acceptance (for DONE)",
+        "line": 94,
+        "content": "- Compiles; focused tests pass. (met)\n- Live: provider hashing no longer runs per poll or per candidate. (headless polling path met; runner path pending)\n- Live: `database_heavy_read` rows identify the source of the 4 KB page-read bursts, and a follow-up WP exists for it. (pending)"
+      }
+    ],
+    "refinement_contracts": [],
+    "remaining_scenarios": [
+      {
+        "scenario_id": "WP-0324-PROOF-01",
+        "scenario": "Thirty-minute actual queued YouTube runner observation: no full provider rehash per tick/poll/candidate, no 90-110MB bursts and jobs_track_runtime_get p50 below 1s.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      },
+      {
+        "scenario_id": "WP-0324-PROOF-02",
+        "scenario": "database_heavy_read identifies 4KB read callsites and follow-up remediation exists; jobs.rs operator_activity_page already recorded, WP-0323 now repairs that query.",
+        "state": "NOT_EXECUTED_BY_INVENTORY"
+      }
+    ],
+    "compatible_proof_batch": "actual_provider_runner_and_export",
+    "proof_mode": "exact_case_provider_and_read_only_observation",
+    "dependency_or_blocker": "Current authenticated provider capability and exact source jobs/subscriptions; WP-0323 database reliability; preserve canonical queue and histories. Export needs >=1-hour timer, runner I/O needs 30-minute real workload. Credentials/source availability not assumed.",
+    "automation_availability": "DEPENDENCY_OR_BOUNDARY_PROOF_REQUIRED",
+    "scope_preservation": "Original requirements and acceptance retained verbatim; inventory is not a status change or proof. Apply current authority/version/MKV/process preservation rules where historical instructions conflict.",
+    "inventory_updated_at": "2026-10-03"
+  }
+]

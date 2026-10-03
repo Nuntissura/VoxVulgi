@@ -1,0 +1,13 @@
+{
+  "file_id": "WP-0331-v1", "file_kind": "work_packet", "updated_at": "2026-10-03",
+  "id": "WP-0331", "version": 1, "title": "Repair build and installer delivery", "status": "IN_PROGRESS",
+  "board": "../TASK_BOARD.md", "owner": "Codex",
+  "operator_request": "Complete proposed item 7: commit, push and deliver verified installer; efficient bundled Cargo tests/builds with reuse",
+  "scope": ["Integrate WP-0323/0327/0328/0329 repairs", "Commit all intended dirty work and push", "Run bundled focused tests from stable source paths", "Build retained-version core installer once inputs stabilize", "Use WP-0316 and GUIDE exclusively for qualification and full-offline ISO delivery"],
+  "files": ["governance/scripts/build_desktop_target.ps1", "offline-installer-runtime/GUIDE.md", "product/desktop/build_target/Current"],
+  "dependencies": ["WP-0316", "WP-0323", "WP-0327", "WP-0328", "WP-0329"],
+  "constraints": ["Version remains 0.1.205; changelog unchanged", "Reuse product/desktop/build_target/cargo_cache; no cargo clean", "Root coordinates all Cargo runs", "Packaging cannot build/download/repair/qualify runtimes", "No fabricated qualification identity", "Preserve user data and installer maintenance labels"],
+  "acceptance": ["Exact source identity, test results and installer hash recorded", "Quiet packaged app navigation, semantic actions and inspected screenshots pass", "Approved same-PID app update preserves protected data", "Full ISO passes exact offline clean/update/rollback gates, or concrete external dependency recorded without claiming completion"],
+  "verification": ["Focused frontend and Rust batch", "Governed core build", "Hidden isolated app smoke", "Installed database 30-minute proof remains WP-0323", "GUIDE qualification and package-only proof"],
+  "status_updates": [{"date": "2026-10-03", "note": "Opened; prior candidate 977851b retained; final integrated artifact pending"}]
+}
