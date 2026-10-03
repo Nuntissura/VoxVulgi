@@ -1,7 +1,7 @@
 {
   "file_id": "WP-0332-v1",
   "file_kind": "work_packet",
-  "updated_at": "2026-10-03",
+  "updated_at": "2026-10-04",
   "id": "WP-0332",
   "version": 1,
   "title": "Owned desktop close and shutdown",
@@ -49,7 +49,47 @@
   "scope": ["Distinguish close-event dispatch from shutdown-entry blockage using owned isolated runtime evidence", "Repair only the proven shutdown blocker", "Preserve owned child lifecycle, job-runner joining, database drain and bounded trace flush"],
   "files": ["product/desktop/src-tauri/src/lib.rs", "product/engine/src/cmd.rs", "product/engine/src/jobs.rs", "product/engine/src/error.rs"],
   "dependencies": ["WP-0312", "WP-0331"],
-  "constraints": ["No production mutation or foreign process interruption", "Do not equate CloseMainWindow return/window disappearance with process exit", "No source change before reproduced cause or exact blocked-call evidence", "Preserve database/job atomicity and process ownership", "Root coordinates builds; retain version0.1.205"],
+  "constraints": ["No production mutation or foreign process interruption except the exact operator-approved controlled boundary in operator_amendment_20261004", "Do not equate CloseMainWindow return/window disappearance with process exit", "No source change before reproduced cause or exact blocked-call evidence", "Preserve database/job atomicity and process ownership", "Root coordinates builds; retain version0.1.205"],
+  "operator_amendment_20261004": {
+    "record_id": "WP-0332-OPERATOR-CONTROLLED-CLOSE-20261004-01",
+    "date": "2026-10-04",
+    "authorization": "PROCESS_STOP_APPROVED:179536",
+    "exact_target": {
+      "pid": 179536,
+      "executable": "C:/Users/Ilja Smets/AppData/Local/VoxVulgi/desktop.exe",
+      "started_at_ms": 1791054639809,
+      "require_fresh_unchanged_identity_before_close": true
+    },
+    "authorized_scope": [
+      "Submit exactly one controlled local-HTTP fixture download through the authenticated product bridge with selected execution mode only; record its canonical job ID and attempts",
+      "Keep all other queued and recurring work paused throughout the controlled test and restart; do not continue all",
+      "Send normal WM_CLOSE first to the verified Tauri Window of exact approved PID179536, or a fresh normal app started and owned by this session after the operator independently closed179536, while the controlled download is canonically running",
+      "Restart the same verified installed binary quietly after actual process exit and independently reconcile the controlled original job, attempts, recovery, owned children, bridge sidecars and protected data"
+    ],
+    "forbidden": [
+      "Disruption of any other process, force termination of the approved app, or interruption after PID/executable/start identity changes without fresh exact authorization",
+      "Direct SQL writes, manual job-state changes or synthetic recovery proof",
+      "Retry, deletion or alteration of the three historical failed originals29f0c228-be8a-40e3-9675-b12a12fb44ca,55e5625b-784d-4992-ad8c-7c7197e344c0,74de4514-f870-4b0e-ab23-94b5baddef34 or their batch",
+      "User database replacement, user-data/media deletion, installer execution, version changes, broad queue resume or additional download submissions"
+    ],
+    "proof_gates_retained": [
+      "Actual canonical running state before normal close; never equate enqueue or UI projection with running",
+      "Owned runner stop/join before database drain, actual graceful process exit and child/sidecar reconciliation",
+      "Fresh independent canonical original/attempt/recovery and protected-data reconciliation after restart",
+      "Record explicit failure rather than claim graceful success if the normal-close boundary does not complete",
+      "All existing acceptance criteria and proof standard remain authoritative"
+    ],
+    "status_retained": "IN_PROGRESS",
+    "operator_closed_original_before_test": {
+      "operator_statement": "i closed VoxVulgi that was visible myself",
+      "observed_pid179536_absent": true,
+      "observed_desktop_processes_absent": true,
+      "observed_bridge_sidecar_absent": true,
+      "controlled_download_not_started": true,
+      "next_target": "Fresh session-owned normal installed app with native PID, creation, hash and launcher receipt; original foreign-PID approval never transfers to another foreign process"
+    },
+    "authorization_is_not_execution_or_success_proof": true
+  },
   "acceptance": ["Exact owned close request reaches bounded shutdown or explicit failure receipt", "Owned runner stops and joins before database drain", "Bridge sidecars and owned children reconcile with actual process exit", "Packaged application proof preserves canonical job attempts and protected data", "Installer update is not labeled graceful when forced termination was required"],
   "verification": ["Source call/lock inspection", "Owned isolated actual executable lifecycle probe", "Focused owning shutdown regressions after a proven fix", "Final packaged close/update boundary"],
   "status_updates": [{"date": "2026-10-03", "note": "Opened from exact forced-exit receipts; source inspection alone cannot establish whether RunEvent::Exit was reached"}, {"date": "2026-10-03", "note": "Fresh packaged isolated PID267548 received direct WM_CLOSE first on its verified Tauri Window, exited0 within202ms and recorded database drain. Prior auxiliary-window destruction invalidates hang attribution. Normal installed active-runner close/update and canonical preservation gates remain open", "proof": "../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261003/summary.md"}, {"date": "2026-10-03", "note": "Proper normal Tauri-first close exposed three false terminal failures (runtime RED); typed interruption repair and both focused tests passed (focused GREEN). IN_PROGRESS retained until rebuilt normal active-download close/recovery boundary passes", "proof": "../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261003/summary.md"}],
