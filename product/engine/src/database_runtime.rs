@@ -805,19 +805,20 @@ thread_local! {
 // Disposable example probes only; no allocation, logging or runtime mutex inside SQLite callbacks.
 #[derive(Clone, Copy, Default)]
 struct VfsTiming { calls: u64, total_ns: u64, max_ns: u64 }
-const VFS_TIMING_NAMES: [&str; 5] = ["xClose", "xShmUnmap", "xShmLock", "xSync", "xDelete"];
+const VFS_TIMING_NAMES: [&str; 9] = ["xClose", "xShmUnmap", "xShmLock", "xSync", "xDelete", "xSyncMainDb", "xSyncWal", "xSyncUnknown", "fileKindOverflow"];
+#[derive(Clone, Copy, Default)]
+struct VfsProbeFile { pointer: usize, open_flags: std::os::raw::c_int }
 thread_local! {
     static VFS_PROBE_ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-    static VFS_PROBE_TIMINGS: std::cell::Cell<[VfsTiming; 5]> = const {
-        std::cell::Cell::new([VfsTiming { calls: 0, total_ns: 0, max_ns: 0 }; 5])
+    static VFS_PROBE_TIMINGS: std::cell::Cell<[VfsTiming; 9]> = const {
+        std::cell::Cell::new([VfsTiming { calls: 0, total_ns: 0, max_ns: 0 }; 9])
+    };
+    static VFS_PROBE_FILES: std::cell::Cell<[VfsProbeFile; 64]> = const {
+        std::cell::Cell::new([VfsProbeFile { pointer: 0, open_flags: 0 }; 64])
     };
 }
 
-fn timed_vfs_call(index: usize, call: impl FnOnce() -> std::os::raw::c_int) -> std::os::raw::c_int {
-    if !VFS_PROBE_ENABLED.try_with(std::cell::Cell::get).unwrap_or(false) { return call(); }
-    let started = Instant::now();
-    let result = call();
-    let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+fn record_vfs_timing(index: usize, elapsed: u64) {
     let _ = VFS_PROBE_TIMINGS.try_with(|metrics| {
         let mut current = metrics.get();
         current[index].calls = current[index].calls.saturating_add(1);
@@ -825,6 +826,49 @@ fn timed_vfs_call(index: usize, call: impl FnOnce() -> std::os::raw::c_int) -> s
         current[index].max_ns = current[index].max_ns.max(elapsed);
         metrics.set(current);
     });
+}
+
+fn probe_file_open(file: *mut rusqlite::ffi::sqlite3_file, flags: std::os::raw::c_int) {
+    if !VFS_PROBE_ENABLED.try_with(std::cell::Cell::get).unwrap_or(false) { return; }
+    let _ = VFS_PROBE_FILES.try_with(|files| {
+        let mut current = files.get();
+        let index = current.iter().position(|slot| slot.pointer == file as usize)
+            .or_else(|| current.iter().position(|slot| slot.pointer == 0));
+        if let Some(index) = index {
+            current[index] = VfsProbeFile { pointer: file as usize, open_flags: flags };
+            files.set(current);
+        } else { record_vfs_timing(8, 0); }
+    });
+}
+
+fn probe_file_close(file: *mut rusqlite::ffi::sqlite3_file) {
+    if !VFS_PROBE_ENABLED.try_with(std::cell::Cell::get).unwrap_or(false) { return; }
+    let _ = VFS_PROBE_FILES.try_with(|files| {
+        let mut current = files.get();
+        if let Some(slot) = current.iter_mut().find(|slot| slot.pointer == file as usize) {
+            *slot = VfsProbeFile::default();
+            files.set(current);
+        }
+    });
+}
+
+fn probe_sync_kind(file: *mut rusqlite::ffi::sqlite3_file) -> usize {
+    VFS_PROBE_FILES.try_with(|files| {
+        let flags = files.get().iter().find(|slot| slot.pointer == file as usize).map(|slot|slot.open_flags);
+        match flags {
+            Some(flags) if flags & rusqlite::ffi::SQLITE_OPEN_MAIN_DB != 0 => 5,
+            Some(flags) if flags & rusqlite::ffi::SQLITE_OPEN_WAL != 0 => 6,
+            _ => 7,
+        }
+    }).unwrap_or(7)
+}
+
+fn timed_vfs_call(index: usize, call: impl FnOnce() -> std::os::raw::c_int) -> std::os::raw::c_int {
+    if !VFS_PROBE_ENABLED.try_with(std::cell::Cell::get).unwrap_or(false) { return call(); }
+    let started = Instant::now();
+    let result = call();
+    let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+    record_vfs_timing(index, elapsed);
     result
 }
 
@@ -854,7 +898,9 @@ macro_rules! forward_io {
 }
 
 unsafe extern "C" fn counting_close(file: *mut rusqlite::ffi::sqlite3_file) -> std::os::raw::c_int {
-    timed_vfs_call(0, || forward_io!(file, xClose, rusqlite::ffi::SQLITE_OK))
+    let result = timed_vfs_call(0, || forward_io!(file, xClose, rusqlite::ffi::SQLITE_OK));
+    probe_file_close(file);
+    result
 }
 
 unsafe extern "C" fn counting_read(
@@ -891,7 +937,16 @@ unsafe extern "C" fn counting_sync(
     file: *mut rusqlite::ffi::sqlite3_file,
     flags: std::os::raw::c_int,
 ) -> std::os::raw::c_int {
-    timed_vfs_call(3, || forward_io!(file, xSync, rusqlite::ffi::SQLITE_IOERR, flags))
+    if !VFS_PROBE_ENABLED.try_with(std::cell::Cell::get).unwrap_or(false) {
+        return forward_io!(file, xSync, rusqlite::ffi::SQLITE_IOERR, flags);
+    }
+    let kind = probe_sync_kind(file);
+    let started = Instant::now();
+    let result = forward_io!(file, xSync, rusqlite::ffi::SQLITE_IOERR, flags);
+    let elapsed = started.elapsed().as_nanos().min(u64::MAX as u128) as u64;
+    record_vfs_timing(3, elapsed);
+    record_vfs_timing(kind, elapsed);
+    result
 }
 
 unsafe extern "C" fn counting_file_size(
@@ -1054,6 +1109,7 @@ unsafe extern "C" fn counting_open(
     (*file).pMethods = if (*real).pMethods.is_null() {
         std::ptr::null()
     } else {
+        probe_file_open(file, flags);
         &READ_COUNTING_IO_METHODS
     };
     rc
@@ -1231,14 +1287,15 @@ impl AppDatabase {
     /// Begin an example-only per-thread VFS probe. Never nest probes on one thread.
     #[doc(hidden)]
     pub fn begin_vfs_timing_probe() {
-        VFS_PROBE_TIMINGS.with(|metrics| metrics.set([VfsTiming::default(); 5]));
+        VFS_PROBE_TIMINGS.with(|metrics| metrics.set([VfsTiming::default(); 9]));
+        VFS_PROBE_FILES.with(|files|files.set([VfsProbeFile::default(); 64]));
         VFS_PROBE_ENABLED.with(|enabled| enabled.set(true));
     }
 
     /// (callback, calls, accumulated nanoseconds, maximum single-call nanoseconds).
     /// Metrics can overlap through nested forwarding; they are not a duration partition.
     #[doc(hidden)]
-    pub fn finish_vfs_timing_probe() -> [(&'static str, u64, u64, u64); 5] {
+    pub fn finish_vfs_timing_probe() -> [(&'static str, u64, u64, u64); 9] {
         VFS_PROBE_ENABLED.with(|enabled| enabled.set(false));
         let metrics = VFS_PROBE_TIMINGS.with(std::cell::Cell::get);
         std::array::from_fn(|i| (VFS_TIMING_NAMES[i], metrics[i].calls, metrics[i].total_ns, metrics[i].max_ns))
@@ -2157,12 +2214,34 @@ mod tests {
         assert!(metrics[0].1 > 0, "actual close must be observed");
         assert!(metrics.iter().all(|(_, _, total, max)| total >= max));
         AppDatabase::begin_vfs_timing_probe();
+        {
+            let writer = database.write_context(DatabaseOperationContext::new("test", "vfs_sync_kind")).expect("writer");
+            writer.pragma_update(None, "synchronous", "FULL").expect("FULL sync fixture");
+            writer.execute("INSERT INTO meta(key,value) VALUES('vfs_sync','row')", []).expect("WAL write");
+            let _: (i64, i64, i64) = writer.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row|
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))).expect("actual main-file checkpoint");
+        }
+        let classified = AppDatabase::finish_vfs_timing_probe();
+        assert!(classified[5].1 > 0, "actual main DB sync must be classified");
+        assert!(classified[6].1 > 0, "actual WAL sync must be classified");
+        assert_eq!(classified[7].1, 0, "actual fixture file kinds must be known");
+        assert_eq!(classified[8].1, 0, "actual fixture map must not overflow");
+        assert_eq!(classified[3].1, classified[5].1 + classified[6].1 + classified[7].1);
+        assert_eq!(classified[3].2, classified[5].2 + classified[6].2 + classified[7].2);
+        AppDatabase::begin_vfs_timing_probe();
         let reset = AppDatabase::finish_vfs_timing_probe();
         assert!(reset.iter().all(|(_, calls, total, max)| *calls == 0 && *total == 0 && *max == 0));
         database.read(DatabaseOperationContext::new("test", "vfs_probe_disabled"), |connection| {
             Ok(connection.query_row("SELECT COUNT(*) FROM meta", [], |row| row.get::<_, i64>(0))?)
         }).expect("unprobed read");
         assert!(AppDatabase::finish_vfs_timing_probe().iter().all(|(_, calls, _, _)| *calls == 0));
+        AppDatabase::begin_vfs_timing_probe();
+        for pointer in 1..=65 {
+            // Opaque test keys only; no dereference or synthetic database operation.
+            probe_file_open(pointer as *mut rusqlite::ffi::sqlite3_file, rusqlite::ffi::SQLITE_OPEN_MAIN_DB);
+        }
+        assert_eq!(probe_sync_kind(66 as *mut rusqlite::ffi::sqlite3_file), 7);
+        assert_eq!(AppDatabase::finish_vfs_timing_probe()[8].1, 1, "overflow must be explicit");
     }
 
     #[test]

@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: batch
 assignment: VV-REPAIRS-20261003
 parent: null
-generation: 29
+generation: 30
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -51,3 +51,4 @@ steps:
 - {id: GP-035, role: any, at: before_round, do: require actual baseline admission RED before checkpoint counterfactual, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0323/20261003/churn_three_writers_baseline_summary.json, contains: writer_admission_timeout}, source: 'expected RED: writer close4128ms accumulated beyond5s FIFO admission', state: active}
 - {id: GP-036, role: any, at: before_round, do: require distinct residual-close hypothesis after NO_CKPT failed, check: {type: confirm}, source: 'counterfactual failure: writerclose1ms butreaderclose5393ms and5admissiontimeouts', state: active}
 - {id: GP-037, role: any, at: before_round, do: require exact test names verified from registered --list output, check: {type: confirm}, source: 'wasted test: database_runtime prefix omitted owning db module; zero tests ran', state: active}
+- {id: GP-038, role: any, at: before_round, do: require artifact searches target owning proof or logs directory; exclude cargo_cache, check: {type: confirm}, source: 'wasted search: recursive build_target inventory traversed compiler cache', state: active}

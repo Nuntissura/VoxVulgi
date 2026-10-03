@@ -74,6 +74,7 @@ struct WorkerReport {
     policy_observations: Vec<serde_json::Value>,
     vfs_timings: Vec<serde_json::Value>,
     slow_vfs_operations: Vec<serde_json::Value>,
+    vfs_file_kind_proven: bool,
 }
 
 fn normalized(path: &Path) -> String {
@@ -173,8 +174,8 @@ fn worker(database: db::AppDatabase, barrier: Arc<Barrier>, deadline: Instant, i
     let is_writer = index < writer_count;
     let lane = if is_writer { format!("churn_writer_{index}") } else { format!("churn_reader_{}", index-writer_count+1) };
     let mut report = WorkerReport { lane: lane.clone(), ..Default::default() };
-    let mut vfs_totals = [(0_u64, 0_u64, 0_u64); 5];
-    let mut vfs_names = [""; 5];
+    let mut vfs_totals = [(0_u64, 0_u64, 0_u64); 9];
+    let mut vfs_names = [""; 9];
     barrier.wait();
     while Instant::now() < deadline && report.attempts < MAX_ITERATIONS {
         report.attempts += 1;
@@ -273,6 +274,8 @@ fn worker(database: db::AppDatabase, barrier: Arc<Barrier>, deadline: Instant, i
             std::thread::yield_now();
         }
     }
+    report.vfs_file_kind_proven = report.attempts != 0 && vfs_totals[0].0 != 0
+        && vfs_totals[7].0 == 0 && vfs_totals[8].0 == 0;
     report.vfs_timings = vfs_totals.iter().enumerate().map(|(i, (calls, total_ns, max_ns))|
         json!({"callback":vfs_names[i],"calls":calls,"total_ns":total_ns,"max_single_call_ns":max_ns})).collect();
     report
@@ -359,6 +362,7 @@ fn main() -> ProbeResult<()> {
         }
     });
     let connection_policy_proven = policy == ConnectionPolicy::Baseline || (reports.len() == reader_count+writer_count && reports.iter().all(|report| !report.policy_observations.is_empty()));
+    let vfs_file_kind_proven = reports.len() == reader_count+writer_count && reports.iter().all(|report| report.vfs_file_kind_proven);
     let writer_succeeded = Some(reports.iter().filter(|report| report.lane.starts_with("churn_writer_")).map(|report| report.succeeded).sum::<u64>());
     let counter = verification.as_ref().ok().and_then(|value| value.parse::<u64>().ok());
     let canonical_counter_matches = panics == 0 && writer_succeeded.is_some() && writer_succeeded == counter;
@@ -369,9 +373,9 @@ fn main() -> ProbeResult<()> {
     let wal_bytes_after_workload = std::fs::metadata(&wal_path).map(|m|m.len()).unwrap_or(0);
     let wal_frames_after_workload = wal_bytes_after_workload.saturating_sub(32)/(page_size+24);
     let failures = reports.iter().map(|report| report.attempts-report.succeeded).sum::<u64>();
-    let summary = json!({"event":"terminal","root":root,"source_backup":source,"backup_provenance":backup_provenance,"workload":format!("{workload:?}"),"connection_policy":format!("{policy:?}"),"reader_interval_ms":reader_interval_ms,"writer_interval_ms":writer_interval_ms,"writer_count":writer_count,"reader_count":reader_count,"page_count_before_workload":page_count,"page_size":page_size,"wal_bytes_after_workload":wal_bytes_after_workload,"wal_frames_after_workload":wal_frames_after_workload,"source_job_count":job_count,"destination_schema_before_migration":destination_schema_before_migration,"destination_schema_after_migration":destination_schema_after_migration,"elapsed_ms":started.elapsed().as_millis(),"workers":reports,"worker_panics":panics,"failures":failures,"canonical_counter_matches":canonical_counter_matches,"connection_policy_proven":connection_policy_proven,"counter":counter,"verification_error":verification.err().map(|error|error.to_string()),"shutdown":{"elapsed_ms":drain_started.elapsed().as_millis(),"error":drain.as_ref().err().map(ToString::to_string)},"runtime":snapshot,"limits":"Recent runtime receipts are bounded512 and do not represent all operations. Tight or cadenced churn is a hypothesis probe; no live symptom or causal attribution is claimed. VFS callback durations may overlap and are not a partition; unwrapped native SHM calls appear only within xShmUnmap. Runtime SQL/open/close bounds are unchanged; pathological close may prevent terminal output."});
+    let summary = json!({"event":"terminal","root":root,"source_backup":source,"backup_provenance":backup_provenance,"workload":format!("{workload:?}"),"connection_policy":format!("{policy:?}"),"reader_interval_ms":reader_interval_ms,"writer_interval_ms":writer_interval_ms,"writer_count":writer_count,"reader_count":reader_count,"page_count_before_workload":page_count,"page_size":page_size,"wal_bytes_after_workload":wal_bytes_after_workload,"wal_frames_after_workload":wal_frames_after_workload,"source_job_count":job_count,"destination_schema_before_migration":destination_schema_before_migration,"destination_schema_after_migration":destination_schema_after_migration,"elapsed_ms":started.elapsed().as_millis(),"workers":reports,"worker_panics":panics,"failures":failures,"canonical_counter_matches":canonical_counter_matches,"connection_policy_proven":connection_policy_proven,"vfs_file_kind_proven":vfs_file_kind_proven,"counter":counter,"verification_error":verification.err().map(|error|error.to_string()),"shutdown":{"elapsed_ms":drain_started.elapsed().as_millis(),"error":drain.as_ref().err().map(ToString::to_string)},"runtime":snapshot,"limits":"Recent runtime receipts are bounded512 and do not represent all operations. Tight or cadenced churn is a hypothesis probe; no live symptom or causal attribution is claimed. VFS aggregate/category durations overlap and are not a partition; xSyncUnknown or fileKindOverflow invalidate file-kind attribution; unwrapped native SHM calls appear only within xShmUnmap. Runtime SQL/open/close bounds are unchanged; pathological close may prevent terminal output."});
     std::fs::write(root.join("churn_summary.json"), serde_json::to_vec_pretty(&summary)?)?;
     println!("{}", summary);
-    if failures != 0 || panics != 0 || !canonical_counter_matches || !connection_policy_proven || drain.is_err() { return Err("Probe failed; inspect churn_summary.json".into()); }
+    if failures != 0 || panics != 0 || !canonical_counter_matches || !connection_policy_proven || !vfs_file_kind_proven || drain.is_err() { return Err("Probe failed; inspect churn_summary.json".into()); }
     Ok(())
 }
