@@ -28,6 +28,16 @@ Acceptance: actual fixed linked version; owning regressions; canonical-density m
 
 </topic>
 
+<topic id="production-checkpoint-policy" status="active" wp="WP-0333" updated_at="2026-10-04">
+
+Operator approved implementation/testing on2026-10-04: "ok do that" and "you have my approval". Canonical normative policy is JSON phase_authority.production_checkpoint_policy, decision WP-0333-DEC-20261004-001. This supersedes earlier unselected-policy statements for this checkpoint scope only; original acceptance, earlier RED variance and unresolved live lock remain intact. A current-schema independent canonical counterpart and independent amendment review remain predecessors to product edits.
+
+Select one counted persistent PASSIVE owner outside application FIFO, after schema/default-library readiness and before bridge/runners. Successful fixed-SQLite/WAL/FULL/no-close/auto0 handshake precedes runtime-writer policy; startup factory remains separate. A bounded manual channel shares scheduled500ms maintenance. Expose cycle/partial/busy/error/backlog/physical-WAL state and terminal receipts. Selected safeguards warn at64MiB uncheckpointed backlog, reject new writers at256MiB or10second stale owner/3 consecutive errors, check both enqueue and actual permit acquisition, preserve admitted atomic writes and permit read/owner recovery. Thresholds are policy selections, not measured hard storage/sync ceilings. Never silently fall back to stronger checkpoint modes or weaker durability.
+
+Red team: queued writers must not bypass a newly failed owner; partial/busy recovery cannot clear a still-high backlog gate; negative/no-WAL frame results require truthful handling and saturating arithmetic. Owner panic must fail closed, and snapshots/control mutexes cannot span SQLite I/O. Shutdown reconciles admitted operations after runner join, then final PASSIVE/owner close and join before claiming drain; nonpreemptible I/O may exceed the shared budget and must report failure. Independent owning/canonical/crash and exact packaged live proof is required; no timeout-resolution claim follows from policy selection.
+
+</topic>
+
 <topic id="production-filename-policy" status="active" wp="WP-0333" updated_at="2026-10-03">
 
 Independent canonical counterpart review permits selecting the conservative filename adapter separately from checkpoint policy. Exact scope, primary research, rejected options, hazards and owning/boundary validation are recorded in the JSON phase_authority.production_filename_policy and research_basis.production_filename_policy_2026_10_03. The common factory preserves canonical registry identity and uses I/O-free guarded dunce1.0.5 only for safe short local verbatim-drive paths; every uncertain or unsupported spelling is retained. No new raw-open exception, fixture TLS promotion, maintenance/durability change or live closure is selected. Latest101-write GREEN and earlier48-write/two-timeout RED both remain evidence; their variance is unexplained. Independent amendment review precedes implementation.

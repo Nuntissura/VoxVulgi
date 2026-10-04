@@ -1,5 +1,5 @@
 //! Disposable non-cfg(test) AppDatabase connection-lifetime probe.
-//! Usage: --root <new-absolute-directory> [--seconds 20] [--database-copy <schema59-or60-backup>] [--workload meta|job_insert] [--reader-interval-ms 0..1000] [--writer-interval-ms 0..1000] [--reader-count 1..16] [--writer-count 1..4] [--connection-policy baseline|no_close_checkpoint|no_close_checkpoint_full|no_close_checkpoint_full_no_auto_checkpoint]
+//! Usage: --root <new-absolute-directory> [--seconds 20] [--database-copy <schema59-through61-backup>] [--workload meta|job_insert] [--reader-interval-ms 0..1000] [--writer-interval-ms 0..1000] [--reader-count 1..16] [--writer-count 1..4] [--connection-policy baseline|no_close_checkpoint|no_close_checkpoint_full|no_close_checkpoint_full_no_auto_checkpoint]
 //! Baseline uses no live backup, keeper connection, injected lock, or admission delay.
 //! Opt-in maintenance scenario: --maintenance-interval-ms 500 --reader-pin-ms 5000.
 //! This deliberately pins an isolated WAL reader; it is not baseline causal evidence.
@@ -23,7 +23,7 @@ use voxvulgi_engine::{db, paths::AppPaths};
 type ProbeResult<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 const KEY: &str = "wp0323_disposable_churn_counter";
 const MAX_ITERATIONS: u64 = 100_000;
-const CURRENT_PROBE_SCHEMA: u32 = 60;
+const CURRENT_PROBE_SCHEMA: u32 = 61;
 const JOB_PREFIX: &str = "wp0323_churn_fixture_";
 const READ_JOB: &str = "wp0323_churn_fixture_read";
 
@@ -325,8 +325,8 @@ fn parse() -> ProbeResult<(PathBuf, u64, Option<PathBuf>, Workload, u64, u64, us
         reject_protected(&source)?;
         if !source.is_file() { return Err("database-copy must be a regular backup file".into()); }
         reject_sidecars(&source)?;
-        if ![59, CURRENT_PROBE_SCHEMA].contains(&standalone_schema(&source)?) {
-            return Err("database-copy must have schema59 or60; only the disposable destination may migrate".into());
+        if ![59, 60, CURRENT_PROBE_SCHEMA].contains(&standalone_schema(&source)?) {
+            return Err("database-copy must have schema59 through61; only the disposable destination may migrate".into());
         }
         return Ok((root, seconds, Some(source), workload, reader_interval_ms, writer_interval_ms, reader_count, writer_count, policy, maintenance_interval_ms, reader_pin_ms, reopen_owner, recovery_retries, keeper_enabled, lock_probe, plain_local_probe));
     }
@@ -902,7 +902,7 @@ fn main() -> ProbeResult<()> {
         reject_sidecars(source)?;
         let before = hash_file(source)?;
         let source_schema = standalone_schema(source)?;
-        if ![59, CURRENT_PROBE_SCHEMA].contains(&source_schema) { return Err("Source backup schema changed".into()); }
+        if ![59, 60, CURRENT_PROBE_SCHEMA].contains(&source_schema) { return Err("Source backup schema changed".into()); }
         std::fs::copy(source, &database_path)?;
         let after = hash_file(source)?;
         let destination = hash_file(&database_path)?;
@@ -929,7 +929,7 @@ fn main() -> ProbeResult<()> {
     let destination_schema_before_migration = db::schema_user_version(&setup)?;
     if destination_schema_before_migration != CURRENT_PROBE_SCHEMA { db::migrate(&setup)?; }
     let destination_schema_after_migration = db::schema_user_version(&setup)?;
-    if destination_schema_after_migration != CURRENT_PROBE_SCHEMA { return Err("Disposable migration did not reach schema60".into()); }
+    if destination_schema_after_migration != CURRENT_PROBE_SCHEMA { return Err("Disposable migration did not reach schema61".into()); }
     let page_count: u64 = setup.pragma_query_value(None, "page_count", |row|row.get(0))?;
     let page_size: u64 = setup.pragma_query_value(None, "page_size", |row|row.get(0))?;
     let job_count: u64 = setup.query_row("SELECT COUNT(*) FROM job", [], |row|row.get(0))?;

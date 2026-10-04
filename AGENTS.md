@@ -253,8 +253,11 @@ Use `vvwatch.cmd` when the app itself may be frozen or when evidence must distin
 - [VV-DBRUNTIME-001] After startup schema readiness, production app-database access must use the shared `AppDatabase` runtime; bare read-write opens and post-ready migrations are forbidden outside the exact reviewed exception registry.
 - [VV-DBRUNTIME-002] Reads use bounded read-only admission; writes use bounded FIFO serialized admission with explicit timeout, overload, cancellation-before-admission, terminal receipts, and no silently dropped admitted write.
 - [VV-DBRUNTIME-003] Filesystem, NAS, network, hashing, and child-process work must occur outside database writer admission unless an existing invariant is explicitly documented and proven.
-- [VV-DBRUNTIME-004] Diagnostics may load runtime/WAL health read-only; passive checkpoint is an explicit operator action and busy attribution must distinguish internal candidates from external-or-unknown ownership.
+- [VV-DBRUNTIME-004] Diagnostics may load runtime/WAL health read-only; operator-requested PASSIVE checkpoints and the WP-0333 approved500ms background cadence share one counted maintenance owner outside application FIFO writer admission; busy attribution distinguishes internal candidates from external-or-unknown ownership. The exact policy is WP-0333 phase_authority.production_checkpoint_policy; its proof gates remain mandatory.
 - [VV-DBRUNTIME-005] Shutdown must stop and join owned job-runner workers before the database drain, reconcile admitted operations, and flush the bounded diagnostics trace queue.
+- [VV-DBRUNTIME-006] Start the WP-0333 owner only after database readiness; successful fixed-SQLite/FULL/no-close/auto0 initialization precedes activating runtime-writer policy and every dependent background surface. Preserve ordinary startup migration authority.
+- [VV-DBRUNTIME-007] Apply WP-0333 maintenance liveness/backlog refusal at enqueue and actual writer-permit acquisition; preserve admitted atomic writes, frozen admission limits, read-only recovery and attributed terminal outcomes.
+- [VV-DBRUNTIME-008] Shutdown closes new admission and reconciles admitted operations before final PASSIVE/owner close; join maintenance before declaring drain. Report late/unjoined nonpreemptible I/O rather than claiming a hard filesystem deadline.
 
 ## [OPERATOR-AUTHORITY] Operator Authority Over Pace, Scope, and Stopping
 

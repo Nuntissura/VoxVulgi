@@ -19,7 +19,7 @@
     "Upgrade both engine and desktop rusqlite declarations to exact =0.40.2, preserving their bundled/backup features and updating their owning lockfiles coherently",
     "Verify the actually linked SQLite implementation is fixed for the WAL-reset race before any concurrent checkpoint experiment",
     "Exercise a disposable canonical-density actual-AppDatabase concurrent PASSIVE-maintenance counterfactual with durable writes and unchanged admission bounds",
-    "Select production checkpoint ownership only after independent counterpart proof and a separately reviewed authority amendment; this packet does not yet authorize production concurrent maintenance"
+    "Implement the operator-approved checkpoint ownership only after independent current-input counterpart proof and reviewed authority amendment; preserve every original acceptance criterion"
   ],
   "phase_authority": {
     "phase_1_authorized": [
@@ -33,9 +33,9 @@
     ],
     "production_solution_selected": false,
     "production_filename_policy_selected": true,
-    "production_checkpoint_policy_selected": false,
+    "production_checkpoint_policy_selected": true,
     "production_filename_policy": {
-      "scope": "Independent filename spelling amendment only; whole production maintenance solution remains unselected and operator policy approval pending",
+      "scope": "Independent filename spelling amendment remains selected; checkpoint policy is separately operator-approved, with its implementation and proof gates preserved",
       "implementation_gate": "Independent review of this amendment before product edits; no new raw-open exception because existing common counted/default factory and registry remain authoritative",
       "policy": "Apply one deterministic I/O-free Windows filename adapter at every SQLite app-database owner open. Supplement exact dunce1.0.5 simplified with strict lexical guards. Only rooted verbatim-drive valid-Unicode safe components and plain UTF16 length<248 may simplify; preserve all other paths byte-for-byte. Preserve absolute_key/runtime identity, startup, durability, admission, atomicity and shutdown",
       "hazards_preserved": [
@@ -64,6 +64,35 @@
         "Independent canonical reopen reconciles every acknowledged fixture write",
         "Existing crash/reopen and packaged normal30minute/download/export/shutdown acceptance remains open"
       ]
+    },
+    "production_checkpoint_policy": {
+      "decision_id": "WP-0333-DEC-20261004-001",
+      "operator_authorization": "2026-10-04: ok do that; you have my approval",
+      "implementation_gate": "Independent current-schema canonical-density counterpart and independent amendment review before production edits",
+      "units": {
+        "VV-CP-001": "Explicitly start exactly one canonical-AppDatabase-owned counted-factory PASSIVE owner after schema/default-library readiness and before bridge/runners; no implicit start on for_paths",
+        "VV-CP-002": "Successful initialization verifies fixed SQLite, WAL, synchronous FULL2, NO_CKPT_ON_CLOSE true, auto-checkpoint0 and maintenance busy_timeout0 before enabling that policy for runtime writers; initialization failure propagates before dependent startup",
+        "VV-CP-003": "All runtime write opens verify FULL2/NO_CKPT/auto0 after owner readiness; read opens suppress close checkpoints while preserving read-only/query_only and existing busy timeout; startup schema factory remains separate",
+        "VV-CP-004": "One persistent counted owner outside application FIFO writer admission performs only PASSIVE on a 500ms cadence and handles bounded attributed manual requests through the same owner; no foreground implicit checkpoint or stronger mode fallback",
+        "VV-CP-005": "Expose bounded terminal receipts, owner state/liveness, busy/partial/error, consecutive errors, cycle age, frames/backlog and current/max physical WAL bytes; never hold control or runtime snapshot locks across SQLite work or join",
+        "VV-CP-006": "Warn at64MiB uncheckpointed backlog and reject new application-writer admission at256MiB backlog; backlog uses positive log-minus-checkpointed frames times page size, not allocated WAL file size",
+        "VV-CP-007": "At enqueue and actual permit acquisition reject unadmitted writers when owner exited/panicked, no owner cycle completed for10seconds since successful handshake, or3 consecutive cycle errors; report attributed terminal maintenance_unavailable/backlog_limit, preserve admitted atomic writes, permit reads and owner recovery; completed partial/busy cycles can clear availability failure but cannot clear a still-high backlog gate",
+        "VV-CP-008": "Thresholds are selected operational safeguards, not measured hard storage or sync ceilings; an already-admitted atomic batch may exceed them. Do not weaken atomicity or silently restore automatic checkpoints/durability",
+        "VV-CP-009": "Preserve four read executors,64-entry queues,4/5second admission limits, FIFO writes and10second drain. Stop/join owned job workers, close new admission and reconcile admitted operations, then signal/join maintenance and close its owner before declaring database drain; use a shared actual shutdown budget and truthfully report nonpreemptible late/unjoined I/O",
+        "VV-CP-010": "Idempotent start and RAII cleanup cover normal/headless/SafeMode interactive sessions, concurrent starts, setup failures and shutdown; no ownership cycle or self-join. Accepted manual requests receive terminal outcomes including shutdown rejection",
+        "VV-CP-011": "Maintenance raw access is limited to the explicitly reviewed db.rs counted factory with canonical filename adapter; update exact exception reason and owning registry regression, never add a broad runtime exemption",
+        "VV-CP-012": "Require actual production-owner counterpart, fixed-version readbacks, pinned-reader recovery, growth/failure/backpressure/manual/shutdown and crash/reopen proofs plus exact packaged normal30minute successful-download/read/export acceptance before DONE",
+        "VV-CP-013": "Backlog arithmetic validates nonnegative frame differences with actual page size and saturation; SQLite negative/no-WAL results are truthful zero or unknown, never overflow or false recovery"
+      },
+      "proof_limits": "Policy selection is not resolution proof; earlier RED variance and live lock remain retained; independent review and current-input counterpart are pending",
+      "independent_amendment_review": {
+        "reviewer": "/root/open_wps",
+        "date": "2026-10-04",
+        "verdict": "PASS",
+        "scope": "Exact five authority diffs; JSON parse, all13 units and all8 original acceptance criteria preserved; AGENTS/CLAUDE identical",
+        "current_schema_counterpart": "PENDING",
+        "production_fix_proven": false
+      }
     }
   },
   "files": [
@@ -113,7 +142,7 @@
       "Keeper/pooling may reduce connection churn but does not eliminate1000-frame writer-thread autocheckpoint",
       "PERSIST_WAL is evaluated after last-close checkpoint and is not a sync cure"
     ],
-    "selected_approach": "Exact fixed SQLite prerequisite upgrade, then harness-only concurrent maintenance measurement. No production policy solution is selected.",
+    "selected_approach": "Operator-approved FULL/no-close/auto0 runtime writers with one counted separate PASSIVE owner; exact normative units are phase_authority.production_checkpoint_policy. Prior disposable evidence motivates the selection but does not prove live resolution.",
     "rejected": [
       "FULL+NO_CKPT+auto0 without maintenance: observed GREEN but WAL grew to1735frames",
       "Keeper alone: proven automatic-checkpoint sync remains",
