@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-0333-PRODUCTION-20261004
 parent: null
-generation: 5
+generation: 12
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -28,3 +28,10 @@ steps:
 - {id: GP-012, role: any, at: on_resume, do: confirm half-written records finished before new work, check: {type: confirm}, source: 'preset:resume', state: active}
 - {id: GP-013, role: any, at: before_round, do: verify reviewed production activation and explicit shutdown ownership before source freeze, check: {type: confirm}, source: 'risk: guard Drop could bypass runner join or restart shared shutdown deadline', state: active}
 - {id: GP-014, role: any, at: before_round, do: verify source identity again after preparation gate before managed build launch, check: {type: confirm}, source: 'review: pre-gate binding alone permits candidate changes while the gate runs', state: active}
+- {id: GP-015, role: any, at: before_round, do: confirm shell preflights fail closed on parameter and inventory errors, check: {type: confirm}, source: 'mistake: malformed Get-Process parameter did not stop shell launch', state: active}
+- {id: GP-016, role: any, at: before_round, do: verify jobs.inspect catalog limits exact progress reads to25 IDs, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261004/checkpoint_shutdown_batch_connection_owner/packaged_run_01/discover_capabilities.json, contains: '"maxItems": 25'}, source: 'mistake: jobs.inspect request86 exceeded catalog maxItems25', state: active}
+- {id: GP-017, role: any, at: before_round, do: require explicit scriptblock filters and separated PowerShell parameter tokens, check: {type: confirm}, source: 'mistake: unspaced Where-Object comparison refused media dispatch', state: active}
+- {id: GP-018, role: any, at: before_round, do: verify media containment normalizes both resolved Windows verbatim paths, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261004/checkpoint_shutdown_batch_connection_owner/verify_completed_batch_media.py, contains: containment_path(media).is_relative_to(containment_path((run/}, source: 'failure: verbatim media path mismatched ordinary owned output root', state: active}
+- {id: GP-019, role: any, at: before_round, do: verify headless proof expects redacted public path and binds isolated sidecar, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261004/checkpoint_shutdown_batch_connection_owner/prove_packaged_headless_startup.py, contains: 'snapshot[''database_path'']==''<redacted>'''}, source: 'failure: public bridge privacy redaction rejected physical-path expectation', state: active}
+- {id: GP-020, role: any, at: before_round, do: require native unpackaged launcher for installed executable identity and owned close, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261004/checkpoint_shutdown_batch_connection_owner/close_headless_native.py, contains: ==15700}, source: 'failure: packaged shell resolves different installed AppData executable', state: active}
+- {id: GP-021, role: any, at: before_round, do: require replacement strings assigned before PowerShell binary replace expressions, check: {type: confirm}, source: 'mistake: concatenation after -replace parsed as extra operator operands', state: active}

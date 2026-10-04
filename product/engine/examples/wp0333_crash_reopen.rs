@@ -1,6 +1,6 @@
 //! Owned-process crash fixture. Controller supplies a fresh guarded database copy.
 //! No runner, production database, TLS filename adapter, or graceful shutdown.
-//! production_owner holds the actual runtime maintenance guard through the crash.
+//! production_owner holds actual maintenance and connection-reuse guards through the crash.
 use rusqlite::{config::DbConfig, Connection, TransactionBehavior};
 use serde_json::json;
 use std::{io::{self, Write}, path::PathBuf};
@@ -49,10 +49,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // sets no writer PRAGMAs: policy must come from the successfully started owner.
     let _maintenance_guard = if mode == "production_owner" {
         let guard = database.start_checkpoint_maintenance()?;
-        emit(json!({"event":"production_owner_ready","pid":std::process::id(),
-            "mode":mode,"checkpoint_maintenance":database.snapshot().checkpoint_maintenance}))?;
         Some(guard)
     } else { None };
+    let _reuse_guard = if mode == "production_owner" {
+        Some(database.start_connection_reuse()?)
+    } else { None };
+    if mode == "production_owner" {
+        emit(json!({"event":"production_owner_ready","pid":std::process::id(),
+            "mode":mode,"checkpoint_maintenance":database.snapshot().checkpoint_maintenance,
+            "connection_reuse":database.connection_reuse_proof()}))?;
+    }
     let keeper = database.read_context(db::DatabaseOperationContext::new("wp0333_crash", "pinned_reader"))?;
     keeper.execute_batch("BEGIN")?;
     let _: i64 = keeper.query_row("SELECT count(*) FROM meta", [], |r|r.get(0))?;
@@ -78,6 +84,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut pending = database.write_context(db::DatabaseOperationContext::new("wp0333_crash", "uncommitted_boundary"))?;
     let tx = pending.transaction_with_behavior(TransactionBehavior::Immediate)?;
     tx.execute("INSERT INTO meta(key,value) VALUES('wp0333_crash_uncommitted',?1)", ["y".repeat(2_000_000)])?;
+    if mode == "production_owner" {
+        let proof=database.connection_reuse_proof().ok_or("Missing actual connection reuse owner")?;
+        if !proof.enabled || proof.shutdown_joined || proof.writer_owners!=1 || proof.reader_owners!=1
+            || proof.physical_writer_opens!=1 || proof.physical_reader_opens!=1
+            || proof.physical_closes!=0 || proof.quarantines!=0 || proof.close_errors!=0 {
+            return Err("Connection reuse crash-boundary ownership mismatch".into());
+        }
+    }
     emit(json!({"event":"crash_ready","pid":std::process::id(),"acknowledged":writes,"pending_transaction_open":true,"runtime":database.snapshot()}))?;
     // Controller must terminate its own child here. EOF or a command is a failure;
     // never manufacture a successful crash using a graceful connection drop.

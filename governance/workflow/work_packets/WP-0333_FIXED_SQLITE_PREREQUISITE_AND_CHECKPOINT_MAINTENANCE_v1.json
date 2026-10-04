@@ -5,7 +5,7 @@
   "id": "WP-0333",
   "version": 1,
   "title": "Fixed SQLite prerequisite and checkpoint maintenance",
-  "status": "IN_PROGRESS",
+  "status": "DONE",
   "board": "../TASK_BOARD.md",
   "owner": "Codex",
   "refinement": "WP-0333_FIXED_SQLITE_PREREQUISITE_AND_CHECKPOINT_MAINTENANCE_v1_REFINEMENT.md",
@@ -31,7 +31,7 @@
       "Independent passing canonical-density concurrent-maintenance counterpart with WAL progress/growth and shutdown receipts",
       "Reviewed production policy/exception/spec amendment retaining all existing bounds and atomicity"
     ],
-    "production_solution_selected": false,
+    "production_solution_selected": true,
     "production_filename_policy_selected": true,
     "production_checkpoint_policy_selected": true,
     "production_filename_policy": {
@@ -1732,6 +1732,79 @@
         "observed": "1432 unique stdout ACKs match canonical IDs;69 tables exact fixture trigger delta;default artifact/source identity;pin200/0 to1420/1420 recovery;allfive owners closed",
         "remaining": "Exact packaged normal30minute running downloads/history/export/crash/reopen and active shutdown preservation"
       }
+    },
+    {
+      "record_id": "WP-0333-FINAL-PRODUCTION-CLOSURE-20261004-001",
+      "date": "2026-10-04",
+      "status": "DONE",
+      "product_source": "9e8fc893f7791fc7e51d35cc24cada47bdffdcb2",
+      "installed_sha256": "46ffa72cc379422e08ff4f57df146ae4b2dffe334bb332b9aadd36d01f297b24",
+      "version": "0.1.205",
+      "independent_review": {
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_connection_lifetime_final/independent_final_review.json",
+        "sha256": "f91a0b011dcf141a8e61f1a4de2ae7353f42f934105428f15b52ada7fbddb210",
+        "reviewer": "/root/open_wps",
+        "verdict": "PASS"
+      },
+      "acceptance_mapping": [
+        {
+          "ordinal": 1,
+          "verdict": "PASS",
+          "observed": "Both manifests pin =0.40.2; both lockfiles contain one rusqlite0.40.2; bundled/cache/fallible_uint and engine backup retained. Current default engine and desktop builds pass."
+        },
+        {
+          "ordinal": 2,
+          "verdict": "PASS",
+          "observed": "Actual packaged headless runtime reports SQLite3.53.2/source d6e03d8c777cfa2d35e3b60d8ec3e0187f3e9f99d8e2ee9cac695fd6fcdf1a24; declaration is not the proof."
+        },
+        {
+          "ordinal": 3,
+          "verdict": "PASS",
+          "observed": "Inspected actual current-input logs:39 default runtime tests,9 feature reuse tests,3 desktop startup/shutdown ordering tests GREEN; nonfeature example and managed CoreOnly build exit0. Test receipt hashes bind final runtime/factory/desktop inputs."
+        },
+        {
+          "ordinal": 4,
+          "verdict": "PASS",
+          "observed": "OrdinaryAPI canonical-density PK180:1432 unique external ACKs exactly match independent WAL-aware canonical1432;5272 reads/errors0. All69 tables reconcile, only exact fixture INSERT-trigger delta. Partial200/0 recovers1420/1420; final1846/1846busy0; bounded1writer4RO,6705returns,5checked physical closes,zero remaining/error/quarantine; maintenance joined756ms. Owning maintenance tests cover growth/failure/backpressure. Historical matched nonreuse RED2 failures remains retained."
+        },
+        {
+          "ordinal": 5,
+          "verdict": "PASS",
+          "observed": "Independent cold verifier actual32 external ACK payloads equal32 canonical rows, uncommitted sentinel absent,all69 complete-row/column multiset hashes equal after excluding only exact32 inserted ACK keys;schema61/quick_checkok/sourcea07 unchanged/handlesclosed. Separate from crash controller."
+        },
+        {
+          "ordinal": 6,
+          "verdict": "PASS",
+          "observed": "Reviewed checkpoint and production lifetime authority/spec amendments before code; explicit operator approval; actual commonfactory/canonical registry and shared4read/5writer-second admission bounds preserved. Startup activation is explicit after schema/maintenance readiness, never universal for_paths activation."
+        },
+        {
+          "ordinal": 7,
+          "verdict": "PASS",
+          "observed": "Exact installed normal1800s61samples/span1800000ms/maxgap31282ms;selected downloads running at every sample,zero probes/admission/lock events in15289-row retained window. First semantic export one accepted activation yields316 distinct canonical subscriptions and groups,0 differences. Active incomplete same-request transfer WM_CLOSE exits1869ms/noForce;actual runner2994→maintenance2995→drain3006 ordering,all5 physicalowners closed/noerrors. Fresh restart190292 and86 originaljobs preserve attempts/batches;all86 succeed/errornull/canonical lineage;all86 video/audio/subtitle packet sequences/tags match fixture and full AV decode stderr empty. Protected14 equal before/after/restart/final."
+        },
+        {
+          "ordinal": 8,
+          "verdict": "PASS",
+          "observed": "Actual summary.md/evidence.json opened;all7 indexed evidence hashes match disk. Independent source and artifact review plus separate canonical/proof reconciliation completed. This is final runtime evidence, not harness GREEN alone; WP-0323 status remains root-owned."
+        }
+      ],
+      "evidence": {
+        "summary": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_connection_lifetime_final/summary.md",
+        "index": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_connection_lifetime_final/evidence.json"
+      },
+      "additional_packaged_boundary": {
+        "verdict": "PASS",
+        "owned_pid": 214316,
+        "observed": "Disposable headless02 schema61/defaultlibrary1/jobs0;dbready1791128460203 before offlineheadless0206/jobskip0207;owner reuse/maintenance enabled;normalclose223ms/noForce/sidecarabsent;maintenance2516 before drain2526/10ms/zero errors/remainingowners0. Snapshot is correctly labelled Options, not Diagnostics."
+      },
+      "historical_preservation": "All original acceptance, amendments and historical failed/incomplete proof records retained. Current closure supersedes historical pending gates only; it does not erase earlier REDs.",
+      "residual_limits": [
+        "Sampling proves every recorded selected-running observation, not unobserved continuous activity between samples.",
+        "Positive NTFS/checkpoint API wait attribution does not establish the ultimate filter/hardware/resource holder; historical RED variance and failed checker/proof attempts are retained.",
+        "Owned process crash is not power-loss proof.",
+        "Core NSIS Update is not full offline ISO acceptance.",
+        "No version/changelog change; no product or WP status edited by this reviewer."
+      ]
     }
   ],
   "native_probe_validation_20261004": {
