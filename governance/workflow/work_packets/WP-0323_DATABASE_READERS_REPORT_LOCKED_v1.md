@@ -155,10 +155,19 @@ Operator direction 2026-09-24: VoxVulgi cargo builds slow down the higher-priori
 
 </topic>
 
-<topic id="history-phantom-pending-20261004" status="IN_PROGRESS" wp="WP-0323" updated_at="2026-10-04">
+<topic id="history-phantom-pending-20261004" status="DONE" wp="WP-0323" updated_at="2026-10-04">
 
 - WP-0323-F-20261004-001: Fresh native canonical read `.local/wp0323_exact_remaining.json` at1791079124363 proves cursor342295 and exactly one later succeeded direct job: row342370/job`a3bed1a9-dcc0-40c0-a981-3f110f795c60`, attempt1, track`other_video`, item`8d73b7dc-9b01-4298-896c-a55619cc691e`, with both item and durable lineage present. The inspected normal Single videos surface nevertheless reports one proven link left and refreshes every1500ms. This is phantom pending classification, not proof of the reported read-admission timeout cause.
 - WP-0323-R-20261004-001: Narrow remediation is to count only post-cursor succeeded direct jobs whose referenced library item exists and lacks durable lineage. Align reachable-item semantics with the existing backfill candidate join; retain cursor advancement, unknown/malformed evidence handling, historical rows, runner/checkpoint policy, admission limits and version. No live data writes are authorized by this remediation.
 - WP-0323-V-20261004-001: Add owning natural regressions first; root runs them RED against the original count before the query fix, then GREEN using the same cache. Verify later already-classified completions and missing items do not claim pending work, while malformed existing-item evidence remains inspectable and preserved. Root owns tests/build and exact packaged history reconciliation. Status remains IN_PROGRESS; original timeout and other acceptance gates remain open.
+
+</topic>
+
+<topic id="installed-diagnostic-update-20261004" status="IN_PROGRESS" wp="WP-0323" updated_at="2026-10-04">
+
+- WP-0323-V-20261004-006: Supersedes preceding source-only diagnostic-patch status: source `cad3b4bcc3b415505d9a434198d7d7b07cf92c96` managed CoreOnly build, native Update and independent14-table preservation passed. Evidence: `WP-0334/20261003/native_update_cad3b4b/independent_native_update_review.json`. Installed normal background PID204596/version0.1.205. `WP-0323/20261004/diagnostic_update_runtime.json` confirms numeric file_bytes_read survives at the installed boundary. Five owning checks prove bounded lock-detail retention and privacy; no new actual oversized lock has yet proved that repair at runtime.
+- WP-0323-F-20261004-003: Supersedes the earlier intermediate monitor duration: final failed observation has49 samples/1470.714seconds/complete=false. Root stopped only its own observer after the retained lock. `WP-0323/20261004/independent_failed_window_review.json` reconciles all seven current/retained streams with zero parse errors and the one truncated database_locked event. This is not a passing30-minute acceptance run.
+- WP-0323-V-20261004-007: Phantom-pending topic is DONE: original query failed two owning regressions; corrected query passed those plus the preservation regression. Logs: `wp0323_phantom_pending_red_20261004.log` and `wp0323_phantom_pending_green_20261004.log`. Installed26c exact history proof above shows pending0, including after a new successful controlled download. Historical scope and requirements remain preserved.
+- WP-0323-C-20261004-001: Whole WP remains IN_PROGRESS. Required next dependency is the operator checkpoint-policy decision under WP-0333, followed by separately reviewed authority/spec amendment, current-input counterpart and exact packaged/live acceptance. Physical lock cause and the exact reported read_admission_timeout are not yet proven resolved. Coordinator opened the new installed Diagnostics snapshot `governance/snapshots/WP-0323/after_completed_download_history_1791082479918.png`; its label is historical, its actual surface is Diagnostics. Snapshot alone is not evidence that unloaded diagnostic sections pass.
 
 </topic>
