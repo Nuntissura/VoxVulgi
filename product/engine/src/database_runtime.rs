@@ -577,8 +577,135 @@ struct RegistryState {
     receipts: VecDeque<DatabaseOperationReceipt>,
 }
 
+#[cfg(feature = "wp0333_connection_reuse_proof")]
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct ConnectionReuseProof {
+    pub enabled: bool,
+    pub physical_writer_opens: u64,
+    pub physical_reader_opens: u64,
+    pub max_writer_owners: usize,
+    pub max_reader_owners: usize,
+    pub lease_returns: u64,
+    pub quarantines: u64,
+    pub physical_closes: u64,
+    pub close_errors: u64,
+    pub remaining_owners: usize,
+    pub writer_owners: usize,
+    pub reader_owners: usize,
+    pub shutdown_joined: bool,
+    pub physical_close_receipts: Vec<serde_json::Value>,
+}
+
+#[cfg(feature = "wp0333_connection_reuse_proof")]
+#[derive(Debug)]
+pub struct ConnectionReuseGuard { runtime: Arc<RuntimeInner> }
+
+#[cfg(feature = "wp0333_connection_reuse_proof")]
+impl Drop for ConnectionReuseGuard {
+    fn drop(&mut self) {
+        let joined=self.runtime.reuse.lock().unwrap_or_else(|p|p.into_inner()).as_ref().is_some_and(|p|p.proof.shutdown_joined);
+        if joined {return;}
+        let deadline=Instant::now()+SHUTDOWN_DRAIN_TIMEOUT;
+        let result=(||->Result<()> {
+            if let Some(shared)=self.runtime.maintenance_shared() {
+                shared.guards.fetch_add(1,Ordering::AcqRel);
+                let mut owner=CheckpointMaintenanceGuard{runtime:Arc::downgrade(&self.runtime),shared};
+                owner.stop_and_join(deadline.saturating_duration_since(Instant::now()))?;
+            }
+            AppDatabase{inner:Arc::clone(&self.runtime)}.shutdown_and_drain(deadline.saturating_duration_since(Instant::now()))
+        })();
+        if let Err(error)=result {
+            crate::diagnostics::emit_trace_event(&self.runtime.paths,"database_reuse_raii_cleanup_failed","error",serde_json::json!({"error":error.to_string(),"proof":AppDatabase{inner:Arc::clone(&self.runtime)}.connection_reuse_proof()}));
+        }
+    }
+}
+
+#[cfg(feature = "wp0333_connection_reuse_proof")]
+#[derive(Debug, Default)]
+struct ConnectionReuse {
+    writer: Option<Connection>,
+    readers: Vec<Connection>,
+    poisoned: Vec<(Connection, bool)>,
+    pending_close: Vec<(Connection, bool)>,
+    proof: ConnectionReuseProof,
+    closing: bool,
+    closer_starting: bool,
+    ownership_unreconciled: bool,
+    closer: Option<std::thread::JoinHandle<()>>,
+    close_result: Option<std::result::Result<(), String>>,
+    session_baselines: HashMap<usize, BTreeMap<String,i64>>,
+    #[cfg(test)]
+    fail_reset: bool,
+    #[cfg(test)]
+    close_delay: Duration,
+    #[cfg(test)]
+    close_panic: bool,
+}
+
+#[cfg(feature = "wp0333_connection_reuse_proof")]
+struct ReuseCloseOwner<'a> {
+    runtime: &'a RuntimeInner,
+    connection: Option<Connection>,
+    write: bool,
+    operation_id: u64,
+    started: Instant,
+    finished: bool,
+}
+
+#[cfg(feature = "wp0333_connection_reuse_proof")]
+impl Drop for ReuseCloseOwner<'_> {
+    fn drop(&mut self) {
+        if self.finished {return;}
+        let outcome=if let Some(connection)=self.connection.take() {
+            self.runtime.reuse.lock().unwrap_or_else(|p|p.into_inner()).as_mut().unwrap().poisoned.push((connection,self.write));
+            "reuse_close_panicked_owner_retained"
+        } else {
+            // Consuming native close did not return: ownership cannot be asserted.
+            // Keep the outstanding count and fail closed rather than reporting a drain.
+            self.runtime.reuse.lock().unwrap_or_else(|p|p.into_inner()).as_mut().unwrap().ownership_unreconciled=true;
+            "reuse_close_panicked_ownership_unreconciled"
+        };
+        self.runtime.reuse.lock().unwrap_or_else(|p|p.into_inner()).as_mut().unwrap().proof.close_errors+=1;
+        self.runtime.finish(self.operation_id,self.started,outcome,0);
+    }
+}
+
+#[cfg(feature = "wp0333_connection_reuse_proof")]
+fn reset_reusable(connection: &Connection, write: bool, maintained: bool, fresh_foreign_keys: bool) -> Result<bool> {
+    let rolled_back = !connection.is_autocommit();
+    if rolled_back { connection.execute_batch("ROLLBACK")?; }
+    if !connection.is_autocommit() { return Err(EngineError::DatabaseRuntime("reuse_transaction_not_reset".into())); }
+    connection.flush_prepared_statement_cache();
+    if unsafe {!rusqlite::ffi::sqlite3_next_stmt(connection.handle(),std::ptr::null_mut()).is_null()} {
+        return Err(EngineError::DatabaseRuntime("reuse_outstanding_statement_refused".into()));
+    }
+    let attached: Vec<String> = connection.prepare("PRAGMA database_list")?
+        .query_map([], |r|r.get(1))?.collect::<rusqlite::Result<_>>()?;
+    if attached.iter().any(|name|name != "main") {
+        return Err(EngineError::DatabaseRuntime("reuse_session_attachment_or_temp_refused".into()));
+    }
+    connection.busy_timeout(if write {Duration::from_secs(10)} else {Duration::from_millis(super::READ_ONLY_BUSY_TIMEOUT_MS)})?;
+    connection.pragma_update(None,"query_only",!write)?;
+    connection.pragma_update(None,"foreign_keys",if write {true} else {fresh_foreign_keys})?;
+    connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,true)?;
+    if write && maintained { super::configure_maintained_writer(connection)?; }
+    let query_only: bool=connection.pragma_query_value(None,"query_only",|r|r.get(0))?;
+    let foreign_keys: bool=connection.pragma_query_value(None,"foreign_keys",|r|r.get(0))?;
+    let busy: u64=connection.pragma_query_value(None,"busy_timeout",|r|r.get(0))?;
+    let wal: String=connection.pragma_query_value(None,"journal_mode",|r|r.get(0))?;
+    if query_only == write || (write && !foreign_keys) || (!write && foreign_keys!=fresh_foreign_keys)
+        || busy != if write {10000} else {super::READ_ONLY_BUSY_TIMEOUT_MS}
+        || !wal.eq_ignore_ascii_case("wal")
+        || !connection.db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE)? {
+        return Err(EngineError::DatabaseRuntime("reuse_role_policy_readback_failed".into()));
+    }
+    Ok(rolled_back)
+}
+
 #[derive(Debug)]
 struct RuntimeInner {
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    reuse: Mutex<Option<ConnectionReuse>>,
     #[cfg(test)]
     test_manual_checkpoint_panic: AtomicBool,
     #[cfg(test)]
@@ -594,6 +721,156 @@ struct RuntimeInner {
 }
 
 impl RuntimeInner {
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    fn reuse_enabled(&self) -> bool { self.reuse.lock().unwrap_or_else(|p|p.into_inner()).is_some() }
+
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    fn reuse_checkout(&self, write: bool) -> Result<Option<Connection>> {
+        if !self.maintained_writer_policy() {return Err(EngineError::DatabaseRuntime("reuse_requires_ready_maintenance".into()));}
+        let mut pool=self.reuse.lock().unwrap_or_else(|p|p.into_inner());
+        let Some(pool)=pool.as_mut() else {return Ok(None)};
+        if pool.ownership_unreconciled {return Err(EngineError::DatabaseRuntime("reuse_ownership_unreconciled".into()));}
+        if pool.closing || !pool.poisoned.is_empty() {return Err(EngineError::DatabaseRuntime("reuse_owner_poisoned_or_closing".into()));}
+        Ok(if write {pool.writer.take()} else {pool.readers.pop()})
+    }
+
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    fn reuse_opened(&self, write: bool, connection: &Connection) -> Result<()> {
+        let mut baseline=BTreeMap::new();
+        for name in ["foreign_keys","reverse_unordered_selects","read_uncommitted","recursive_triggers","ignore_check_constraints","defer_foreign_keys"] {
+            baseline.insert(name.to_string(),connection.pragma_query_value(None,name,|r|r.get(0))?);
+        }
+        let mut pool=self.reuse.lock().unwrap_or_else(|p|p.into_inner());
+        if let Some(pool)=pool.as_mut() {
+            pool.session_baselines.insert(unsafe {connection.handle() as usize},baseline);
+            if write {pool.proof.physical_writer_opens+=1;} else {pool.proof.physical_reader_opens+=1;}
+            pool.proof.remaining_owners+=1;
+            if write {pool.proof.writer_owners+=1;pool.proof.max_writer_owners=pool.proof.max_writer_owners.max(pool.proof.writer_owners);}
+            else {pool.proof.reader_owners+=1;pool.proof.max_reader_owners=pool.proof.max_reader_owners.max(pool.proof.reader_owners);}
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    fn reuse_return(&self, connection: Connection, write: bool, operation_id: u64) -> bool {
+        let started=Instant::now();
+        let had_transaction=!connection.is_autocommit();
+        #[cfg(test)]
+        let forced=self.reuse.lock().unwrap_or_else(|p|p.into_inner()).as_ref().is_some_and(|p|p.fail_reset);
+        #[cfg(not(test))]
+        let forced=false;
+        let result=if std::thread::panicking() || forced {Err(EngineError::DatabaseRuntime("reuse_panicked_or_reset_failed".into()))}
+            else {(||->Result<bool> {
+                let baseline=self.reuse.lock().unwrap_or_else(|p|p.into_inner()).as_ref().unwrap().session_baselines
+                    .get(&(unsafe {connection.handle() as usize})).cloned().ok_or_else(||EngineError::DatabaseRuntime("reuse_missing_session_baseline".into()))?;
+                let fresh_foreign_keys=*baseline.get("foreign_keys").ok_or_else(||EngineError::DatabaseRuntime("reuse_missing_foreign_keys_baseline".into()))?!=0;
+                let rolled_back=reset_reusable(&connection,write,self.maintained_writer_policy(),fresh_foreign_keys)?;
+                for (name,value) in baseline {
+                    let actual:i64=connection.pragma_query_value(None,&name,|r|r.get(0))?;
+                    if actual!=value {return Err(EngineError::DatabaseRuntime(format!("reuse_session_policy_changed:{name}")));}
+                }
+                Ok(rolled_back)
+            })()};
+        self.operation_metadata(operation_id,Some(("lease_return",started.elapsed())),None,None);
+        if let Err(error)=result {
+            let (id,time)=self.register(&DatabaseOperationContext::new("database_reuse","lease_cleanup_failed").maintenance(),DatabaseMode::Maintenance);
+            self.admitted(id,Duration::ZERO);
+            crate::diagnostics::emit_trace_event(&self.paths,"database_reuse_cleanup_failed","warn",
+                serde_json::json!({"operation_id":operation_id,"cleanup_operation_id":id,"error":error.to_string(),"write":write}));
+            self.finish(id,time,"reuse_cleanup_failed",0);
+            {let mut p=self.reuse.lock().unwrap_or_else(|p|p.into_inner());p.as_mut().unwrap().proof.quarantines+=1;}
+            self.reuse_close(connection,write,"quarantine_physical_close");
+        } else {
+            let mut pool=self.reuse.lock().unwrap_or_else(|p|p.into_inner());let pool=pool.as_mut().unwrap();
+            pool.proof.lease_returns+=1;
+            if write {pool.writer=Some(connection);} else {pool.readers.push(connection);}
+        }
+        had_transaction
+    }
+
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    fn reuse_close(&self, connection: Connection, write: bool, operation: &str) {
+        let (id,time)=self.register(&DatabaseOperationContext::new("database_reuse",operation).maintenance(),DatabaseMode::Maintenance);
+        self.admitted(id,Duration::ZERO);
+        let mut owner=ReuseCloseOwner{runtime:self,connection:Some(connection),write,operation_id:id,started:time,finished:false};
+        #[cfg(test)]
+        if self.reuse.lock().unwrap_or_else(|p|p.into_inner()).as_ref().unwrap().close_panic {panic!("controlled reuse close panic");}
+        let connection=owner.connection.as_ref().unwrap();
+        let owner_id=unsafe {connection.handle() as usize};
+        AppDatabase::begin_vfs_timing_probe();
+        connection.flush_prepared_statement_cache();
+        let outcome=match owner.connection.take().unwrap().close() {
+            Ok(())=> {let mut p=self.reuse.lock().unwrap_or_else(|p|p.into_inner());let p=p.as_mut().unwrap();p.session_baselines.remove(&owner_id);p.proof.physical_closes+=1;p.proof.remaining_owners=p.proof.remaining_owners.saturating_sub(1);if write {p.proof.writer_owners=p.proof.writer_owners.saturating_sub(1);}else{p.proof.reader_owners=p.proof.reader_owners.saturating_sub(1);} "reuse_physical_closed"},
+            Err((connection,error))=> {
+                {let mut p=self.reuse.lock().unwrap_or_else(|p|p.into_inner());let p=p.as_mut().unwrap();p.proof.close_errors+=1;p.poisoned.push((connection,write));}
+                crate::diagnostics::emit_trace_event(&self.paths,"database_reuse_close_failed","error",serde_json::json!({"operation_id":id,"error":error.to_string()}));
+                "reuse_physical_close_failed"
+            }
+        };
+        let mut native=AppDatabase::finish_vfs_timing_probe().to_vec();
+        native.extend(AppDatabase::vfs_open_read_timing_probe());
+        {let mut p=self.reuse.lock().unwrap_or_else(|p|p.into_inner());let p=p.as_mut().unwrap();
+            if p.proof.physical_close_receipts.len()<32 {p.proof.physical_close_receipts.push(serde_json::json!({"operation_id":id,"owner_id":owner_id,"role":if write {"writer"}else{"reader"},"operation":operation,"outcome":outcome,"elapsed_ms":time.elapsed().as_millis() as u64,"native_callbacks":native}));}
+        }
+        self.operation_metadata(id,Some(("connection_close",time.elapsed())),None,None);
+        self.finish(id,time,outcome,0);
+        owner.finished=true;
+    }
+
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    fn shutdown_reuse(self: &Arc<Self>, deadline: Instant) -> Result<()> {
+        let owners={
+            let mut p=self.reuse.lock().unwrap_or_else(|p|p.into_inner());let Some(p)=p.as_mut() else {return Ok(())};
+            if p.ownership_unreconciled {return Err(EngineError::DatabaseRuntime("reuse_ownership_unreconciled".into()));}
+            if p.closer_starting {return Err(EngineError::DatabaseRuntime("reuse_close_start_in_progress".into()));}
+            if p.closer.is_some() {false} else {
+            let start=
+            if !p.closing {
+                p.closing=true;
+                let mut owners: Vec<_>=std::mem::take(&mut p.readers).into_iter().map(|c|(c,false)).collect();owners.extend(p.writer.take().map(|c|(c,true)));owners.extend(std::mem::take(&mut p.poisoned));p.pending_close=owners;true
+            } else if p.closer.is_none() && p.proof.remaining_owners>0 {
+                p.pending_close.extend(std::mem::take(&mut p.poisoned));p.close_result=None;true
+            } else {p.close_result.is_none()};
+            if start {p.closer_starting=true;}
+            start
+            }
+        };
+        if owners {
+            let runtime=Arc::clone(self);
+            let handle=std::thread::Builder::new().name("wp0333-reuse-close".into()).spawn(move|| {
+                #[cfg(test)]
+                {let delay=runtime.reuse.lock().unwrap_or_else(|p|p.into_inner()).as_ref().unwrap().close_delay;std::thread::sleep(delay);}
+                let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    loop {
+                        let next=runtime.reuse.lock().unwrap_or_else(|p|p.into_inner()).as_mut().unwrap().pending_close.pop();
+                        let Some((owner,write))=next else {break};
+                        runtime.reuse_close(owner,write,"shutdown_physical_close");
+                    }
+                })).map_err(|_|"reuse_closer_panicked".to_string());
+                let mut p=runtime.reuse.lock().unwrap_or_else(|p|p.into_inner());p.as_mut().unwrap().close_result=Some(result);
+            });
+            let mut p=self.reuse.lock().unwrap_or_else(|p|p.into_inner());let p=p.as_mut().unwrap();p.closer_starting=false;
+            match handle {Ok(handle)=>p.closer=Some(handle),Err(error)=>return Err(error.into())}
+        }
+        loop {
+            let finished=self.reuse.lock().unwrap_or_else(|p|p.into_inner()).as_ref().unwrap().closer.as_ref().is_none_or(|h|h.is_finished());
+            if finished {break;}
+            if Instant::now()>=deadline {return Err(EngineError::DatabaseRuntime("reuse_close_timeout_unjoined_nonpreemptible_io".into()));}
+            std::thread::sleep(deadline.saturating_duration_since(Instant::now()).min(Duration::from_millis(10)));
+        }
+        let handle={let mut p=self.reuse.lock().unwrap_or_else(|p|p.into_inner());let p=p.as_mut().unwrap();
+            if p.closer_starting {return Err(EngineError::DatabaseRuntime("reuse_close_join_in_progress".into()));}
+            p.closer_starting=true;p.closer.take()};
+        let join_failed=handle.is_some_and(|h|h.join().is_err());
+        let mut p=self.reuse.lock().unwrap_or_else(|p|p.into_inner());let p=p.as_mut().unwrap();
+        p.closer_starting=false;
+        if join_failed {return Err(EngineError::DatabaseRuntime("reuse_closer_panicked".into()));}
+        if p.ownership_unreconciled || p.close_result.as_ref().is_some_and(|r|r.is_err()) || p.proof.remaining_owners!=0 {
+            return Err(EngineError::DatabaseRuntime("reuse_shutdown_owners_not_closed".into()));
+        }
+        p.proof.shutdown_joined=true;Ok(())
+    }
+
     fn maintenance_shared(&self) -> Option<Arc<MaintenanceShared>> {
         self.maintenance.lock().unwrap_or_else(|p|p.into_inner()).as_ref().map(|o|Arc::clone(&o.shared))
     }
@@ -1681,10 +1958,17 @@ impl Drop for DatabaseWriteContext {
                     .record_file_bytes_read(permit.operation_id, bytes);
             }
         }
-        if let Some(permit) = self.permit.as_ref() {
-            permit.phase("connection_close", Duration::ZERO);
-        }
         let close_started = Instant::now();
+        #[cfg(feature = "wp0333_connection_reuse_proof")]
+        if let Some(permit)=self.permit.as_mut().filter(|p|p.runtime.reuse_enabled()) {
+            if let Some(connection)=self.connection.take() {
+                let rolled_back=permit.runtime.reuse_return(connection,true,permit.operation_id);
+                if rolled_back && permit.outcome=="completed_write_context" {permit.outcome="manual_transaction_not_committed";}
+            }
+            // This is a logical lease return, not native xClose.
+            self.permit.take();return;
+        }
+        if let Some(permit) = self.permit.as_ref() {permit.phase("connection_close",Duration::ZERO);}
         self.connection.take();
         if let Some(permit) = self.permit.as_ref() {
             permit.phase("connection_close", close_started.elapsed());
@@ -1743,8 +2027,13 @@ impl Drop for DatabaseReadContext {
                 .runtime
                 .record_file_bytes_read(permit.operation_id, bytes);
         }
-        self.record_phase("connection_close", Duration::ZERO);
         let close_started = Instant::now();
+        #[cfg(feature = "wp0333_connection_reuse_proof")]
+        if let Some(permit)=self.permit.as_ref().filter(|p|p.runtime.reuse_enabled()) {
+            if let Some(connection)=self.connection.take() {permit.runtime.reuse_return(connection,false,permit.operation_id);}
+            self.permit.take();return;
+        }
+        self.record_phase("connection_close",Duration::ZERO);
         self.connection.take();
         self.record_phase("connection_close", close_started.elapsed());
         self.permit.take();
@@ -1759,6 +2048,60 @@ pub struct AppDatabase {
 pub type DatabaseRuntime = AppDatabase;
 
 impl AppDatabase {
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    pub fn connection_reuse_proof(&self) -> Option<ConnectionReuseProof> {
+        self.inner.reuse.lock().unwrap_or_else(|p|p.into_inner()).as_ref().map(|p|p.proof.clone())
+    }
+
+    /// Diagnostic counterpart only; validates exact fresh fixture identity before opting in.
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    pub fn enable_disposable_connection_reuse(&self, root: &Path, expected_source_sha256: &str) -> Result<ConnectionReuseGuard> {
+        use sha2::{Digest,Sha256};
+        let refuse=||EngineError::DatabaseRuntime("reuse_fixture_identity_refused".into());
+        let root=root.canonicalize()?;
+        if self.inner.database_path != absolute_key(&root.join("db/app.sqlite"))? {return Err(refuse());}
+        let normalize=|path: &Path|path.to_string_lossy().replace('\\',"/").to_lowercase().trim_start_matches("//?/").trim_end_matches('/').to_string();
+        for key in ["APPDATA","LOCALAPPDATA"] {
+            let protected=PathBuf::from(std::env::var_os(key).ok_or_else(refuse)?).join("com.voxvulgi.voxvulgi");
+            let protected=protected.canonicalize().unwrap_or(protected);
+            let r=normalize(&root);let p=normalize(&protected);
+            if r==p||r.starts_with(&(p.clone()+"/"))||p.starts_with(&(r+"/")) {return Err(refuse());}
+        }
+        let marker: serde_json::Value=serde_json::from_slice(&std::fs::read(root.join("wp0333_production_fixture.json"))?)?;
+        if marker["pid"].as_u64()!=Some(std::process::id() as u64) || marker["schema"].as_u64()!=Some(61)
+            || marker["job_density"].as_u64().is_none_or(|n|n<1000)
+            || marker["root"].as_str().map(Path::new)!=Some(root.as_path())
+            || marker["source_sha256"].as_str()!=Some(expected_source_sha256) {return Err(refuse());}
+        let source=PathBuf::from(marker["source"].as_str().ok_or_else(refuse)?).canonicalize()?;
+        for key in ["APPDATA","LOCALAPPDATA"] {
+            let protected=PathBuf::from(std::env::var_os(key).ok_or_else(refuse)?).join("com.voxvulgi.voxvulgi");
+            let protected=protected.canonicalize().unwrap_or(protected);let s=normalize(&source);let p=normalize(&protected);
+            if s==p||s.starts_with(&(p.clone()+"/"))||p.starts_with(&(s+"/")) {return Err(refuse());}
+        }
+        if root.starts_with(source.parent().ok_or_else(refuse)?) || source.starts_with(&root) {return Err(refuse());}
+        let hash=|path: &Path|->Result<String> {
+            use std::io::Read;
+            let mut file=std::fs::File::open(path)?;let mut digest=Sha256::new();let mut buf=[0;65536];
+            loop {let n=file.read(&mut buf)?;if n==0 {break}digest.update(&buf[..n]);}Ok(hex::encode(digest.finalize()))
+        };
+        for path in [&source,&self.inner.database_path] {
+            if hash(path)?!=expected_source_sha256 {return Err(refuse());}
+            for suffix in ["-wal","-shm","-journal"] {if PathBuf::from(format!("{}{suffix}",path.display())).exists() {return Err(refuse());}}
+        }
+        self.read(DatabaseOperationContext::new("reuse_guard","fixture_identity"),|c| {
+            let schema:u32=c.pragma_query_value(None,"user_version",|r|r.get(0))?;
+            let density:u64=c.query_row("SELECT COUNT(*) FROM job",[],|r|r.get(0))?;
+            if schema!=61 || Some(density)!=marker["job_density"].as_u64() {return Err(refuse());}Ok(())
+        })?;
+        if self.inner.maintenance_shared().is_some() {return Err(refuse());}
+        let state=self.inner.admission.lock().unwrap_or_else(|p|p.into_inner());
+        if state.shutting_down||state.writer_active||state.active_readers!=0||!state.waiting_readers.is_empty()||!state.waiting_writers.is_empty(){return Err(refuse());}
+        let mut pool=self.inner.reuse.lock().unwrap_or_else(|p|p.into_inner());
+        if pool.is_some(){return Err(refuse());}
+        *pool=Some(ConnectionReuse{proof:ConnectionReuseProof{enabled:true,..Default::default()},..Default::default()});
+        Ok(ConnectionReuseGuard{runtime:Arc::clone(&self.inner)})
+    }
+
     /// SQLite filename spelling only; canonical runtime identity remains unchanged.
     /// Pure lexical checks: no filesystem work is performed inside admission.
     #[doc(hidden)]
@@ -1909,6 +2252,8 @@ impl AppDatabase {
             });
         }
         let runtime = Arc::new(RuntimeInner {
+            #[cfg(feature = "wp0333_connection_reuse_proof")]
+            reuse: Mutex::new(None),
             #[cfg(test)]
             test_manual_checkpoint_panic: AtomicBool::new(false),
             #[cfg(test)]
@@ -2004,20 +2349,34 @@ impl AppDatabase {
     pub fn write_context(&self, context: DatabaseOperationContext) -> Result<DatabaseWriteContext> {
         #[cfg(test)]
         {
+            #[cfg(feature = "wp0333_connection_reuse_proof")]
+            let prepare_fixture=!self.inner.reuse_enabled();
+            #[cfg(not(feature = "wp0333_connection_reuse_proof"))]
+            let prepare_fixture=true;
             // Production startup owns schema creation/migration before any runtime admission.
             // Unit fixtures invoke post-ready write APIs directly, so give write fixtures the
             // same predecessor state without weakening read-only no-creation semantics or adding
             // migration to a production path.
+            if prepare_fixture {
             if let Some(db_dir) = self.inner.database_path.parent() {
                 std::fs::create_dir_all(db_dir)?;
             }
             let fixture_connection = open_write_raw(&self.inner.database_path)?;
             super::migrate(&fixture_connection)?;
+            }
         }
         let permit = self.inner.acquire_writer(&context)?;
         let read_meter = ReadMeter::start();
         let open_started = Instant::now();
-        match open_runtime_write_raw(&self.inner.database_path,self.inner.maintained_writer_policy()) {
+        #[cfg(feature = "wp0333_connection_reuse_proof")]
+        let opened=if self.inner.reuse_enabled() {
+            self.inner.reuse_checkout(true).and_then(|cached| match cached {
+                Some(c)=>Ok(c),None=>open_runtime_write_raw(&self.inner.database_path,self.inner.maintained_writer_policy()).and_then(|c|{self.inner.reuse_opened(true,&c)?;Ok(c)})
+            })
+        } else {open_runtime_write_raw(&self.inner.database_path,self.inner.maintained_writer_policy())};
+        #[cfg(not(feature = "wp0333_connection_reuse_proof"))]
+        let opened=open_runtime_write_raw(&self.inner.database_path,self.inner.maintained_writer_policy());
+        match opened {
             Ok(connection) => {
                 permit.phase("open", open_started.elapsed());
                 let initial_total_changes = connection.total_changes();
@@ -2045,7 +2404,15 @@ impl AppDatabase {
         let permit = self.inner.acquire_reader(&context)?;
         let read_meter = ReadMeter::start();
         let open_started = Instant::now();
-        match open_readonly_raw(&self.inner.database_path) {
+        #[cfg(feature = "wp0333_connection_reuse_proof")]
+        let opened=if self.inner.reuse_enabled() {
+            self.inner.reuse_checkout(false).and_then(|cached| match cached {
+                Some(c)=>Ok(c),None=>open_readonly_raw(&self.inner.database_path).and_then(|c|{self.inner.reuse_opened(false,&c)?;Ok(c)})
+            })
+        } else {open_readonly_raw(&self.inner.database_path)};
+        #[cfg(not(feature = "wp0333_connection_reuse_proof"))]
+        let opened=open_readonly_raw(&self.inner.database_path);
+        match opened {
             Ok(connection) => {
                 self.inner.operation_metadata(
                     permit.operation_id,
@@ -2427,6 +2794,11 @@ impl AppDatabase {
             state = next;
         }
         drop(state);
+        #[cfg(feature = "wp0333_connection_reuse_proof")]
+        if let Err(error)=self.inner.shutdown_reuse(deadline) {
+            self.inner.finish(operation_id,operation_started,"shutdown_reuse_not_closed",0);
+            return Err(error);
+        }
         self.inner
             .finish(operation_id, operation_started, "shutdown_drained", 0);
         Ok(())
@@ -2471,6 +2843,230 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Barrier, MutexGuard};
+
+    // Paste inside database_runtime::tests after supplying an ACTUAL guarded,
+    // feature-enabled disposable fixture. These helpers never enable reuse or open
+    // operator roots. Parent owns integration/compilation/execution.
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    fn independent_reuse_committed_contamination(database: &AppDatabase) {
+        let attached = tempfile::tempdir().expect("owned attached fixture");
+        let attached_path = attached.path().join("attached.sqlite");
+        {
+            let fixture = Connection::open(&attached_path).expect("create owned attachment fixture");
+            fixture.execute_batch("CREATE TABLE attached_fixture(value INTEGER);").unwrap();
+        }
+        let before = database.connection_reuse_proof().expect("guard enabled");
+        {
+            let writer = database.write_context(DatabaseOperationContext::new("independent", "commit_then_contaminate")).unwrap();
+            writer.execute_batch("CREATE TABLE independent_reuse_probe(value INTEGER); INSERT INTO independent_reuse_probe VALUES(7);").unwrap();
+            writer.busy_handler(Some(|_| false)).unwrap();
+            writer.execute_batch("CREATE TEMP TABLE independent_temp(value INTEGER);").unwrap();
+            writer.execute("ATTACH DATABASE ?1 AS independent_attached", [attached_path.to_str().unwrap()]).unwrap();
+        }
+        let quarantined = database.connection_reuse_proof().unwrap();
+        assert_eq!(quarantined.quarantines, before.quarantines + 1);
+        let writer = database.write_context(DatabaseOperationContext::new("independent", "fresh_after_contamination")).unwrap();
+        assert_eq!(writer.query_row("SELECT value FROM independent_reuse_probe", [], |r| r.get::<_, i64>(0)).unwrap(), 7);
+        assert_eq!(writer.query_row("PRAGMA busy_timeout", [], |r| r.get::<_, i64>(0)).unwrap(), 10000);
+        let names: Vec<String> = writer.prepare("PRAGMA database_list").unwrap().query_map([], |r| r.get(1)).unwrap().collect::<rusqlite::Result<_>>().unwrap();
+        assert_eq!(names, vec!["main"]);
+        assert!(writer.prepare("SELECT * FROM independent_temp").is_err());
+        assert!(writer.prepare("SELECT * FROM independent_attached.sqlite_schema").is_err());
+        assert!(writer.is_autocommit());
+        drop(writer);
+    }
+
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    fn independent_reuse_panic_and_checked_close(database: &AppDatabase, owner: &mut CheckpointMaintenanceGuard) {
+        {
+            let writer = database.write_context(DatabaseOperationContext::new("independent", "durable_before_panic")).unwrap();
+            writer.execute_batch("CREATE TABLE independent_panic_probe(value INTEGER); INSERT INTO independent_panic_probe VALUES(7);").unwrap();
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let writer = database.write_context(DatabaseOperationContext::new("independent", "panic_manual_transaction")).unwrap();
+            writer.execute_batch("BEGIN; UPDATE independent_panic_probe SET value=99;").unwrap();
+            panic!("owned independent lease panic");
+        }));
+        assert!(result.is_err());
+        let writer = database.write_context(DatabaseOperationContext::new("independent", "readback_and_unfinalized_statement")).unwrap();
+        assert!(writer.is_autocommit());
+        assert_eq!(writer.query_row("SELECT value FROM independent_panic_probe", [], |r| r.get::<_, i64>(0)).unwrap(), 7);
+        // Deliberate C-level statement escape exercises SQLite checked-close refusal.
+        // No Rust statement/cache lifetime can accidentally finalize this probe.
+        let mut statement = std::ptr::null_mut();
+        unsafe {
+            assert_eq!(rusqlite::ffi::sqlite3_prepare_v2(writer.handle(), b"SELECT 1\0".as_ptr().cast(), -1, &mut statement, std::ptr::null_mut()), rusqlite::ffi::SQLITE_OK);
+        }
+        assert!(!statement.is_null());
+        struct OwnedStatement(*mut rusqlite::ffi::sqlite3_stmt);
+        impl Drop for OwnedStatement {
+            fn drop(&mut self) {
+                if !self.0.is_null() { unsafe { rusqlite::ffi::sqlite3_finalize(self.0); } }
+            }
+        }
+        let mut statement_owner = OwnedStatement(statement);
+        drop(writer);
+        let joined = owner.stop_and_join(SHUTDOWN_DRAIN_TIMEOUT).unwrap();
+        assert!(joined.joined);
+        let failure = database.shutdown_and_drain(SHUTDOWN_DRAIN_TIMEOUT).expect_err("live statement cannot yield successful drain");
+        let retained = database.connection_reuse_proof().unwrap();
+        assert!(retained.close_errors >= 1, "{failure}");
+        assert!(retained.remaining_owners >= 1);
+        assert!(!retained.shutdown_joined);
+        let statement = std::mem::replace(&mut statement_owner.0, std::ptr::null_mut());
+        unsafe { assert_eq!(rusqlite::ffi::sqlite3_finalize(statement), rusqlite::ffi::SQLITE_OK); }
+        // Owned failed-close retry must be supported/explicitly integrated before
+        // executing this probe, so the deliberately retained owner cannot leak.
+        database.shutdown_and_drain(SHUTDOWN_DRAIN_TIMEOUT).expect("finalized owner closes on explicit retry");
+        let closed = database.connection_reuse_proof().unwrap();
+        assert_eq!(closed.remaining_owners, 0);
+        assert!(closed.shutdown_joined);
+    }
+
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    #[test]
+    fn connection_reuse_independent_committed_session_quarantine() {
+        let _serial=serial_test_guard();
+        let (_dir,database,_guard,mut owner)=reuse_fixture();
+        independent_reuse_committed_contamination(&database);
+        reuse_finish(&database,&mut owner);
+    }
+
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    #[test]
+    fn connection_reuse_independent_panic_and_unfinalized_owner() {
+        let _serial=serial_test_guard();
+        let (_dir,database,_guard,mut owner)=reuse_fixture();
+        independent_reuse_panic_and_checked_close(&database,&mut owner);
+    }
+
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    fn reuse_fixture() -> (tempfile::TempDir,AppDatabase,ConnectionReuseGuard,CheckpointMaintenanceGuard) {
+        use sha2::{Digest,Sha256};
+        let directory=tempfile::tempdir().unwrap();let backup_dir=directory.path().join("source_backup");std::fs::create_dir(&backup_dir).unwrap();let source=backup_dir.join("source.sqlite");
+        let mut c=open_write_raw(&source).unwrap();super::super::migrate(&c).unwrap();
+        let tx=c.transaction().unwrap();
+        for i in 0..1000 {tx.execute("INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path) VALUES(?1,'download_direct_url','queued',0,'{}',0,'fixture')",[format!("reuse-fixture-{i}")]).unwrap();}
+        tx.commit().unwrap();drop(c);
+        let root=directory.path().join("fixture");std::fs::create_dir(&root).unwrap();let root=root.canonicalize().unwrap();
+        std::fs::create_dir(root.join("db")).unwrap();std::fs::copy(&source,root.join("db/app.sqlite")).unwrap();
+        let hash=hex::encode(Sha256::digest(std::fs::read(&source).unwrap()));
+        std::fs::write(root.join("wp0333_production_fixture.json"),serde_json::to_vec(&serde_json::json!({"root":root,"source":source.canonicalize().unwrap(),"source_sha256":hash,"schema":61,"job_density":1000,"pid":std::process::id()})).unwrap()).unwrap();
+        let database=AppDatabase::for_paths(&AppPaths::new(root.clone())).unwrap();
+        let guard=database.enable_disposable_connection_reuse(&root,&hash).unwrap();
+        assert!(database.read_context(DatabaseOperationContext::new("reuse_test","before_owner")).is_err());
+        let owner=database.start_checkpoint_maintenance().unwrap();(directory,database,guard,owner)
+    }
+
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    fn reuse_finish(database: &AppDatabase, owner: &mut CheckpointMaintenanceGuard) {
+        let deadline=Instant::now()+SHUTDOWN_DRAIN_TIMEOUT;
+        assert!(owner.stop_and_join(deadline.saturating_duration_since(Instant::now())).unwrap().joined);
+        database.shutdown_and_drain(deadline.saturating_duration_since(Instant::now())).unwrap();
+    }
+
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    #[test]
+    fn connection_reuse_actual_factory_bound_and_logical_returns() {
+        let _serial=serial_test_guard();let (_dir,database,_guard,mut owner)=reuse_fixture();
+        for _ in 0..5 {let c=database.write_context(DatabaseOperationContext::new("reuse_test","writer")).unwrap();assert_eq!(c.pragma_query_value(None,"synchronous",|r|r.get::<_,i64>(0)).unwrap(),2);drop(c);}
+        let readers:Vec<_>=(0..READ_EXECUTOR_LIMIT).map(|_|database.read_context(DatabaseOperationContext::new("reuse_test","reader")).unwrap()).collect();
+        for c in &readers {assert_eq!(c.pragma_query_value(None,"query_only",|r|r.get::<_,i64>(0)).unwrap(),1);assert_eq!(c.pragma_query_value(None,"foreign_keys",|r|r.get::<_,i64>(0)).unwrap(),1);assert_eq!(c.pragma_query_value(None,"busy_timeout",|r|r.get::<_,i64>(0)).unwrap(),4000);}
+        drop(readers);
+        let c=database.read_context(DatabaseOperationContext::new("reuse_test","reader_reused")).unwrap();assert_eq!(c.pragma_query_value(None,"foreign_keys",|r|r.get::<_,i64>(0)).unwrap(),1);drop(c);
+        let p=database.connection_reuse_proof().unwrap();assert_eq!(p.physical_writer_opens,1);assert_eq!(p.physical_reader_opens,4);assert_eq!(p.max_writer_owners,1);assert_eq!(p.max_reader_owners,4);assert_eq!(p.physical_closes,0);
+        for r in database.snapshot().recent_receipts.iter().filter(|r|r.lane=="reuse_test"&&r.outcome.starts_with("completed")) {assert!(r.phase_ms.contains_key("lease_return"));assert!(!r.phase_ms.contains_key("connection_close"));}
+        reuse_finish(&database,&mut owner);let p=database.connection_reuse_proof().unwrap();assert_eq!(p.physical_closes,5);assert_eq!(p.remaining_owners,0);assert!(p.shutdown_joined);
+    }
+
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    #[test]
+    fn connection_reuse_manual_transactions_never_become_committed_ack() {
+        let _serial=serial_test_guard();let (_dir,database,_guard,mut owner)=reuse_fixture();
+        {let c=database.write_context(DatabaseOperationContext::new("reuse_test","manual")).unwrap();c.execute_batch("BEGIN; INSERT INTO meta(key,value) VALUES('reuse_dirty','uncommitted')").unwrap();}
+        let count=database.read(DatabaseOperationContext::new("reuse_test","readback"),|c|Ok(c.query_row("SELECT COUNT(*) FROM meta WHERE key='reuse_dirty'",[],|r|r.get::<_,i64>(0))?)).unwrap();assert_eq!(count,0);
+        assert!(database.snapshot().recent_receipts.iter().any(|r|r.operation=="manual"&&r.outcome=="manual_transaction_not_committed"));
+        {let c=database.read_context(DatabaseOperationContext::new("reuse_test","manual_reader")).unwrap();c.execute_batch("BEGIN").unwrap();c.pragma_update(None,"query_only",false).unwrap();}
+        let c=database.read_context(DatabaseOperationContext::new("reuse_test","clean_reader")).unwrap();assert!(c.is_autocommit());assert_eq!(c.pragma_query_value(None,"query_only",|r|r.get::<_,i64>(0)).unwrap(),1);drop(c);reuse_finish(&database,&mut owner);
+    }
+
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    #[test]
+    fn connection_reuse_cleanup_failure_preserves_committed_outcome() {
+        let _serial=serial_test_guard();let (_dir,database,_guard,mut owner)=reuse_fixture();
+        database.inner.reuse.lock().unwrap().as_mut().unwrap().fail_reset=true;
+        database.write(DatabaseOperationContext::new("reuse_test","committed_then_reset_failure"),TransactionBehavior::Immediate,|tx|{tx.execute("INSERT INTO meta(key,value) VALUES('reuse_committed','yes')",[])?;Ok(())}).unwrap();
+        database.inner.reuse.lock().unwrap().as_mut().unwrap().fail_reset=false;
+        assert!(database.snapshot().recent_receipts.iter().any(|r|r.operation=="committed_then_reset_failure"&&r.outcome=="committed"));
+        assert_eq!(database.read(DatabaseOperationContext::new("reuse_test","committed_readback"),|c|Ok(c.query_row("SELECT value FROM meta WHERE key='reuse_committed'",[],|r|r.get::<_,String>(0))?)).unwrap(),"yes");assert_eq!(database.connection_reuse_proof().unwrap().quarantines,1);reuse_finish(&database,&mut owner);
+    }
+
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    #[test]
+    fn connection_reuse_late_close_retains_owned_join_until_actual_completion() {
+        let _serial=serial_test_guard();let (_dir,database,_guard,mut owner)=reuse_fixture();
+        drop(database.read_context(DatabaseOperationContext::new("reuse_test","close_late")).unwrap());owner.stop_and_join(SHUTDOWN_DRAIN_TIMEOUT).unwrap();
+        database.inner.reuse.lock().unwrap().as_mut().unwrap().close_delay=Duration::from_millis(50);
+        assert!(database.shutdown_and_drain(Duration::from_millis(1)).unwrap_err().to_string().contains("reuse_close_timeout_unjoined"));
+        assert!(!database.connection_reuse_proof().unwrap().shutdown_joined);assert!(database.inner.reuse.lock().unwrap().as_ref().unwrap().closer.is_some());
+        database.shutdown_and_drain(SHUTDOWN_DRAIN_TIMEOUT).unwrap();assert_eq!(database.connection_reuse_proof().unwrap().remaining_owners,0);
+    }
+
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    #[test]
+    fn connection_reuse_concurrent_shutdown_reserves_one_owned_closer() {
+        let _serial=serial_test_guard();let (_dir,database,_guard,mut owner)=reuse_fixture();
+        drop(database.read_context(DatabaseOperationContext::new("reuse_test","concurrent_close")).unwrap());owner.stop_and_join(SHUTDOWN_DRAIN_TIMEOUT).unwrap();
+        database.inner.reuse.lock().unwrap().as_mut().unwrap().close_delay=Duration::from_millis(25);
+        let barrier=Arc::new(Barrier::new(3));let threads:Vec<_>=(0..2).map(|_|{
+            let d=database.clone();let b=barrier.clone();std::thread::spawn(move||{b.wait();d.shutdown_and_drain(SHUTDOWN_DRAIN_TIMEOUT)})
+        }).collect();barrier.wait();
+        for thread in threads {if let Err(error)=thread.join().unwrap() {assert!(error.to_string().contains("in_progress"));}}
+        database.shutdown_and_drain(SHUTDOWN_DRAIN_TIMEOUT).unwrap();let p=database.connection_reuse_proof().unwrap();
+        assert_eq!(p.physical_closes,1);assert_eq!(p.remaining_owners,0);assert!(p.shutdown_joined);assert_eq!(p.physical_close_receipts.len(),1);
+    }
+
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    #[test]
+    fn connection_reuse_close_panic_retains_exact_owner_and_reconciles_on_retry() {
+        let _serial=serial_test_guard();let (_dir,database,_guard,mut owner)=reuse_fixture();
+        drop(database.read_context(DatabaseOperationContext::new("reuse_test","panic_close")).unwrap());owner.stop_and_join(SHUTDOWN_DRAIN_TIMEOUT).unwrap();
+        database.inner.reuse.lock().unwrap().as_mut().unwrap().close_panic=true;
+        assert!(database.shutdown_and_drain(SHUTDOWN_DRAIN_TIMEOUT).is_err());
+        {let p=database.inner.reuse.lock().unwrap_or_else(|p|p.into_inner());let p=p.as_ref().unwrap();assert_eq!(p.poisoned.len(),1);assert_eq!(p.proof.remaining_owners,1);assert!(!p.proof.shutdown_joined);}
+        assert!(database.snapshot().active_operations.is_empty());
+        assert!(database.snapshot().recent_receipts.iter().any(|r|r.outcome=="reuse_close_panicked_owner_retained"));
+        database.inner.reuse.lock().unwrap_or_else(|p|p.into_inner()).as_mut().unwrap().close_panic=false;
+        database.shutdown_and_drain(SHUTDOWN_DRAIN_TIMEOUT).unwrap();assert_eq!(database.connection_reuse_proof().unwrap().remaining_owners,0);
+    }
+
+    #[cfg(feature = "wp0333_connection_reuse_proof")]
+    #[test]
+    fn connection_reuse_unreconciled_ownership_permanently_refuses_replacement_and_drain() {
+        let _serial=serial_test_guard();let (_dir,database,_guard,mut owner)=reuse_fixture();
+        drop(database.read_context(DatabaseOperationContext::new("reuse_test","retained_owner")).unwrap());
+        let before=database.connection_reuse_proof().unwrap();
+        database.inner.reuse.lock().unwrap().as_mut().unwrap().ownership_unreconciled=true;
+        assert!(database.read_context(DatabaseOperationContext::new("reuse_test","refused_reader")).err().unwrap().to_string().contains("ownership_unreconciled"));
+        assert!(database.write_context(DatabaseOperationContext::new("reuse_test","refused_writer")).err().unwrap().to_string().contains("ownership_unreconciled"));
+        assert_eq!(database.connection_reuse_proof().unwrap().physical_reader_opens,before.physical_reader_opens);
+        assert_eq!(database.connection_reuse_proof().unwrap().physical_writer_opens,before.physical_writer_opens);
+        owner.stop_and_join(SHUTDOWN_DRAIN_TIMEOUT).unwrap();
+        assert!(database.shutdown_and_drain(SHUTDOWN_DRAIN_TIMEOUT).unwrap_err().to_string().contains("ownership_unreconciled"));
+        assert!(!database.connection_reuse_proof().unwrap().shutdown_joined);
+        // Only this test clears its simulated condition; real unreconciled ownership is permanent.
+        database.inner.reuse.lock().unwrap().as_mut().unwrap().ownership_unreconciled=false;
+        database.shutdown_and_drain(SHUTDOWN_DRAIN_TIMEOUT).unwrap();
+    }
+
+    #[cfg(not(feature = "wp0333_connection_reuse_proof"))]
+    #[test]
+    fn connection_reuse_feature_off_retains_physical_context_close() {
+        let _serial=serial_test_guard();let (_dir,_paths,database)=fixture();
+        AppDatabase::begin_vfs_timing_probe();drop(database.read_context(DatabaseOperationContext::new("reuse_default","fresh_close")).unwrap());
+        let metrics=AppDatabase::finish_vfs_timing_probe();assert!(metrics.iter().any(|(name,count,_,_)|*name=="xClose"&&*count>0));
+        assert!(database.snapshot().recent_receipts.iter().any(|r|r.operation=="fresh_close"&&r.phase_ms.contains_key("connection_close")));
+    }
 
     #[test]
     fn checkpoint_maintenance_manual_cycle_panic_reconciles_exact_terminal_and_reply() {

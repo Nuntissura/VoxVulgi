@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-0323-20261002
 parent: null
-generation: 18
+generation: 29
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -19,7 +19,7 @@ steps:
 - {id: GP-003, role: any, at: before_round, do: confirm heavy build|test processes on target disk == 0, check: {type: confirm}, source: 'preset:build-round', state: active}
 - {id: GP-004, role: any, at: before_round, do: verify free disk(CARGO_TARGET_DIR or repo) >= 50 GiB, check: {type: cmd, argv: [python, -c, 'import os,shutil,sys;g=shutil.disk_usage(os.environ.get(''CARGO_TARGET_DIR'') or ''.'').free/2**30;print(round(g,1),''GiB free'');sys.exit(0 if g>=float(''50'') else 1)'], expect_exit: 0, timeout_seconds: 15}, source: 'preset:build-round', state: active}
 - {id: GP-005, role: any, at: before_round, do: confirm deepest generated path < 260 chars or long paths enabled, check: {type: confirm}, source: 'preset:build-round', state: active}
-- {id: GP-006, role: any, at: before_round, do: confirm test entrypoint + config unchanged since last green round, check: {type: confirm}, source: 'preset:build-round', state: active}
+- {id: GP-006, role: any, at: before_round, do: confirm test entrypoint + config unchanged since last green round, check: {type: confirm}, source: 'preset:build-round', state: retired}
 - {id: GP-007, role: any, at: before_round, do: forbid timeout wrapper around test entrypoint, check: {type: file, path: governance/scripts/build_desktop_target.ps1, not_contains: 'timeout '}, source: 'preset:build-round', state: active}
 - {id: GP-008, role: any, at: before_round, do: record candidate SHA = pushed HEAD; later pushes -> next round, check: {type: confirm}, source: 'preset:build-round', state: active}
 - {id: GP-009, role: any, at: before_round, do: confirm env vars|config files read by changed code set for test run, check: {type: confirm}, source: 'preset:build-round', state: active}
@@ -41,3 +41,13 @@ steps:
 - {id: GP-025, role: any, at: before_round, do: require fixture preparation outside workload budget; no timed child wait, check: {type: file, path: .local/wp0333_run_production_owner_native_pk.py, not_contains: wait(timeout=}, source: 'infra:240s controller budget omitted fixture preparation before180s workload', state: retired}
 - {id: GP-026, role: any, at: before_round, do: verify fixture preparation outside workload budget; polls never impose final child deadline, check: {type: confirm}, source: 'infra:240s controller budget omitted fixture preparation before180s workload', state: active}
 - {id: GP-027, role: any, at: before_round, do: require UTF8 atomic temp+replace for governance writes; preserve previous JSON entities, check: {type: confirm}, source: 'infra: default cp1252 write rejected Unicode and truncated WP JSON; recovered exact HEAD', state: active}
+- {id: GP-028, role: any, at: before_round, do: require exact TraceEvent decoder API source compiles before offline ETL processing, check: {type: confirm}, source: 'infra: TraceEvent TimeStampQPC advisory rejected by Add-Type before ETL processing', state: active}
+- {id: GP-029, role: any, at: before_round, do: require case-sensitive trace JSON input parsing before symbol resolver dispatch, check: {type: confirm}, source: 'infra: PowerShell JSON case folding rejects recorded pid and PID sibling keys', state: active}
+- {id: GP-030, role: any, at: before_round, do: require retry wrapper preserves existing capture root and changes only fresh output names, check: {type: confirm}, source: 'infra: symbol retry text replacement changed capture root to an absent directory', state: active}
+- {id: GP-031, role: any, at: before_round, do: require explicit verified local PDB directory on cache-only SymbolReader path, check: {type: confirm}, source: 'infra: empty SymbolPath refuses adjacent exact executable PDB as untrusted location', state: active}
+- {id: GP-032, role: any, at: before_round, do: verify reuse fixture root is sibling of standalone backup parent, check: {type: confirm}, source: 'review: fixture root nested inside backup parent violates reuse guard', state: active}
+- {id: GP-033, role: any, at: before_round, do: verify reuse closer start reservation and pending owner retention under concurrent shutdown, check: {type: confirm}, source: 'review: concurrent shutdown can spawn duplicate closer and overwrite owned handle', state: active}
+- {id: GP-034, role: any, at: before_round, do: verify reviewed Cargo manifest and feature test filters bind current candidate inputs, check: {type: confirm}, source: VV-CRP-010 requires changed feature config; prior unchanged-config preset no longer applies, state: active}
+- {id: GP-035, role: any, at: before_round, do: verify VFS close assertions use exact xClose counter spelling, check: {type: confirm}, source: 'fail: lowercase close assertion missed case-sensitive xClose counter', state: active}
+- {id: GP-036, role: any, at: before_round, do: verify reused reader policy restores actual counted factory readbacks, check: {type: confirm}, source: 'fail: fresh reader FK1 was inferred as0; recycled reset changed role policy', state: active}
+- {id: GP-037, role: any, at: before_round, do: verify attachment probe precreates only its disposable fixture database, check: {type: confirm}, source: 'fail: maintained READWRITE noCREATE refused absent ATTACH fixture', state: active}

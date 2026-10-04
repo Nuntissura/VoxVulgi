@@ -35,10 +35,14 @@ fn insert(connection: &Connection,id: &str,payload: &str)->rusqlite::Result<usiz
 }
 fn main()->ProofResult<()> {
     let args:Vec<_>=std::env::args_os().collect();
-    if args.len()!=4 && args.len()!=6{return Err("Usage: <absent-absolute-root> <standalone-schema61-backup> <expected-source-sha256> [count|pk seconds30..180]".into())}
-    let workload=if args.len()==6 {args[4].to_str().ok_or("Invalid workload")?}else{"count"};
+    if args.len()!=4 && args.len()!=6 && args.len()!=7{return Err("Usage: <absent-absolute-root> <standalone-schema61-backup> <expected-source-sha256> [count|pk seconds30..180 [connection_reuse]]".into())}
+    let reuse=args.len()==7;
+    if reuse && args[6]!="connection_reuse" {return Err("Require exact diagnostic connection_reuse mode".into())}
+    #[cfg(not(feature="wp0333_connection_reuse_proof"))]
+    if reuse {return Err("Diagnostic connection reuse feature is not enabled".into())}
+    let workload=if args.len()>=6 {args[4].to_str().ok_or("Invalid workload")?}else{"count"};
     if !matches!(workload,"count"|"pk"){return Err("Require count or pk workload".into())}
-    let seconds=if args.len()==6 {args[5].to_str().ok_or("Invalid seconds")?.parse::<u64>()?}else{30};
+    let seconds=if args.len()>=6 {args[5].to_str().ok_or("Invalid seconds")?.parse::<u64>()?}else{30};
     if !(30..=180).contains(&seconds){return Err("Require seconds30..180".into())}
     let requested=PathBuf::from(&args[1]);
     if !requested.is_absolute()||requested.exists(){return Err("Require fresh absent absolute root".into())}
@@ -61,8 +65,10 @@ fn main()->ProofResult<()> {
     drop(original); fs::create_dir(&root)?; fs::create_dir(root.join("db"))?;
     let destination=root.join("db/app.sqlite"); fs::copy(&source,&destination)?;
     if hash(&source)?!=source_hash||hash(&destination)?!=source_hash{return Err("Copy identity mismatch".into())}
-    fs::write(root.join("wp0333_production_fixture.json"),serde_json::to_vec_pretty(&json!({"source":source,"source_sha256":source_hash,"schema":schema,"job_density":density,"pid":std::process::id(),"read_workload":workload,"seconds":seconds,"read_job":read_job,"read_meta_key":read_meta}))?)?;
+    fs::write(root.join("wp0333_production_fixture.json"),serde_json::to_vec_pretty(&json!({"root":root,"source":source,"source_sha256":source_hash,"schema":schema,"job_density":density,"pid":std::process::id(),"read_workload":workload,"seconds":seconds,"read_job":read_job,"read_meta_key":read_meta}))?)?;
     let database=db::AppDatabase::for_paths(&AppPaths::new(root.clone()))?;
+    #[cfg(feature="wp0333_connection_reuse_proof")]
+    let _reuse_guard=if reuse {Some(database.enable_disposable_connection_reuse(&root,&source_hash)?)} else {None};
     let mut maintenance=database.start_checkpoint_maintenance()?;
     let (pin_ready_tx,pin_ready_rx)=mpsc::channel();
     let pinned_database=database.clone();
@@ -107,7 +113,7 @@ fn main()->ProofResult<()> {
                 let mut callbacks=db::AppDatabase::finish_vfs_timing_probe().to_vec();
                 callbacks.extend(db::AppDatabase::vfs_open_read_timing_probe());
                 let finished_at_ms=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
-                // Context and physical connection dropped before measurement serialization.
+                // Context returned or physically closed before measurement serialization.
                 let measurement=json!({"request_id":format!("wp0333-production-{index}-{ordinal}"),"started_at_ms":started_at_ms,
                     "finished_at_ms":finished_at_ms,"elapsed_ns":elapsed_ns,"callbacks":callbacks,"succeeded":result.is_ok()});
                 if attempt_measurements.len()<2048 {attempt_measurements.push(measurement.clone());}else{attempt_measurement_overflow+=1;}
@@ -144,7 +150,11 @@ fn main()->ProofResult<()> {
     let recovery=manual.iter().any(|r|r["phase"]=="after_pin"&&r["receipt"]["busy"]==0&&r["receipt"]["log_frames"].as_i64().is_some_and(|n|n>=0)&&r["receipt"]["log_frames"]==r["receipt"]["checkpointed_frames"]);
     let final_complete=owner_shutdown.final_checkpoint.as_ref().is_some_and(|r|r.busy==0&&r.log_frames>=0&&r.log_frames==r.checkpointed_frames);
     let source_unchanged=hash(&source)?==source_hash;
-    let summary=json!({"root":root,"source_backup":source,"source_sha256":source_hash,"read_workload":workload,"seconds":seconds,"reader_interval_ms":100,"writer_interval_ms":100,"writer_count":3,"reader_count":3,"pin_seconds":5,"read_job":read_job,"read_meta_key":read_meta,"workers":reports,"acknowledged_ids":ack_ids,"errors":errors,"manual":manual,"observed_partial":partial,"observed_recovery":recovery,"health_observations":observations,"owner_shutdown":owner_shutdown,"drain_error":drain.as_ref().err().map(ToString::to_string),"source_unchanged":source_unchanged,"final_runtime":database.snapshot()});
+    #[cfg(feature="wp0333_connection_reuse_proof")]
+    let reuse_proof=database.connection_reuse_proof();
+    #[cfg(not(feature="wp0333_connection_reuse_proof"))]
+    let reuse_proof: Option<Value>=None;
+    let summary=json!({"root":root,"source_backup":source,"source_sha256":source_hash,"read_workload":workload,"seconds":seconds,"reader_interval_ms":100,"writer_interval_ms":100,"writer_count":3,"reader_count":3,"pin_seconds":5,"read_job":read_job,"read_meta_key":read_meta,"workers":reports,"acknowledged_ids":ack_ids,"errors":errors,"manual":manual,"observed_partial":partial,"observed_recovery":recovery,"health_observations":observations,"owner_shutdown":owner_shutdown,"drain_error":drain.as_ref().err().map(ToString::to_string),"source_unchanged":source_unchanged,"final_runtime":database.snapshot(),"diagnostic_connection_reuse":reuse_proof});
     fs::write(root.join("production_maintenance_summary.json"),serde_json::to_vec_pretty(&summary)?)?;
     emit(json!({"event":"terminal","summary":root.join("production_maintenance_summary.json"),"errors":errors,"acknowledged":ack_ids.len()}));
     if errors!=0||!partial||!recovery||!final_complete||!source_unchanged||drain.is_err(){return Err("Actual owner proof failed; inspect retained summary".into())}

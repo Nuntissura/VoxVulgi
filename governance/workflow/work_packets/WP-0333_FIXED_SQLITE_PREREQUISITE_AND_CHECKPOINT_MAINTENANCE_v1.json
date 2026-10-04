@@ -113,6 +113,61 @@
         "production_owner_proven": false,
         "limits": "Counterfactual fixture owner, not final production owner or live timeout resolution; previous RED variance retained"
       }
+    },
+    "diagnostic_connection_reuse_counterpart_20261004": {
+      "amendment_id": "WP-0333-AMD-REUSE-PROOF-20261004-001",
+      "status": "REVIEWED_DIAGNOSTIC_ONLY",
+      "scope": "Diagnostic counterpart only; production reuse unselected",
+      "units": {
+        "VV-CRP-001": "Authorize only a diagnostic counterpart behind the explicit off-by-default engine Cargo feature wp0333_connection_reuse_proof. Only guarded disposable example/tests may opt in; desktop manifests/builds never enable it. Default production lifetime remains unchanged and unselected.",
+        "VV-CRP-002": "Require a fresh exclusive disposable root outside canonical APPDATA and every protected local root, source schema61 standalone backup SHA/fixture identity and unchanged-source reconciliation before enabling reuse for that exact canonical runtime. No environment/global switch or runtime enablement for user roots.",
+        "VV-CRP-003": "Reuse the existing rusqlite and common counted AppDatabase factory: exactly one runtime-owned reusable writer and at most four runtime-owned read-only reusable connections, scoped to the canonical RuntimeInner. No pool library, unbounded cache, alternate admission or raw-open exception.",
+        "VV-CRP-004": "Preserve strict FIFO serialized writer admission, four read executors,64-entry queues,4second reader/5second writer admission, atomic batches, cancellation-before-admission and every terminal/ACK outcome. Each lease is exclusive; no concurrent connection use or control mutex across SQLite work.",
+        "VV-CRP-005": "Preserve fixed SQLite, canonical filename/counting, WAL, synchronous FULL, NO_CKPT_ON_CLOSE, auto-checkpoint0,500ms PASSIVE owner, existing busy policies, backlog/staleness/error safeguards and manual routing. Reuse is the sole varied input; do not widen bounds or change checkpoint cadence/transport/durability.",
+        "VV-CRP-006": "Before returning any lease, inspect autocommit and explicitly roll back a remaining manual transaction, then verify autocommit. Restore and read back role query_only, foreign_keys and busy policy plus required WAL/FULL/no-close/auto0 policy; reject role changes and unauthorized attachment/session-state contamination. Statements/blobs/backups cannot escape a lease.",
+        "VV-CRP-007": "A panic, rollback/reset failure or unverifiable policy quarantines the connection; never return contaminated state or silently lose an admitted result/ACK. Preserve the operation outcome and report cleanup failure separately; only a counted-policy verified replacement may serve a later operation, and quarantine/physical-close work is observable.",
+        "VV-CRP-008": "Healthy ordinary admission records logical lease return, not physical connection destruction. Physical close has separate owner/connection identity and native open/use/close receipts; never relabel lease return as xClose. Quarantine teardown remains attributed and fail-closed, not a hidden healthy close.",
+        "VV-CRP-009": "Stop new admission, reconcile admitted operations and join owned runners/maintenance according to existing order, then close all reusable owners under the existing shared10second database shutdown budget. Checked physical close/join/drain receipts report late/unjoined nonpreemptible I/O truthfully; no force, silently deferred close or successful drain with orphan owners.",
+        "VV-CRP-010": "Component acceptance proves actual factory reuse/count bound, reader query_only/FK/busy readbacks, manual-transaction rollback after success/error, panic/reset quarantine, exact admitted-write outcome retention, and owned shutdown including close failure/late I/O. Feature-off/default regressions must retain current behavior.",
+        "VV-CRP-011": "Run the matched native PK180second canonical-density workload against the same schema61 backup, source SQL,3writers/3readers/100ms pacing/5second pin, with bounded operation/VFS timing and external stdout ACKs. Independently reopen WAL-aware and reconcile every exact ACK plus all69 protected tables and only the known fixture INSERT-trigger delta; preserve source SHA.",
+        "VV-CRP-012": "Require no admission/read/write/cleanup errors, truthful busy/partial checkpoint recovery, bounded owner counts and final stop/join/drain. Retain all prior REDs, matched executable/source/config identities and causal limits. A single counterpart GREEN is not live timeout resolution or30minute download acceptance.",
+        "VV-CRP-013": "Independent amendment review precedes implementation. Production lifetime selection requires independent current-input counterpart GREEN, separately reviewed production authority/spec/exception amendment and explicit operator production approval; this diagnostic authority grants none of those production changes."
+      },
+      "research_basis": {
+        "sources": [
+          "https://www.sqlite.org/c3ref/close.html",
+          "https://www.sqlite.org/c3ref/get_autocommit.html",
+          "https://www.sqlite.org/pragma.html#pragma_query_only",
+          "https://www.sqlite.org/pragma.html#pragma_foreign_keys",
+          "https://www.sqlite.org/wal.html",
+          "https://github.com/microsoft/perfview/blob/v3.2.8/src/TraceEvent/Parsers/KernelTraceEventParser.cs#L4181-L4206"
+        ],
+        "patterns": "SQLite close requires finished statements/blob/backup owners and may roll back an open transaction; get_autocommit is the authoritative transaction-state check after errors. query_only is a connection policy, not a read-only open substitute. WAL checkpoint I/O and long readers remain costs even when connections are reused.",
+        "reuse": "Existing rusqlite/common counted factory, RuntimeInner ownership, FIFO/read admissions, checkpoint owner, VFS receipts and canonical ACK/protection verifier; no new pool dependency.",
+        "selected": "Diagnostic bounded connection reuse changes only ordinary open/close frequency; compare measured native PK workload before any production decision.",
+        "rejected": [
+          "Weaker synchronous durability",
+          "Wider admission timeout",
+          "Different checkpoint cadence",
+          "Unbounded cache/pool",
+          "Desktop feature activation",
+          "Unverified raw waitmode masking"
+        ],
+        "risks_controls": "Connection transaction/policy contamination, panic and cleanup failure require reset/readback/quarantine and admitted-result preservation. Lifetime moves physical close to owned shutdown and therefore requires the same shared deadline and independent no-orphan receipts. OS root cause remains unproved.",
+        "validation": "VV-CRP-010 through012; original full WP acceptance is unchanged."
+      },
+      "production_authorized": false,
+      "independent_review": {
+        "reviewer": "/root/open_wps",
+        "date": "2026-10-04",
+        "verdict": "PASS",
+        "root_implementation_authorization": "Diagnostic-only implementation approved after root inspection; no production selection",
+        "findings_retained": [
+          "Manual-transaction rollback must not emit false durable ACK",
+          "Quarantined and late-close owners remain tracked; no healthy drain before checked teardown"
+        ],
+        "production_authorized": false
+      }
     }
   },
   "files": [
@@ -1548,6 +1603,64 @@
         "Evidence-grounded minimum remediation and independently stabilized FIFO failure",
         "Final30minute selectedrunning acceptance remains held; planned86work retained"
       ]
+    },
+    {
+      "record_id": "WP-0333-NTFS-FLUSH-CALLEES-20261004-001",
+      "date": "2026-10-04",
+      "status_retained": "IN_PROGRESS",
+      "observed": "Exact PID150452 captured stacks resolve NTFS paging-resource exclusive acquisition and NtfsCommonCleanup/NtfsFsdCleanup for TIDs261404/227028/236224, plus shared paging acquisition/NtfsCopyReadA for TID18228. Exact FileIO/Flush TID240008 begins1791111802719 and matched IRP OperationEnd1791111804792 succeeds NtStatus0 after2072.679ms; exact local executable/PDB resolves winSync, walCheckpoint, sqlite3WalCheckpoint and the AppDatabase maintenance closure on that flush stack.",
+      "limits": "Positive callee evidence supports a bounded connection-lifetime counterfactual; it does not identify the resource holder or prove a kernel/filter/storage root cause.245893 lost events retained; both actual admission failures precede recording. Raw CSwitch waitmode96 is outside the documented0/1 domain and TraceEvent3.2.8/main do not mask it; no packed-bit interpretation accepted.",
+      "evidence": [
+        ".local/proofWP333/wpr_capture_01/decoded_stream_03/symbol_resolution_02/receipt.json",
+        ".local/proofWP333/wpr_capture_01/decoded_stream_03/flush_waits_raw_review.json",
+        ".local/proofWP333/wpr_capture_01/decoded_stream_03/flush_symbols_02/receipt.json",
+        ".local/proofWP333/wpr_capture_01/collector_receipt.json"
+      ]
+    },
+    {
+      "record_id": "WP-0333-REUSE-PROOF-AMENDMENT-20261004-001",
+      "date": "2026-10-04",
+      "status_retained": "IN_PROGRESS",
+      "note": "Diagnostic-only bounded reuse counterpart proposed; independent amendment review required before code. Existing checkpoint policy and all original acceptance/historic proof preserved; no production lifetime selection or downstream86/30minute claim."
+    },
+    {
+      "record_id": "WP-0333-DIAGNOSTIC-REUSE-PK-GREEN-20261004-001",
+      "date": "2026-10-04",
+      "status_retained": "IN_PROGRESS",
+      "production_authorized": false,
+      "note": "Diagnostic-only feature counterpart PK180 actual GREEN:1392 external stdout ACKs independently persisted1392,5291 reads,0 errors; schema61/all69 protected tables and exact fixture INSERT-trigger delta PASS/sourceSHA unchanged. Matched prior nonreuse PK180 remains RED2 writer-admission failures/720ACK/2468reads, same backup/SQL/3writers/3readers/100ms/5s pin; binary/runtime differ by reviewed diagnostic feature implementation, not an OS rootcause proof. Actual reuse1writer/4readers,max1/4,6684 logical returns,5 checked physical closes,0quarantines/closeerrors/remainingowners,joined; maintenance final PASSIVE1309/1309,busy0,joined391ms,drainerrornull,pinned partial/recovery observed. Nine current feature tests GREEN and feature example build passed. Default baseline retained33 passing tests with1 original feature-off test RED; exact repaired feature-off test separately GREEN1 (no false full-suite rerun claim). Prior feature-round REDs retained; production connection lifetime remains unselected/unauthorized and live30minute running-download gate remains open.",
+      "identity": {
+        "executable_sha256": "118088bbd37ed4bf3467c1a195d9a5546af9a0e0d9399f5fd87d29f07f7c3aa0",
+        "source_example_sha256": "25cb0c968c6a813e7d8d070d08ccbd75092c0872ef99843cf04c165527ecb16c",
+        "source_runtime_sha256": "f7f0b7a785093bb44f22a90cbdc40690f7427a63e7bbb065980baf50cd08c4d7",
+        "source_factory_sha256": "fd5bd1638fbb05076853e1f4eb74026e10cef66677c5158ae186b53333e43797",
+        "controller_sha256": "e8599928eca5841debbbbf178304c3b25e7ce0b3389a7844361f7c76bbcb04fc",
+        "verifier_sha256": "049d6a010564f5a18c146d0dd52797c664a0f775c2c485763c285b79d6940d25"
+      },
+      "source_backup_sha256": "a07dc9b6ded8cbf3b2730bc0abb0ada3e1802ef83208780603017c07cf847088",
+      "evidence": {
+        "driver": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_reuse_pk_driver.json",
+        "summary": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_reuse_pk_summary.json",
+        "independent": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_reuse_pk_independent.json",
+        "external_ack": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_reuse_pk_stdout.log",
+        "feature_log": ".local/proofWP333/reuse_validation_03/00_feature_reuse.log",
+        "example_build": ".local/proofWP333/reuse_validation_03/01_feature_example.log",
+        "default33_and_initial_red": ".local/proofWP333/reuse_validation_01/00_default_runtime.log",
+        "default_exact_green": ".local/proofWP333/reuse_validation_02/00_default_feature_off_exact.log",
+        "baseline_pk": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_pk_summary.json"
+      },
+      "remaining": [
+        "Independent current-input diagnostic counterpart acceptance review",
+        "Separate reviewed production lifetime amendment and explicit operator production approval",
+        "Exact installed30minute downloads/read/export/recovery acceptance; all original criteria preserved"
+      ],
+      "independent_acceptance": {
+        "reviewer": "/root/open_wps",
+        "verdict": "PASS",
+        "date": "2026-10-04",
+        "verified": "1392 unique external stdoutACK=canonical;69tables only exactderivedtrigger+1392; partial222/0 to recovery915/915 to final1309/1309;5distinctownedclose receipts",
+        "limit": "Cross-thread native close classification reports xCloseUnknown; no MainDB close-kind claim. Production approval remains absent."
+      }
     }
   ],
   "native_probe_validation_20261004": {

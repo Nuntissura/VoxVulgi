@@ -3,6 +3,10 @@ name = "voxvulgi_engine"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+default = []
+wp0333_connection_reuse_proof = []
+
 [dependencies]
 csv = "1.3.1"
 ffmpeg-sidecar = "2.4.0"

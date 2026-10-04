@@ -43,3 +43,33 @@ Red team: queued writers must not bypass a newly failed owner; partial/busy reco
 Independent canonical counterpart review permits selecting the conservative filename adapter separately from checkpoint policy. Exact scope, primary research, rejected options, hazards and owning/boundary validation are recorded in the JSON phase_authority.production_filename_policy and research_basis.production_filename_policy_2026_10_03. The common factory preserves canonical registry identity and uses I/O-free guarded dunce1.0.5 only for safe short local verbatim-drive paths; every uncertain or unsupported spelling is retained. No new raw-open exception, fixture TLS promotion, maintenance/durability change or live closure is selected. Latest101-write GREEN and earlier48-write/two-timeout RED both remain evidence; their variance is unexplained. Independent amendment review precedes implementation.
 
 </topic>
+
+
+<topic id="diagnostic-bounded-connection-reuse" status="proposed" wp="WP-0333" updated_at="2026-10-04">
+
+Diagnostic counterpart only: canonical amendment `phase_authority.diagnostic_connection_reuse_counterpart_20261004`, stable ID WP-0333-AMD-REUSE-PROOF-20261004-001. Independent review precedes code. Off-by-default `wp0333_connection_reuse_proof` is limited to guarded disposable example/tests; desktop never enables it. Reuse exactly one counted writer/up to four counted read-only owners with unchanged FIFO/admission/durability/checkpoint safeguards. Restore manual-transaction/autocommit/query_only/FK/busy policy and quarantine panic/reset failures without losing admitted outcomes. Healthy lease return differs from physical close; owned checked close remains inside shared10second shutdown.
+
+Exact PID150452 captured stacks resolve NTFS paging-resource exclusive acquisition and NtfsCommonCleanup/NtfsFsdCleanup for TIDs261404/227028/236224, plus shared paging acquisition/NtfsCopyReadA for TID18228. Exact FileIO/Flush TID240008 begins1791111802719 and matched IRP OperationEnd1791111804792 succeeds NtStatus0 after2072.679ms; exact local executable/PDB resolves winSync, walCheckpoint, sqlite3WalCheckpoint and the AppDatabase maintenance closure on that flush stack. Positive callee evidence supports a bounded connection-lifetime counterfactual; it does not identify the resource holder or prove a kernel/filter/storage root cause.245893 lost events retained; both actual admission failures precede recording. Raw CSwitch waitmode96 is outside the documented0/1 domain and TraceEvent3.2.8/main do not mask it; no packed-bit interpretation accepted.
+
+Research: SQLite close/get_autocommit/query_only/WAL sources are recorded in the canonical amendment. Reuse existing rusqlite/common factory; reject wider bounds, weaker sync, cadence changes and unbounded caches. Red team: retained transaction/session state, leaked statement owners, panic/reset failure and delayed shutdown close require readback/quarantine/counting/ACK and no-orphan tests.
+
+Acceptance: actual component reuse/policy reset/quarantine/shutdown plus matched PK180s3writer/3reader workload, independently reconciled exact stdout ACKs and69 protected tables/fixture trigger/sourceSHA. Production reuse remains unselected until independent current-input GREEN, separate reviewed production authority and operator approval. All original30minute/download/export/active-shutdown criteria and historic REDs remain; no closure claim.
+
+Evidence: `.local/proofWP333/wpr_capture_01/decoded_stream_03/symbol_resolution_02/receipt.json`, `.local/proofWP333/wpr_capture_01/decoded_stream_03/flush_waits_raw_review.json`, `.local/proofWP333/wpr_capture_01/decoded_stream_03/flush_symbols_02/receipt.json`, `.local/proofWP333/wpr_capture_01/collector_receipt.json`.
+
+</topic>
+
+
+<topic id="diagnostic-reuse-pk180-result" status="IN_PROGRESS" wp="WP-0333" updated_at="2026-10-04">
+
+Diagnostic-only feature counterpart PK180 actual GREEN:1392 external stdout ACKs independently persisted1392,5291 reads,0 errors; schema61/all69 protected tables and exact fixture INSERT-trigger delta PASS/sourceSHA unchanged. Matched prior nonreuse PK180 remains RED2 writer-admission failures/720ACK/2468reads, same backup/SQL/3writers/3readers/100ms/5s pin; binary/runtime differ by reviewed diagnostic feature implementation, not an OS rootcause proof. Actual reuse1writer/4readers,max1/4,6684 logical returns,5 checked physical closes,0quarantines/closeerrors/remainingowners,joined; maintenance final PASSIVE1309/1309,busy0,joined391ms,drainerrornull,pinned partial/recovery observed. Nine current feature tests GREEN and feature example build passed. Default baseline retained33 passing tests with1 original feature-off test RED; exact repaired feature-off test separately GREEN1 (no false full-suite rerun claim). Prior feature-round REDs retained; production connection lifetime remains unselected/unauthorized and live30minute running-download gate remains open.
+
+Candidate EXE SHA `118088bbd37ed4bf3467c1a195d9a5546af9a0e0d9399f5fd87d29f07f7c3aa0`; runtime SHA `f7f0b7a785093bb44f22a90cbdc40690f7427a63e7bbb065980baf50cd08c4d7`; source backup SHA `a07dc9b6ded8cbf3b2730bc0abb0ada3e1802ef83208780603017c07cf847088`.
+
+Evidence: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_reuse_pk_driver.json`, `product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_reuse_pk_summary.json`, `product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_reuse_pk_independent.json`, `product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_reuse_pk_stdout.log`, `.local/proofWP333/reuse_validation_03/00_feature_reuse.log`, `.local/proofWP333/reuse_validation_03/01_feature_example.log`, `.local/proofWP333/reuse_validation_01/00_default_runtime.log`, `.local/proofWP333/reuse_validation_02/00_default_feature_off_exact.log`, `product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_pk_summary.json`.
+
+Remaining: Independent current-input diagnostic counterpart acceptance review; Separate reviewed production lifetime amendment and explicit operator production approval; Exact installed30minute downloads/read/export/recovery acceptance; all original criteria preserved.
+
+Independent /root/open_wps acceptance PASS:1392 unique external ACKs equal canonical,69-table preservation/exact dirty-trigger+1392, partial222/0 -> recovery915/915 -> final1309/1309 and5 distinct owned close receipts. Cross-thread native close kind is `xCloseUnknown`; no MainDB close-kind claim. Production authorization remains absent.
+
+</topic>
