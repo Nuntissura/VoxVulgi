@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 11
+generation: 14
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -33,3 +33,6 @@ steps:
 - {id: GP-017, role: any, at: before_round, do: verify owning watcher test preserves failed lifecycle diagnostics, check: {type: file, path: governance/scripts/test_vv_watch.ps1, contains: owning_lifecycle_diagnostic.json}, source: 'failure: deleted test output prevented exact lifecycle diagnosis', state: active}
 - {id: GP-018, role: any, at: before_round, do: verify native receipt parent via existing receipt file before dispatch, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0324/20261004/watcher_io_dispatch_recovered.json, exists: true}, source: 'correction: file check rejects directory target; native parent is present', state: active}
 - {id: GP-019, role: any, at: before_round, do: require native test controller fails closed on gameplan exit code, check: {type: file, path: .local/vv_verify_watch_native.py, contains: assert gate.returncode==0}, source: 'mistake: PowerShell external exit failure did not prevent native retry', state: active}
+- {id: GP-020, role: any, at: before_round, do: require nonprivileged observer mode before associated Open retry, check: {type: confirm}, source: 'failure: Win32_ProcessStartTrace HRESULT0x80041003 AccessDenied before action', state: active}
+- {id: GP-021, role: any, at: before_round, do: verify PowerShell observer Boolean literals use dollar prefix, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261004/checkpoint_shutdown_batch_connection_owner/observe_open_processes.ps1, not_contains: =false}, source: 'failure: bare false invoked as command after observer ready', state: active}
+- {id: GP-022, role: any, at: before_round, do: confirm cmd.rs restored from verified clean HEAD with UTF8 atomic write, check: {type: confirm}, source: 'failure: cp1252 encode error truncated cmd.rs before write; no build ran', state: active}

@@ -1911,6 +1911,8 @@ pub struct JobTracksRuntimeSnapshot {
     pub tracks: Vec<JobTrackRuntimeRow>,
     pub unclassified: JobTrackStatusTotals,
     pub youtube_gate: YoutubeSharedGateSnapshot,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_file_identity_diagnostics: Option<tools::ProviderFileIdentityDiagnostics>,
 }
 
 fn canonical_import_path(path: &str) -> Result<String> {
@@ -21657,6 +21659,7 @@ pub fn get_job_tracks_runtime_snapshot(paths: &AppPaths) -> Result<JobTracksRunt
         tracks,
         unclassified,
         youtube_gate,
+        provider_file_identity_diagnostics: Some(tools::provider_file_identity_diagnostics(paths)),
     })
 }
 
@@ -35400,6 +35403,10 @@ INSERT INTO library_item (
         );
 
         let snapshot = get_job_tracks_runtime_snapshot(&paths).expect("runtime snapshot");
+        assert_eq!(snapshot.provider_file_identity_diagnostics.as_ref(),
+            Some(&tools::provider_file_identity_diagnostics(&paths)),
+            "snapshot must expose the memory counters after its existing gate projection");
+        assert!(serde_json::to_value(&snapshot).unwrap()["provider_file_identity_diagnostics"].is_object());
         assert_eq!(snapshot.tracks.len(), JobTrack::ALL.len());
         let single = snapshot
             .tracks

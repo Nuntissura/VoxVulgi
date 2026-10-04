@@ -138,3 +138,20 @@ Research: [Microsoft GetProcessIoCounters](https://learn.microsoft.com/en-us/win
 Run the watcher unpackaged through the verified quiet native launcher: MSIX tool processes can resolve operator paths to a virtualized old artifact. Independently bind installed physical hash/creation before the observer; the watcher does not claim a physical SHA from its process pathname. Root-selected output directory remains configurable; no30minute run or runtime acceptance is recorded by this amendment.
 
 </topic>
+
+<topic id="provider-cache-recompute-observation-20261004" status="NEEDS_VALIDATION" wp="WP-0324" updated_at="2026-10-04">
+
+Source inspection: `tools.rs::provider_file_identity` has two cache-hit exits around the single-flight lock; only `compute_provider_file_identity` performs full-byte identity recomputation. Polling uses `fresh=false`, while the execution gate intentionally uses `fresh=true`. Root I/O bytes alone cannot distinguish these computations from database/media reads. The selected additive diagnostic reuses the existing in-memory provider-status/verification pattern, existing stamp/TTL cache and existing serialized install status; no new endpoint or readiness/trust predicate is introduced.
+
+- WP-0324-CACHE-001: Count one polling or forced-fresh request per actual identity call, one cache hit per returned cached identity (including the second lookup after another flight), and one recomputation start/completion around the actual compute; classify misses under the single-flight lock as cold/input_changed/ttl_expired or forced_fresh.
+- WP-0324-CACHE-002: Keep per-root counters in at most16 in-memory entries with generation identity on eviction/recreation; keep at most16 recent completed recomputation records per entry. Serialize no root/path, secrets, stamps, file hashes or provider inputs. Report counter generations so eviction cannot fabricate continuity.
+- WP-0324-CACHE-003: Diagnostics acquire no filesystem/network/database work and do not change cache keys, stamping, TTL, fresh verification, single-flight policy, live flags or readiness. Extend the existing cache reuse/change/fresh test with exact counter/reason checks; independently test bounded state retention and serialize safety.
+- WP-0324-CACHE-004: Final native30minute observer must bind exact current installed PID/creation/hash and canonical YouTube jobs, read-byte accounting and actual gate-command latency, and recorded cache generations/recompute reasons. Allowed cold/10minute/fresh-execution computations are not per-poll regressions; no measured runtime PASS is recorded here.
+
+Research basis remains the packet's existing cache/headless A/B investigation and inspected current cache/attestation implementation, plus the primary Microsoft process-I/O API research above. Root owns tests/builds/launches; original acceptance and NEEDS_VALIDATION status remain unchanged.
+
+Counters are scoped to the current root generation, not process-lifetime totals. A completed recomputation retains `started_generation`; if more than 16 roots evict its diagnostic record during computation, the differing generation explicitly prevents treating the new counters as a continuous interval. `elapsed_ms` covers computation plus the existing post-compute input-stamp validation, not physical storage I/O alone.
+
+- WP-0324-CACHE-005: Expose the memory-only counters as additive optional `provider_file_identity_diagnostics` on the existing canonical `JobTracksRuntimeSnapshot` / `/agent/jobs_tracks` surface, populated after the existing YouTube gate projection. Do not add an identity/provider recomputation, database query, endpoint or readiness predicate. Existing frontend consumers may ignore the field; counter types retain snapshot equality compatibility.
+
+</topic>

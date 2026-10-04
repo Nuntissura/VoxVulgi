@@ -865,6 +865,7 @@ pub fn ensure_instagram_profile_provider(paths: &AppPaths) -> Result<std::path::
 
 #[derive(Debug, Clone, Serialize)]
 pub struct YoutubePoProviderInstallStatus {
+    pub file_identity_diagnostics: ProviderFileIdentityDiagnostics,
     pub installed: bool,
     pub provider_version: String,
     pub node_version: Option<String>,
@@ -2616,6 +2617,81 @@ fn provider_file_identity_cache() -> &'static ProviderFileIdentityCache {
     CACHE.get_or_init(Default::default)
 }
 
+/// Memory-only counters since this root's diagnostic generation was created.
+/// Eviction resets counters; completion records retain their start generation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ProviderFileIdentityDiagnostics {
+    pub generation: u64,
+    pub polling_requests: u64,
+    pub forced_fresh_requests: u64,
+    pub cache_hits: u64,
+    pub recomputations_started: u64,
+    pub recomputations_completed: u64,
+    pub recent_recomputations: Vec<ProviderFileIdentityRecomputation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProviderFileIdentityRecomputation {
+    pub reason: String,
+    pub started_generation: u64,
+    pub started_at_ms: i64,
+    pub finished_at_ms: i64,
+    /// Full recomputation plus post-compute input validation, using a monotonic clock.
+    pub elapsed_ms: u64,
+    pub input_stamps_stable: bool,
+}
+
+#[derive(Default)]
+struct ProviderFileIdentityDiagnosticState {
+    sequence: u64,
+    generation: u64,
+    roots: std::collections::HashMap<PathBuf, (u64, ProviderFileIdentityDiagnostics)>,
+}
+
+fn provider_file_identity_diagnostic_state() -> &'static std::sync::Mutex<ProviderFileIdentityDiagnosticState> {
+    static STATE: std::sync::OnceLock<std::sync::Mutex<ProviderFileIdentityDiagnosticState>> = std::sync::OnceLock::new();
+    STATE.get_or_init(Default::default)
+}
+
+impl ProviderFileIdentityDiagnosticState {
+    fn update(&mut self, key: &Path, update: impl FnOnce(&mut ProviderFileIdentityDiagnostics)) -> u64 {
+        self.sequence = self.sequence.saturating_add(1);
+        let sequence = self.sequence;
+        if !self.roots.contains_key(key) {
+            if self.roots.len() >= 16 {
+                if let Some(oldest) = self.roots.iter().min_by_key(|(_, (used, _))| *used).map(|(key, _)| key.clone()) {
+                    self.roots.remove(&oldest);
+                }
+            }
+            self.generation = self.generation.saturating_add(1);
+            let generation = self.generation;
+            self.roots.insert(key.to_path_buf(), (sequence, ProviderFileIdentityDiagnostics { generation, ..Default::default() }));
+        }
+        let (used, diagnostics) = self.roots.get_mut(key).expect("diagnostic root inserted");
+        *used = sequence;
+        update(diagnostics);
+        diagnostics.generation
+    }
+}
+
+fn update_provider_file_identity_diagnostics(key: &Path, update: impl FnOnce(&mut ProviderFileIdentityDiagnostics)) -> u64 {
+    provider_file_identity_diagnostic_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner).update(key, update)
+}
+
+pub fn provider_file_identity_diagnostics(paths: &AppPaths) -> ProviderFileIdentityDiagnostics {
+    provider_file_identity_diagnostic_state().lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        .roots.get(&paths.youtube_po_provider_dir()).map(|(_, diagnostics)| diagnostics.clone()).unwrap_or_default()
+}
+
+fn provider_file_identity_miss_reason(key: &Path, stamps: &[ProviderFileStamp]) -> &'static str {
+    let cache = provider_file_identity_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    match cache.get(key) {
+        None => "cold",
+        Some((cached, _, _)) if cached.as_slice() != stamps => "input_changed",
+        Some(_) => "ttl_expired",
+    }
+}
+
 /// Serializes recomputation so concurrent pollers do not hash the same files in parallel.
 fn provider_file_identity_flight() -> &'static std::sync::Mutex<()> {
     static FLIGHT: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -2703,9 +2779,14 @@ fn cached_provider_file_identity(
 
 fn provider_file_identity(paths: &AppPaths, fresh: bool) -> ProviderFileIdentity {
     let key = paths.youtube_po_provider_dir();
+    update_provider_file_identity_diagnostics(&key, |diagnostics| {
+        if fresh { diagnostics.forced_fresh_requests = diagnostics.forced_fresh_requests.saturating_add(1); }
+        else { diagnostics.polling_requests = diagnostics.polling_requests.saturating_add(1); }
+    });
     let stamps = provider_file_identity_stamps(paths);
     if !fresh {
         if let Some(identity) = cached_provider_file_identity(&key, &stamps) {
+            update_provider_file_identity_diagnostics(&key, |diagnostics| diagnostics.cache_hits = diagnostics.cache_hits.saturating_add(1));
             return identity;
         }
     }
@@ -2715,19 +2796,34 @@ fn provider_file_identity(paths: &AppPaths, fresh: bool) -> ProviderFileIdentity
     if !fresh {
         // Another poller may have finished the same recomputation while this one waited.
         if let Some(identity) = cached_provider_file_identity(&key, &stamps) {
+            update_provider_file_identity_diagnostics(&key, |diagnostics| diagnostics.cache_hits = diagnostics.cache_hits.saturating_add(1));
             return identity;
         }
     }
+    let reason = if fresh { "forced_fresh" } else { provider_file_identity_miss_reason(&key, &stamps) };
+    let started_at_ms = now_ms();
+    let started = std::time::Instant::now();
+    let started_generation = update_provider_file_identity_diagnostics(&key, |diagnostics| diagnostics.recomputations_started = diagnostics.recomputations_started.saturating_add(1));
     let identity = compute_provider_file_identity(paths);
     let mut cache = provider_file_identity_cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     // Only cache a result whose inputs did not change while they were being hashed.
-    if provider_file_identity_stamps(paths) == stamps {
-        cache.insert(key, (stamps, std::time::Instant::now(), identity.clone()));
+    let input_stamps_stable = provider_file_identity_stamps(paths) == stamps;
+    if input_stamps_stable {
+        cache.insert(key.clone(), (stamps, std::time::Instant::now(), identity.clone()));
     } else {
         cache.remove(&key);
     }
+    drop(cache);
+    update_provider_file_identity_diagnostics(&key, |diagnostics| {
+        diagnostics.recomputations_completed = diagnostics.recomputations_completed.saturating_add(1);
+        if diagnostics.recent_recomputations.len() == 16 { diagnostics.recent_recomputations.remove(0); }
+        diagnostics.recent_recomputations.push(ProviderFileIdentityRecomputation {
+            reason: reason.to_string(), started_generation, started_at_ms, finished_at_ms: now_ms(),
+            elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64, input_stamps_stable,
+        });
+    });
     identity
 }
 
@@ -2860,6 +2956,7 @@ fn youtube_po_provider_install_status_with(
     }
     .to_string();
     YoutubePoProviderInstallStatus {
+        file_identity_diagnostics: provider_file_identity_diagnostics(paths),
         installed,
         provider_version: pin.version.clone(),
         node_version,
@@ -14069,6 +14166,9 @@ mod tests {
             second.server_entrypoint_sha256_hex
         );
         assert!(first.server_entrypoint_sha256_hex.is_some());
+        let diagnostics = provider_file_identity_diagnostics(&paths);
+        assert_eq!((diagnostics.polling_requests, diagnostics.cache_hits, diagnostics.recomputations_started, diagnostics.recomputations_completed), (2, 1, 1, 1));
+        assert_eq!(diagnostics.recent_recomputations[0].reason, "cold");
 
         std::thread::sleep(std::time::Duration::from_millis(20));
         std::fs::write(&entrypoint, b"console.log('changed');").unwrap();
@@ -14092,11 +14192,59 @@ mod tests {
             verified_at().expect("fresh result cached") > fourth_at,
             "the execution-gate variant must always re-hash"
         );
-        provider_file_identity_cache()
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&key);
+        // Expire the real cache without waiting ten minutes.
+        provider_file_identity_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(&key).unwrap().1 = std::time::Instant::now() - PROVIDER_FILE_IDENTITY_REVERIFY_INTERVAL - std::time::Duration::from_secs(1);
+        let _ = provider_file_identity(&paths, false);
+        let diagnostics = provider_file_identity_diagnostics(&paths);
+        assert_eq!((diagnostics.polling_requests, diagnostics.forced_fresh_requests, diagnostics.cache_hits, diagnostics.recomputations_started, diagnostics.recomputations_completed), (5, 1, 1, 5, 5));
+        assert_eq!(diagnostics.recent_recomputations.iter().map(|record| record.reason.as_str()).collect::<Vec<_>>(),
+            ["cold", "input_changed", "input_changed", "forced_fresh", "ttl_expired"]);
+        assert!(diagnostics.recent_recomputations.iter().all(|record| record.input_stamps_stable && record.started_generation == diagnostics.generation));
+        for _ in 0..17 { let _ = provider_file_identity(&paths, true); }
+        assert_eq!(provider_file_identity_diagnostics(&paths).recent_recomputations.len(), 16);
+        provider_file_identity_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&key);
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn wp0324_provider_file_identity_concurrent_pollers_count_one_recompute() {
+        let _guard = PROVIDER_INTEGRITY_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let base = std::env::temp_dir().join(format!("voxvulgi_wp0324_identity_flight_{}", uuid::Uuid::new_v4()));
+        let paths = AppPaths::new(base.clone());
+        let entrypoint = paths.youtube_po_provider_entrypoint();
+        std::fs::create_dir_all(entrypoint.parent().unwrap()).unwrap();
+        std::fs::write(&entrypoint, b"console.log('concurrent');").unwrap();
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+        let handles = (0..8).map(|_| {
+            let paths = paths.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || { barrier.wait(); provider_file_identity(&paths, false).server_entrypoint_sha256_hex })
+        }).collect::<Vec<_>>();
+        let hashes = handles.into_iter().map(|handle| handle.join().unwrap()).collect::<Vec<_>>();
+        assert!(hashes[0].is_some() && hashes.iter().all(|hash| hash == &hashes[0]));
+        let diagnostics = provider_file_identity_diagnostics(&paths);
+        assert_eq!((diagnostics.polling_requests, diagnostics.cache_hits, diagnostics.recomputations_started, diagnostics.recomputations_completed), (8, 7, 1, 1));
+        assert_eq!(diagnostics.recent_recomputations[0].reason, "cold");
+        provider_file_identity_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner).remove(&paths.youtube_po_provider_dir());
+        let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn wp0324_provider_file_identity_diagnostics_bound_roots_and_redact_inputs() {
+        let mut state = ProviderFileIdentityDiagnosticState::default();
+        let private_key = PathBuf::from("private_provider_root_secret");
+        let first = state.update(&private_key, |diagnostics| diagnostics.polling_requests += 1);
+        for index in 0..16 {
+            state.update(&PathBuf::from(format!("root_{index}")), |_| {});
+        }
+        assert_eq!(state.roots.len(), 16);
+        assert!(!state.roots.contains_key(&private_key));
+        let next = state.update(&private_key, |_| {});
+        assert!(next > first);
+        let serialized = serde_json::to_string(&state.roots.get(&private_key).unwrap().1).unwrap();
+        assert!(!serialized.contains("private_provider_root_secret"));
+        assert_eq!(state.roots.len(), 16);
     }
 
     #[test]

@@ -21,3 +21,14 @@ Red team: concurrent inference could use legacy venv while repair changes it; qu
 Validation: root batches engine tools tests with other Rust changes, then packaged hidden boundary and real output tests. Full-stack import success does not substitute ASR/translation/dub outputs. Keep IN_PROGRESS until all gates; preserve older packet requirements.
 
 </topic>
+
+
+<topic id="bridge-workflow-refinement-20261004" status="active" wp="WP-0329" updated_at="2026-10-04">
+
+Operator-approved intermediate activation and full workflow execution now proceed autonomously; ONE final ISO acceptance stays unchanged. Relevant original anchors remain PRODUCT_SPEC offline/localization toolchain, TECHNICAL_DESIGN managed runtime, WP0262/WP0239 and this packet's real output acceptance. Existing qualified b9 runtime is reused; imports and model hashes alone do not prove inference.
+
+Current gap is product control: no bridge import/localization/reference producer, despite existing canonical engine/UI handlers. Add the five narrowly described commands in the packet's dated bridge authority topic, preserving persisted operation receipts, Safe Mode, canonical identities and global pause. Reject calling the whole offline proof helper inside a live bridge because it changes environment/concurrency and owns a separate runner. No parallel queue resume or unrelated work admission is introduced.
+
+Microtasks: add exact catalog/handlers and owning negative/partial-receipt checks; root one bundled validation/build; use the existing installer transaction to activate current qualified generation; root actual product import/captions/translate/reference/dub/export; independent canonical/output review; retain exact offline ISO acceptance separately. Red team: stale/partial import IDs, hidden queued work after runner failure, replay duplication, queued command after Safe Mode flip and mistaken import-only success. Controls and proof remain the original acceptance floor.
+
+</topic>

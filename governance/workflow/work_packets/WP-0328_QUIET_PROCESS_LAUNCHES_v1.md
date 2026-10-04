@@ -4,11 +4,11 @@ file_kind: work_packet
 updated_at: 2026-10-03
 ---
 
-<topic id="contract" wp="WP-0328" status="IN_PROGRESS">
+<topic id="contract" wp="WP-0328" status="DONE">
 
-# WP-0328 — Quiet process launches
+# WP-0328 â€” Quiet process launches
 
-Status: IN_PROGRESS. Board: ../TASK_BOARD.md. Refinement: WP-0328_QUIET_PROCESS_LAUNCHES_v1_REFINEMENT.md.
+Status: DONE. Board: ../TASK_BOARD.md. Refinement: WP-0328_QUIET_PROCESS_LAUNCHES_v1_REFINEMENT.md.
 
 Scope: shared Windows file opening, first-party background console launchers, generated FFmpeg/Git helper children, and tooling wheelhouse subprocesses. Preserve associated GUI applications, argv, process lifecycle ownership, cross-platform behavior and user data. No version/changelog changes.
 
@@ -17,6 +17,16 @@ Acceptance: no intermediate terminal for file/folder opening, probes, media conv
 Verification: root batches engine/desktop focused tests and one canonical-cache desktop build after all parallel inputs stabilize. Retain version 0.1.205. Record summary under build_target/tool_artifacts/wp_runs/WP-0328. Packet remains IN_PROGRESS until runtime proof; source audit and compilation alone do not prove operator opening behavior.
 
 Microtasks: replace omitted quiet wrappers; cover nested Python subprocesses; source-audit intentional exceptions; run bundled tests; verify packaged associated-file opening and background console absence; synchronize board/status with proof.
+
+</topic>
+
+<topic id="installed-positive-opening-20261004" status="DONE" wp="WP-0328" updated_at="2026-10-04">
+
+Installed source 762180ae52ff42746ea38c340fbb127b041369f7, version 0.1.205, native executable SHA256 6ca8c144164446adce2177efd2c07fffb5a8b81a1a3c9e2434408628e0b8828c. Silent Update preserved all 14 protected tables; independent closed backup reconciliation matched all 69 tables. Exact canonical item e794ce4f-eb14-49d9-a0da-126129c6e380, job 997c312e-40b5-4951-8727-b3a3214e2550 attempt 2, source https://www.youtube.com/watch?v=3Q61HdKKJeo was activated through its declared Open action at 1791131459762.
+
+Evidence directory: product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261004/checkpoint_shutdown_batch_connection_owner/associated_open_02. Native VLC PID228564 was independently observed as a new child of owned VoxVulgi PID224440 with the exact canonical filename argument. An initial process-title read selected its `VLC media player updates` dialog; later exact-PID window inventory and quiet PrintWindow capture prove the distinct visible main window titled `____3Q61HdKKJeo.mkv - VLC media player`, rendered video and playback03:03. The update dialog coexists; the pre-existing VLC PID253760 remains untouched. Continuous WinEvent/10ms window enumeration observed no new visible console during its 12-second observation; this bounded observation is not a claim about every transient process. The separate process observer failed after readiness due bare Boolean literals; its failed receipts are preserved and the helper is corrected. Attempt01 failed before activation because Windows denied WMI process-event subscription.
+
+Final focused proof independently opened: `WP-0328/20261004/owning_quiet_tests/test_0.log` exact GetConsoleWindow/argv1PASS and `test_1.log` literal missing-path1PASS on unchanged source; all unchanged packet acceptance passes. StatusDONE. The actual associated-video GUI and independent bounded window observation now pass; do not infer every transient process absent from the failed process observer. Final evidence: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0328/20261004/summary.md` and `evidence.json`. This status is updated before proceeding to WP-0329; the unresolved positive case remains in scope. No player was stopped or dialog dismissed, no unrelated queue resumed, and no version/changelog changed.
 
 </topic>
 

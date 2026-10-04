@@ -451,20 +451,30 @@ mod tests {
         #[link(name = "kernel32")]
         extern "system" { fn GetConsoleWindow() -> *mut std::ffi::c_void; }
         let console = unsafe { GetConsoleWindow() };
-        std::fs::write(path, if console.is_null() { "no-console" } else { "console-attached" }).unwrap();
+        let args = std::env::args_os().skip_while(|arg| arg != "--").skip(1)
+            .map(|arg| arg.to_string_lossy().into_owned()).collect::<Vec<_>>();
+        let receipt = serde_json::json!({
+            "console": if console.is_null() { "no-console" } else { "console-attached" },
+            "args": args,
+        });
+        std::fs::write(path, serde_json::to_vec(&receipt).unwrap()).unwrap();
     }
 
     #[test]
     fn quiet_command_starts_console_child_without_console_window() {
         let dir = tempfile::tempdir().unwrap();
-        let result = dir.path().join("console_probe.txt");
+        let result = dir.path().join("console_probe.json");
+        let expected_args = ["literal spaces retained", "ampersand&literal", "%PATH%", "Unicode_é_日本語", "embedded\"quote", "trailing\\"];
         let status = command(std::env::current_exe().unwrap())
-            .args(["--exact", "cmd::tests::quiet_command_console_probe_helper"])
+            .args(["--exact", "cmd::tests::quiet_command_console_probe_helper", "--"])
+            .args(expected_args)
             .env("VOXVULGI_QUIET_CONSOLE_PROBE", &result)
             .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
             .status().unwrap();
         assert!(status.success());
-        assert_eq!(std::fs::read_to_string(result).unwrap(), "no-console");
+        let receipt: serde_json::Value = serde_json::from_slice(&std::fs::read(result).unwrap()).unwrap();
+        assert_eq!(receipt["console"], "no-console");
+        assert_eq!(receipt["args"], serde_json::json!(expected_args), "quiet spawning must preserve literal argv");
     }
 
     fn wait_for_terminated(child: &mut std::process::Child) {

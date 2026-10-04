@@ -831,6 +831,197 @@
         },
         "additionalProperties": false
       }
+    },
+    {
+      "name": "media.import_local",
+      "description": "Queue an exact local media path into the localization workspace; preserves queue pause.",
+      "read_only": false,
+      "effect": "reversible_state_change",
+      "input": {
+        "media_path": "exact canonical identifier/path"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "media_path",
+          "operation_id"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string"
+          },
+          "command": {
+            "const": "media.import_local"
+          },
+          "media_path": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "localization.inspect",
+      "description": "Read canonical item, subtitle tracks and generated speaker-reference candidates.",
+      "read_only": true,
+      "effect": "read_only",
+      "input": {
+        "item_id": "exact canonical identifier/path"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "item_id"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string"
+          },
+          "command": {
+            "const": "localization.inspect"
+          },
+          "item_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "localization.run",
+      "description": "Start or continue existing staged Demucs voice-preserving dub and export for one exact item.",
+      "read_only": false,
+      "effect": "reversible_state_change",
+      "input": {
+        "item_id": "exact canonical identifier/path"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "item_id",
+          "operation_id"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string"
+          },
+          "command": {
+            "const": "localization.run"
+          },
+          "item_id": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "asr_lang": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "localization.references.generate",
+      "description": "Generate existing missing speaker reference candidates from an exact item/track.",
+      "read_only": false,
+      "effect": "reversible_state_change",
+      "input": {
+        "item_id": "exact canonical identifier/path"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "item_id",
+          "operation_id"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string"
+          },
+          "command": {
+            "const": "localization.references.generate"
+          },
+          "item_id": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "track_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "localization.references.apply",
+      "description": "Apply the existing generated candidate for one exact item speaker.",
+      "read_only": false,
+      "effect": "reversible_state_change",
+      "input": {
+        "item_id": "exact canonical identifier/path"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "item_id",
+          "operation_id",
+          "speaker_key"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string"
+          },
+          "command": {
+            "const": "localization.references.apply"
+          },
+          "item_id": {
+            "type": "string"
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "speaker_key": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
     }
   ],
   "endpoints": [
@@ -968,6 +1159,10 @@
     {
       "title": "YouTube translated subtitles and sign-in",
       "body": "YouTube automatic translations receive a 60-second wait before each subtitle request because immediate requests can return HTTP 429. Native/manual captions do not get this additional delay. Your selected browser sign-in remains in use after errors. After verifying that the failure cause is repaired, youtube.return_to_baseline clears the current download hold without deleting evidence or changing saved pacing."
+    },
+    {
+      "title": "Localization through the agent bridge",
+      "body": "Use media.import_local with an exact local media_path, then poll its operation receipt and canonical import job. Inspect the resulting item with localization.inspect. localization.run starts or continues the existing staged Demucs voice-preserving dub/export pipeline for that item; it may pause for speaker references. Use localization.references.generate and inspect the generated candidates, then apply one exact item_id/speaker_key with localization.references.apply before continuing the run. Mutations require the bridge token, stable actor_id and unique operation_id, and are refused in Safe Mode. Admission acknowledges queued canonical work, not completed inference. held, queue_error and runner_start_error are explicit; global queue pause and unrelated queued jobs remain unchanged. Resume work only through a separately authorized queue action. Read canonical jobs and inspect actual captions, translated tracks, speaker references, mixed audio, MKV/subtitles and export ZIP before claiming success."
     }
   ]
 }

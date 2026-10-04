@@ -182,8 +182,63 @@ fn reopen_receipt(original_id: &str, row: jobs::JobRow) -> Value {
     })
 }
 
+fn require_localization_mutation_ready() -> Result<(), String> {
+    let safe_mode = AGENT_APP_HANDLE.get().is_none_or(|app| app.try_state::<AppState>().is_none_or(|state| state.safe_mode_enabled.load(Ordering::SeqCst)));
+    if safe_mode { return Err("Safe Mode blocks localization mutations".into()); }
+    Ok(())
+}
+
+fn localization_dispatch_receipt(paths: &AppPaths, admission: Value) -> Value {
+    // Admission is already durable; an unavailable runner must retain its original IDs.
+    let runner_error = ensure_explicit_headless_runner(paths).err();
+    let queue = jobs::get_queue_control(paths).map_err(|e|e.to_string());
+    let safe_mode = AGENT_APP_HANDLE.get().is_none_or(|app| app.try_state::<AppState>().is_none_or(|state| state.safe_mode_enabled.load(Ordering::SeqCst)));
+    let held = safe_mode || runner_error.is_some() || queue.as_ref().map_or(true, |q|q.paused);
+    let queue_error = queue.as_ref().err().cloned();
+    json!({"admission":admission,"held":held,"safe_mode":safe_mode,"runner_start_error":runner_error,"queue_error":queue_error,"queue":queue.ok(),"completion":"queued canonical work; inspect jobs; global pause is preserved"})
+}
+
 fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, String> {
     match command {
+        "media.import_local" => {
+            require_localization_mutation_ready()?;
+            let path = request["media_path"].as_str().ok_or("media_path required")?;
+            let row = jobs::enqueue_import_local(paths, path.to_string(), true, false).map_err(|e|e.to_string())?;
+            Ok(localization_dispatch_receipt(paths, json!({"job":safe_job(row)})))
+        }
+        "localization.inspect" => {
+            let id = request["item_id"].as_str().ok_or("item_id required")?;
+            let item = library::get_item_by_id(paths, id).map_err(|e|e.to_string())?;
+            let tracks = subtitle_tracks::list_tracks(paths, id).map_err(|e|e.to_string())?;
+            let references = voice_reference_candidates::load_reference_candidates(paths, id, None).map_err(|e|e.to_string())?;
+            Ok(redact_diagnostics_value(json!({"item":item,"tracks":tracks,"reference_candidates":references})))
+        }
+        "localization.run" => {
+            require_localization_mutation_ready()?;
+            let run = jobs::enqueue_localization_run_v1(paths, jobs::LocalizationRunRequest {
+                item_id:request["item_id"].as_str().ok_or("item_id required")?.to_string(),
+                asr_lang:request["asr_lang"].as_str().map(str::to_string),
+                separation_backend:Some("demucs".into()), output_mode:Some("dub".into()),
+                queue_export_pack:true, queue_qc:true, speaker_count:jobs::DiarizationSpeakerCountRequest::default(),
+            }).map_err(|e|e.to_string())?;
+            let admission = serde_json::to_value(run).map_err(|e|e.to_string())?;
+            Ok(localization_dispatch_receipt(paths, redact_diagnostics_value(admission)))
+        }
+        "localization.references.generate" => {
+            require_localization_mutation_ready()?;
+            let report = voice_reference_candidates::generate_reference_candidates(paths, voice_reference_candidates::VoiceReferenceCandidateGenerationRequest {
+                item_id:request["item_id"].as_str().ok_or("item_id required")?.to_string(),
+                track_id:request["track_id"].as_str().map(str::to_string), speaker_key:None, missing_only:true,
+            }).map_err(|e|e.to_string())?;
+            Ok(redact_diagnostics_value(serde_json::to_value(report).map_err(|e|e.to_string())?))
+        }
+        "localization.references.apply" => {
+            require_localization_mutation_ready()?;
+            let setting = voice_reference_candidates::apply_reference_candidate(paths,
+                request["item_id"].as_str().ok_or("item_id required")?,
+                request["speaker_key"].as_str().ok_or("speaker_key required")?, "replace").map_err(|e|e.to_string())?;
+            Ok(redact_diagnostics_value(serde_json::to_value(setting).map_err(|e|e.to_string())?))
+        }
         "database.runtime_status" => {
             // Observe admission and terminal receipts without opening SQLite or reserving a lane.
             let database = db::AppDatabase::for_paths(paths).map_err(|e|e.to_string())?;
@@ -361,7 +416,7 @@ fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, St
 }
 
 fn is_read(command: &str) -> bool {
-    matches!(command, "database.runtime_status" | "jobs.list" | "jobs.inspect" | "jobs.logs" | "jobs.overview" | "jobs.activity" | "downloads.presets" | "downloads.batch_members" | "subscriptions.failed_downloads" | "operation.get")
+    matches!(command, "localization.inspect" | "database.runtime_status" | "jobs.list" | "jobs.inspect" | "jobs.logs" | "jobs.overview" | "jobs.activity" | "downloads.presets" | "downloads.batch_members" | "subscriptions.failed_downloads" | "operation.get")
 }
 
 pub(super) fn handle(body: &str) -> (&'static str, String) {
@@ -441,6 +496,41 @@ pub(super) fn handle(body: &str) -> (&'static str, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wp0329_localization_bridge_catalog_rejects_missing_and_arbitrary_inputs() {
+        let c = catalog();
+        for name in ["media.import_local", "localization.inspect", "localization.run", "localization.references.generate", "localization.references.apply"] {
+            let d = c["commands"].as_array().unwrap().iter().find(|v|v["name"]==name).unwrap();
+            assert_eq!(is_read(name), name=="localization.inspect");
+            assert!(validate_input(&json!({"actor_id":"test","command":name}),d).is_err());
+            assert!(validate_input(&json!({"actor_id":"test","command":name,"item_id":"x","media_path":"x","sql":"DELETE"}),d).is_err());
+        }
+        assert!(require_localization_mutation_ready().is_err(), "No app state must fail closed");
+    }
+
+    #[test]
+    fn wp0329_localization_admission_survives_queue_observation_error() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(directory.path().join("missing_database"));
+        std::fs::create_dir_all(paths.db_dir()).unwrap();
+        let admission = json!({"batch_id":"original-batch","queued_jobs":[{"id":"original-job"}]});
+        let result = localization_dispatch_receipt(&paths, admission.clone());
+        assert_eq!(result["admission"], admission);
+        assert_eq!(result["held"], true);
+        assert!(result["queue_error"].is_string());
+        assert!(result["queue"].is_null());
+        assert!(!paths.db_dir().join("app.sqlite").exists());
+    }
+
+    #[test]
+    fn wp0329_localization_mutation_refuses_missing_app_before_enqueue() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(directory.path().join("unstarted_app"));
+        let error = execute(&paths,"media.import_local",&json!({"media_path":"missing.mkv"})).unwrap_err();
+        assert!(error.contains("Safe Mode"));
+        assert!(!paths.db_dir().exists());
+    }
+
     fn fake_job_row(id: &str, attempt_no: u32) -> jobs::JobRow {
         jobs::JobRow {
             id: id.to_string(), item_id: None, batch_id: None, job_type: "download_direct_url".into(),
