@@ -2,9 +2,9 @@ use crate::paths::AppPaths;
 use crate::{
     asr, cmd, config, db, ffmpeg, image_batch, job_target_migration, library, persistence,
     provider_metadata, root_rebind, speakers, subscriptions, subtitle_tracks, subtitles, tools,
-    translate,
-    video_libraries, voice_backend_adapters, voice_backends, voice_cast_packs, voice_plans,
-    voice_reference_candidates, voice_templates, youtube_protection, EngineError, Result,
+    translate, video_libraries, voice_backend_adapters, voice_backends, voice_cast_packs,
+    voice_plans, voice_reference_candidates, voice_templates, youtube_protection, EngineError,
+    Result,
 };
 use regex::Regex;
 use rusqlite::{params, ErrorCode, OptionalExtension, TransactionBehavior};
@@ -28,7 +28,9 @@ static SELECTED_DOWNLOAD_PUBLICATION: Mutex<()> = Mutex::new(());
 
 /// Publish this absolute barrier before desktop queue changes.
 pub fn set_runner_safe_mode(enabled: bool) {
-    let _publication = SELECTED_DOWNLOAD_PUBLICATION.lock().unwrap_or_else(|e| e.into_inner());
+    let _publication = SELECTED_DOWNLOAD_PUBLICATION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     JOB_RUNNER_SAFE_MODE.store(enabled, Ordering::SeqCst);
 }
 
@@ -1484,6 +1486,32 @@ struct VoiceCloneReportSegment {
     voice_clone_outcome: Option<VoiceCloneSegmentOutcome>,
     #[serde(default)]
     error: Option<String>,
+}
+
+fn cosyvoice_failed_segment_diagnostics(
+    report: &VoiceCloneReport,
+    stderr: &[u8],
+) -> Option<serde_json::Value> {
+    let failed: Vec<u32> = report
+        .segments
+        .iter()
+        .filter(|segment| segment.voice_clone_outcome == Some(VoiceCloneSegmentOutcome::Failed))
+        .map(|segment| segment.index)
+        .collect();
+    if failed.is_empty() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(stderr);
+    let start = text
+        .char_indices()
+        .rev()
+        .nth(16_383)
+        .map_or(0, |(index, _)| index);
+    Some(serde_json::json!({
+        "failed_segment_indices": failed,
+        "stderr_tail": &text[start..],
+        "stderr_truncated": start > 0,
+    }))
 }
 
 fn voice_clone_intent_for_render_mode(render_mode: Option<&str>) -> VoiceCloneIntent {
@@ -4716,9 +4744,11 @@ fn enqueue_download_targets_batch_with_subscription(
             // refresh the OLD batch's subscription rollup after the move below, in case it
             // belongs to a different (or no) subscription than the new batch.
             let old_params_json: Option<String> = tx
-                .query_row("SELECT params_json FROM job WHERE id=?1", [&job_id], |row| {
-                    row.get(0)
-                })
+                .query_row(
+                    "SELECT params_json FROM job WHERE id=?1",
+                    [&job_id],
+                    |row| row.get(0),
+                )
                 .optional()
                 .unwrap_or(None);
             let old_subscription_id = old_params_json.as_deref().and_then(|json| {
@@ -5328,16 +5358,30 @@ pub fn enqueue_download_image_batch(
 }
 
 /// Stable keyset pagination over the canonical failed recurring video set, never UI rows.
-pub fn failed_subscription_downloads(paths: &AppPaths, since: i64, until: i64, after: &str, limit: usize) -> Result<serde_json::Value> {
+pub fn failed_subscription_downloads(
+    paths: &AppPaths,
+    since: i64,
+    until: i64,
+    after: &str,
+    limit: usize,
+) -> Result<serde_json::Value> {
     let conn = db::open_readonly(paths)?;
     let limit = limit.clamp(1, 200);
     let mut stmt = conn.prepare("SELECT j.id,j.target_title,json_extract(j.params_json,'$.subscription_id') FROM job j WHERE j.type='download_direct_url' AND j.status='failed' AND j.retry_replacement_job_id IS NULL AND j.finished_at_ms>=?1 AND j.finished_at_ms<=?2 AND j.id>?3 AND json_valid(j.params_json) AND json_extract(j.params_json,'$.subscription_id') IS NOT NULL AND j.track IN ('youtube_recurring','instagram_recurring','tiktok_recurring') ORDER BY j.id LIMIT ?4")?;
     let rows = stmt.query_map(params![since,until,after,limit as i64], |r|Ok(serde_json::json!({"id":r.get::<_,String>(0)?,"title":r.get::<_,Option<String>>(1)?,"subscription_id":r.get::<_,String>(2)?})))?.collect::<rusqlite::Result<Vec<_>>>()?;
-    Ok(serde_json::json!({"next_after_id":rows.last().map(|r|r["id"].clone()),"jobs":rows,"limit":limit,"scope":"canonical_failed_subscription_downloads","since_ms":since,"until_ms":until}))
+    Ok(
+        serde_json::json!({"next_after_id":rows.last().map(|r|r["id"].clone()),"jobs":rows,"limit":limit,"scope":"canonical_failed_subscription_downloads","since_ms":since,"until_ms":until}),
+    )
 }
 
 /// Canonical paged operator activity. No history scans on the default active view.
-pub fn operator_activity_page(paths: &AppPaths, source: &str, view: &str, offset: usize, limit: usize) -> Result<serde_json::Value> {
+pub fn operator_activity_page(
+    paths: &AppPaths,
+    source: &str,
+    view: &str,
+    offset: usize,
+    limit: usize,
+) -> Result<serde_json::Value> {
     let tracks = match source {
         "all" => "1=1",
         "youtube" => "track IN ('youtube_single','youtube_recurring')",
@@ -5358,14 +5402,26 @@ pub fn operator_activity_page(paths: &AppPaths, source: &str, view: &str, offset
     let limit = limit.clamp(1, 50);
     let conn = db::open_readonly(paths)?;
     let tx = conn.unchecked_transaction()?;
-    let total: i64 = tx.query_row(&format!("SELECT COUNT(*) FROM job WHERE {tracks} AND {statuses}"), [], |r| r.get(0))?;
+    let total: i64 = tx.query_row(
+        &format!("SELECT COUNT(*) FROM job WHERE {tracks} AND {statuses}"),
+        [],
+        |r| r.get(0),
+    )?;
     // Select the bounded page before loading large params_json payloads. Sorting full rows
     // reads overflow pages for jobs that never appear in the result and occupies read slots.
     let mut stmt = tx.prepare(&format!("SELECT j.id,j.item_id,j.batch_id,j.type,j.status,j.progress,j.error,j.created_at_ms,j.started_at_ms,j.finished_at_ms,j.logs_path,j.params_json,j.target_title,j.retry_of_job_id,j.retry_replacement_job_id,j.track,j.attempt_no FROM (SELECT rowid FROM job WHERE {tracks} AND {statuses} ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,created_at_ms DESC,id DESC LIMIT ?1 OFFSET ?2) AS page JOIN job AS j ON j.rowid=page.rowid ORDER BY CASE j.status WHEN 'running' THEN 0 ELSE 1 END,j.created_at_ms DESC,j.id DESC"))?;
-    let mut rows = stmt.query_map(params![limit as i64, offset as i64], job_row_from_query_row)?.collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut rows = stmt
+        .query_map(params![limit as i64, offset as i64], job_row_from_query_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
     hydrate_job_target_titles(&tx, &mut rows)?;
     for row in &mut rows {
-        if row.target_title.as_ref().is_some_and(|s| !s.trim().is_empty()) { continue; }
+        if row
+            .target_title
+            .as_ref()
+            .is_some_and(|s| !s.trim().is_empty())
+        {
+            continue;
+        }
         let table = match row.job_type.as_str() {
             "youtube_subscription_refresh_v1" => "youtube_subscription",
             "instagram_subscription_refresh_v1" => "instagram_subscription",
@@ -5374,7 +5430,13 @@ pub fn operator_activity_page(paths: &AppPaths, source: &str, view: &str, offset
         };
         let params: serde_json::Value = serde_json::from_str(&row.params_json).unwrap_or_default();
         if let Some(id) = params["subscription_id"].as_str() {
-            row.target_title = tx.query_row(&format!("SELECT title FROM {table} WHERE id=?1"), [id], |r| r.get(0)).optional()?;
+            row.target_title = tx
+                .query_row(
+                    &format!("SELECT title FROM {table} WHERE id=?1"),
+                    [id],
+                    |r| r.get(0),
+                )
+                .optional()?;
         }
     }
     drop(stmt);
@@ -5384,7 +5446,9 @@ pub fn operator_activity_page(paths: &AppPaths, source: &str, view: &str, offset
         let live = if row.status == JobStatus::Running { crate::job_activity::get(paths, &row.id) } else { None };
         serde_json::json!({"quality":crate::archive_quality::read(paths, &row.id),"job": row, "live": live})
     }).collect();
-    Ok(serde_json::json!({"jobs":jobs,"total":total,"offset":offset,"limit":limit,"has_more":offset+limit < total as usize,"generated_at_ms":now_ms()}))
+    Ok(
+        serde_json::json!({"jobs":jobs,"total":total,"offset":offset,"limit":limit,"has_more":offset+limit < total as usize,"generated_at_ms":now_ms()}),
+    )
 }
 
 pub fn list_jobs(paths: &AppPaths, limit: usize, offset: usize) -> Result<Vec<JobRow>> {
@@ -5712,7 +5776,11 @@ pub fn jobs_overview_snapshot_with_context(
             },
         )?;
         let counts = JobsOverviewCounts {
-            total: counts.queued + counts.running + counts.succeeded + counts.failed + counts.canceled,
+            total: counts.queued
+                + counts.running
+                + counts.succeeded
+                + counts.failed
+                + counts.canceled,
             ..counts
         };
 
@@ -7104,28 +7172,57 @@ pub fn enqueue_selected_download_batch(
     approved_missing_item_ids: Vec<String>,
     mode: &str,
 ) -> Result<SelectedDownloadSubmissionReceipt> {
-    let _publication = SELECTED_DOWNLOAD_PUBLICATION.lock().unwrap_or_else(|e| e.into_inner());
+    let _publication = SELECTED_DOWNLOAD_PUBLICATION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if JOB_RUNNER_SAFE_MODE.load(Ordering::SeqCst) || !matches!(mode, "only" | "continue_all") {
-        return Err(EngineError::InstallFailed("selected submission requires valid mode and Safe Mode off".into()));
+        return Err(EngineError::InstallFailed(
+            "selected submission requires valid mode and Safe Mode off".into(),
+        ));
     }
-    if urls.is_empty() || urls.len() > 1500 || urls.iter().any(|url| normalize_direct_url(url).is_err()) {
-        return Err(EngineError::InstallFailed("selected submission requires 1-1500 valid video URLs".into()));
+    if urls.is_empty()
+        || urls.len() > 1500
+        || urls.iter().any(|url| normalize_direct_url(url).is_err())
+    {
+        return Err(EngineError::InstallFailed(
+            "selected submission requires 1-1500 valid video URLs".into(),
+        ));
     }
-    let jobs = enqueue_download_direct_url_batch_with_repairs(paths, urls, auth_cookie, output_dir,
-        use_browser_cookies, browser_cookie_source, preset_id, approved_missing_item_ids)?;
+    let jobs = enqueue_download_direct_url_batch_with_repairs(
+        paths,
+        urls,
+        auth_cookie,
+        output_dir,
+        use_browser_cookies,
+        browser_cookie_source,
+        preset_id,
+        approved_missing_item_ids,
+    )?;
     if jobs.is_empty() {
-        return Ok(SelectedDownloadSubmissionReceipt { jobs, start: None, submission_error: None });
+        return Ok(SelectedDownloadSubmissionReceipt {
+            jobs,
+            start: None,
+            submission_error: None,
+        });
     }
     let ids = jobs.iter().map(|job| job.id.clone()).collect::<Vec<_>>();
     match start_selected_downloads_inner(paths, &ids, mode) {
-        Ok(start) => Ok(SelectedDownloadSubmissionReceipt { jobs, start: Some(start), submission_error: None }),
+        Ok(start) => Ok(SelectedDownloadSubmissionReceipt {
+            jobs,
+            start: Some(start),
+            submission_error: None,
+        }),
         Err(error) => {
             // Preserve every created original and prevent unacknowledged dispatch on publication failure.
             let conn = db::write_context(paths)?;
             conn.execute("INSERT INTO meta(key,value) VALUES(?1,'1') ON CONFLICT(key) DO UPDATE SET value='1'",
                 [META_KEY_JOBS_QUEUE_PAUSED])?;
             conn.execute("DELETE FROM job_selected_download", [])?;
-            Ok(SelectedDownloadSubmissionReceipt { jobs, start: None, submission_error: Some(error.to_string()) })
+            Ok(SelectedDownloadSubmissionReceipt {
+                jobs,
+                start: None,
+                submission_error: Some(error.to_string()),
+            })
         }
     }
 }
@@ -7141,17 +7238,23 @@ pub struct SelectedDownloadStartReceipt {
     pub next_eligible_at_ms: Option<i64>,
 }
 
-pub fn queued_foreground_download_batch_ids(paths: &AppPaths, batch_id: &str) -> Result<Vec<String>> {
+pub fn queued_foreground_download_batch_ids(
+    paths: &AppPaths,
+    batch_id: &str,
+) -> Result<Vec<String>> {
     if batch_id.trim().is_empty() {
         return Err(EngineError::InstallFailed("batch_id is required".into()));
     }
     let conn = db::open_readonly(paths)?;
     let mut stmt = conn.prepare("SELECT id FROM job WHERE batch_id=?1 AND status='queued'
         AND type='download_direct_url' AND track IN ('youtube_single','other_video') AND json_extract(params_json,'$.subscription_id') IS NULL ORDER BY created_at_ms,id LIMIT 1501")?;
-    let ids = stmt.query_map([batch_id], |r| r.get::<_, String>(0))?
+    let ids = stmt
+        .query_map([batch_id], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     if ids.is_empty() || ids.len() > 1500 {
-        return Err(EngineError::InstallFailed("batch must contain 1-1500 queued foreground downloads".into()));
+        return Err(EngineError::InstallFailed(
+            "batch must contain 1-1500 queued foreground downloads".into(),
+        ));
     }
     Ok(ids)
 }
@@ -7163,24 +7266,47 @@ fn selected_download_allowed_conn(conn: &rusqlite::Connection, job_id: &str) -> 
 }
 
 fn has_selected_downloads_conn(conn: &rusqlite::Connection) -> Result<bool> {
-    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM job_selected_download s JOIN job j
-        ON j.id=s.job_id AND j.attempt_no=s.attempt_no WHERE j.status IN ('queued','running'))", [], |r| r.get(0))?)
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM job_selected_download s JOIN job j
+        ON j.id=s.job_id AND j.attempt_no=s.attempt_no WHERE j.status IN ('queued','running'))",
+        [],
+        |r| r.get(0),
+    )?)
 }
 
-fn validate_selected_snapshot_conn(conn: &rusqlite::Connection, id: &str, expected_attempt: i64, expected_params: &str) -> Result<i64> {
-    let current = conn.query_row("SELECT attempt_no,params_json FROM job WHERE id=?1 AND status='queued'
+fn validate_selected_snapshot_conn(
+    conn: &rusqlite::Connection,
+    id: &str,
+    expected_attempt: i64,
+    expected_params: &str,
+) -> Result<i64> {
+    let current = conn
+        .query_row(
+            "SELECT attempt_no,params_json FROM job WHERE id=?1 AND status='queued'
         AND type='download_direct_url' AND track IN ('youtube_single','other_video')
-        AND json_extract(params_json,'$.subscription_id') IS NULL", [id],
-        |r| Ok((r.get::<_,i64>(0)?, r.get::<_,String>(1)?))).optional()?;
-    let (attempt, params) = current.ok_or_else(|| EngineError::InstallFailed(format!("selected job is not queued: {id}")))?;
+        AND json_extract(params_json,'$.subscription_id') IS NULL",
+            [id],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)),
+        )
+        .optional()?;
+    let (attempt, params) = current
+        .ok_or_else(|| EngineError::InstallFailed(format!("selected job is not queued: {id}")))?;
     if attempt != expected_attempt || params != expected_params {
-        return Err(EngineError::InstallFailed(format!("selected job attempt or context changed before admission: {id}")));
+        return Err(EngineError::InstallFailed(format!(
+            "selected job attempt or context changed before admission: {id}"
+        )));
     }
     Ok(attempt)
 }
 
-fn selected_priority_prevents_claim_conn(conn: &rusqlite::Connection, job_id: &str, track: JobTrack) -> Result<bool> {
-    if selected_download_allowed_conn(conn, job_id)? { return Ok(false); }
+fn selected_priority_prevents_claim_conn(
+    conn: &rusqlite::Connection,
+    job_id: &str,
+    track: JobTrack,
+) -> Result<bool> {
+    if selected_download_allowed_conn(conn, job_id)? {
+        return Ok(false);
+    }
     let lane = match track {
         JobTrack::YoutubeSingle | JobTrack::YoutubeRecurring => "youtube",
         JobTrack::OtherVideo => "other_video",
@@ -7193,21 +7319,40 @@ fn selected_priority_prevents_claim_conn(conn: &rusqlite::Connection, job_id: &s
 }
 
 /// Authorize exact attempts without rewriting timestamps or provider policy.
-pub fn start_selected_downloads(paths: &AppPaths, job_ids: &[String], mode: &str) -> Result<SelectedDownloadStartReceipt> {
-    let _publication = SELECTED_DOWNLOAD_PUBLICATION.lock().unwrap_or_else(|e| e.into_inner());
+pub fn start_selected_downloads(
+    paths: &AppPaths,
+    job_ids: &[String],
+    mode: &str,
+) -> Result<SelectedDownloadStartReceipt> {
+    let _publication = SELECTED_DOWNLOAD_PUBLICATION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     start_selected_downloads_inner(paths, job_ids, mode)
 }
 
-fn start_selected_downloads_inner(paths: &AppPaths, job_ids: &[String], mode: &str) -> Result<SelectedDownloadStartReceipt> {
+fn start_selected_downloads_inner(
+    paths: &AppPaths,
+    job_ids: &[String],
+    mode: &str,
+) -> Result<SelectedDownloadStartReceipt> {
     if !matches!(mode, "only" | "continue_all") || job_ids.is_empty() || job_ids.len() > 1500 {
-        return Err(EngineError::InstallFailed("select 1-1500 jobs and mode only or continue_all".into()));
+        return Err(EngineError::InstallFailed(
+            "select 1-1500 jobs and mode only or continue_all".into(),
+        ));
     }
     let mut seen = HashSet::new();
-    if job_ids.iter().any(|id| id.trim().is_empty() || !seen.insert(id)) {
-        return Err(EngineError::InstallFailed("selection contains blank or duplicate IDs".into()));
+    if job_ids
+        .iter()
+        .any(|id| id.trim().is_empty() || !seen.insert(id))
+    {
+        return Err(EngineError::InstallFailed(
+            "selection contains blank or duplicate IDs".into(),
+        ));
     }
     if JOB_RUNNER_SAFE_MODE.load(Ordering::SeqCst) {
-        return Err(EngineError::InstallFailed("Safe Mode blocks selected downloads".into()));
+        return Err(EngineError::InstallFailed(
+            "Safe Mode blocks selected downloads".into(),
+        ));
     }
     // Resolve each job's actual auth/runtime context before writer admission; no filesystem work in the transaction.
     let policy_conn = db::open_readonly(paths)?;
@@ -7215,39 +7360,58 @@ fn start_selected_downloads_inner(paths: &AppPaths, job_ids: &[String], mode: &s
     for id in job_ids {
         let params = policy_conn.query_row("SELECT attempt_no,params_json FROM job WHERE id=?1 AND status='queued'
             AND type='download_direct_url' AND track IN ('youtube_single','other_video') AND json_extract(params_json,'$.subscription_id') IS NULL", [id], |r| Ok((r.get::<_,i64>(0)?, r.get::<_,String>(1)?))).optional()?;
-        policy_params.push(params.ok_or_else(|| EngineError::InstallFailed(format!("selected job is not queued: {id}")))?);
+        policy_params.push(params.ok_or_else(|| {
+            EngineError::InstallFailed(format!("selected job is not queued: {id}"))
+        })?);
     }
     drop(policy_conn);
     let mut selected_policy: Option<YoutubeSchedulerPolicy> = None;
     for (id, (_, params)) in job_ids.iter().zip(&policy_params) {
         if let Some(policy) = effective_youtube_scheduler_policy(paths, id, params)? {
-            if selected_policy.as_ref().is_some_and(|first| first.auth_fingerprint != policy.auth_fingerprint
-                || first.runtime_epoch != policy.runtime_epoch) {
-                return Err(EngineError::InstallFailed("selected jobs require one shared YouTube authentication context".into()));
+            if selected_policy.as_ref().is_some_and(|first| {
+                first.auth_fingerprint != policy.auth_fingerprint
+                    || first.runtime_epoch != policy.runtime_epoch
+            }) {
+                return Err(EngineError::InstallFailed(
+                    "selected jobs require one shared YouTube authentication context".into(),
+                ));
             }
-            if selected_policy.is_none() { selected_policy = Some(policy); }
+            if selected_policy.is_none() {
+                selected_policy = Some(policy);
+            }
         }
     }
     let paused = mode == "only";
     let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if JOB_RUNNER_SAFE_MODE.load(Ordering::SeqCst) {
-        return Err(EngineError::InstallFailed("Safe Mode blocks selected downloads".into()));
+        return Err(EngineError::InstallFailed(
+            "Safe Mode blocks selected downloads".into(),
+        ));
     }
     let mut attempts = Vec::with_capacity(job_ids.len());
     for (id, (expected_attempt, expected_params)) in job_ids.iter().zip(&policy_params) {
-        attempts.push(validate_selected_snapshot_conn(&tx, id, *expected_attempt, expected_params)?);
+        attempts.push(validate_selected_snapshot_conn(
+            &tx,
+            id,
+            *expected_attempt,
+            expected_params,
+        )?);
     }
     tx.execute("DELETE FROM job_selected_download", [])?;
     for (ordinal, (id, attempt)) in job_ids.iter().zip(attempts).enumerate() {
-        tx.execute("INSERT INTO job_selected_download(job_id,attempt_no,ordinal) VALUES(?1,?2,?3)",
-            params![id, attempt, ordinal as i64])?;
+        tx.execute(
+            "INSERT INTO job_selected_download(job_id,attempt_no,ordinal) VALUES(?1,?2,?3)",
+            params![id, attempt, ordinal as i64],
+        )?;
     }
     tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
         params![META_KEY_JOBS_QUEUE_PAUSED, if paused { "1" } else { "0" }])?;
     if !paused {
-        tx.execute("INSERT INTO meta(key,value) VALUES(?1,'0') ON CONFLICT(key) DO UPDATE SET value='0'",
-            [META_KEY_JOBS_RECURRING_PAUSED])?;
+        tx.execute(
+            "INSERT INTO meta(key,value) VALUES(?1,'0') ON CONFLICT(key) DO UPDATE SET value='0'",
+            [META_KEY_JOBS_RECURRING_PAUSED],
+        )?;
     }
     tx.commit()?;
     drop(conn);
@@ -7256,19 +7420,37 @@ fn start_selected_downloads_inner(paths: &AppPaths, job_ids: &[String], mode: &s
     if let Some(policy) = selected_policy {
         next = policy.next_eligible_probe_at_ms;
         if policy.effective.mode == youtube_protection::DownloaderPolicyMode::Cooldown {
-            match youtube_protection::request_controlled_download_probe(paths, &policy.auth_fingerprint, &policy.runtime_epoch) {
-                Ok(state) => { next = state.next_eligible_probe_at_ms; hold = Some("adaptive_youtube_cooldown".into()); }
+            match youtube_protection::request_controlled_download_probe(
+                paths,
+                &policy.auth_fingerprint,
+                &policy.runtime_epoch,
+            ) {
+                Ok(state) => {
+                    next = state.next_eligible_probe_at_ms;
+                    hold = Some("adaptive_youtube_cooldown".into());
+                }
                 Err(error) => hold = Some(format!("controlled_probe_unavailable: {error}")),
             }
             invalidate_youtube_policy_gate_fields(paths);
-        } else if !policy.effective.eligible { hold = Some("youtube_protection_hold".into()); }
+        } else if !policy.effective.eligible {
+            hold = Some("youtube_protection_hold".into());
+        }
     }
-    Ok(SelectedDownloadStartReceipt { mode: mode.into(), job_ids: job_ids.to_vec(), paused,
-        rest_paused: paused, held: hold.is_some(), hold_reason: hold, next_eligible_at_ms: next })
+    Ok(SelectedDownloadStartReceipt {
+        mode: mode.into(),
+        job_ids: job_ids.to_vec(),
+        paused,
+        rest_paused: paused,
+        held: hold.is_some(),
+        hold_reason: hold,
+        next_eligible_at_ms: next,
+    })
 }
 
 pub fn set_queue_paused(paths: &AppPaths, paused: bool) -> Result<JobQueueControlState> {
-    let _publication = SELECTED_DOWNLOAD_PUBLICATION.lock().unwrap_or_else(|e| e.into_inner());
+    let _publication = SELECTED_DOWNLOAD_PUBLICATION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     db::AppDatabase::for_paths(paths)?.write(
         db::DatabaseOperationContext::new("queue_control", "set_queue_paused").foreground(),
         TransactionBehavior::Immediate,
@@ -7352,7 +7534,10 @@ pub fn cancel_job(paths: &AppPaths, job_id: &str) -> Result<()> {
         return Ok(());
     }
 
-    conn.execute("DELETE FROM job_selected_download WHERE job_id=?1", [job_id])?;
+    conn.execute(
+        "DELETE FROM job_selected_download WHERE job_id=?1",
+        [job_id],
+    )?;
 
     if let Some((job_type, Some(batch_id))) = job_context {
         if job_type == JobType::ImportLocal.as_str() && !batch_id.trim().is_empty() {
@@ -7736,8 +7921,7 @@ pub fn purge_terminal_job_history(
                  ORDER BY id"
             );
             let mut id_stmt = conn.prepare(&id_sql)?;
-            let mut query_rows =
-                id_stmt.query(rusqlite::params_from_iter(filter_params.iter()))?;
+            let mut query_rows = id_stmt.query(rusqlite::params_from_iter(filter_params.iter()))?;
             while let Some(row) = query_rows.next()? {
                 rows.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
             }
@@ -7798,7 +7982,8 @@ pub fn purge_terminal_job_history(
         );
         let artifacts_dir = paths.job_artifacts_dir(job_id);
         if artifacts_dir.exists() {
-            let _ = remove_path_recursively(&artifacts_dir, "job_artifacts", &mut ignored_failed_paths);
+            let _ =
+                remove_path_recursively(&artifacts_dir, "job_artifacts", &mut ignored_failed_paths);
         }
     }
 
@@ -8101,14 +8286,16 @@ fn build_job_cleanup_plan(paths: &AppPaths) -> Result<JobCleanupPlan> {
     })
 }
 
-
 static ACTIVE_DOWNLOAD_EXECUTIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
 static DOWNLOAD_RESTART_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 struct DownloadExecutionGuard(String);
 impl Drop for DownloadExecutionGuard {
     fn drop(&mut self) {
-        if let Ok(mut active) = ACTIVE_DOWNLOAD_EXECUTIONS.get_or_init(Default::default).lock() {
+        if let Ok(mut active) = ACTIVE_DOWNLOAD_EXECUTIONS
+            .get_or_init(Default::default)
+            .lock()
+        {
             active.remove(&self.0);
         }
     }
@@ -8133,7 +8320,11 @@ fn merge_download_pacing(value: &mut serde_json::Value, preset: &config::Downloa
 
 pub fn current_download_pacing_params(paths: &AppPaths, params: &str) -> Result<String> {
     let mut value: serde_json::Value = serde_json::from_str(params)?;
-    if !value.is_object() { return Err(EngineError::InstallFailed("download parameters must be an object".into())); }
+    if !value.is_object() {
+        return Err(EngineError::InstallFailed(
+            "download parameters must be an object".into(),
+        ));
+    }
     let preset = resolve_download_preset(paths, value.get("preset_id").and_then(|v| v.as_str()))?;
     merge_download_pacing(&mut value, &preset);
     Ok(serde_json::to_string(&value)?)
@@ -8148,14 +8339,21 @@ pub fn current_download_pacing_params(paths: &AppPaths, params: &str) -> Result<
 /// - Succeeded: refused.
 /// This only interrupts workers owned by this process; a foreign/stale running row is refused.
 pub fn restart_download_current(paths: &AppPaths, job_id: &str) -> Result<JobRow> {
-    let _guard = DOWNLOAD_RESTART_LOCK.get_or_init(|| Mutex::new(())).lock()
+    let _guard = DOWNLOAD_RESTART_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
         .map_err(|_| EngineError::InstallFailed("download recovery lock poisoned".into()))?;
-    let original = get_job(paths, job_id)?.ok_or_else(|| EngineError::InstallFailed("job not found".into()))?;
+    let original = get_job(paths, job_id)?
+        .ok_or_else(|| EngineError::InstallFailed("job not found".into()))?;
     if original.job_type != "download_direct_url" {
-        return Err(EngineError::InstallFailed("restart_current supports direct video downloads only".into()));
+        return Err(EngineError::InstallFailed(
+            "restart_current supports direct video downloads only".into(),
+        ));
     }
     if original.status == JobStatus::Succeeded {
-        return Err(EngineError::InstallFailed("completed downloads are not restarted".into()));
+        return Err(EngineError::InstallFailed(
+            "completed downloads are not restarted".into(),
+        ));
     }
     let updated = current_download_pacing_params(paths, &original.params_json)?;
     if let Some(key) = youtube_auth_key_from_download_params_json(paths, &updated)? {
@@ -8178,17 +8376,27 @@ pub fn restart_download_current(paths: &AppPaths, job_id: &str) -> Result<JobRow
 
     let execution_key = download_execution_key(paths, job_id);
     if original.status == JobStatus::Running {
-        let owned = ACTIVE_DOWNLOAD_EXECUTIONS.get_or_init(Default::default).lock()
+        let owned = ACTIVE_DOWNLOAD_EXECUTIONS
+            .get_or_init(Default::default)
+            .lock()
             .map_err(|_| EngineError::InstallFailed("execution registry unavailable".into()))?
             .contains(&execution_key);
-        if !owned { return Err(EngineError::InstallFailed("running worker ownership is unverified; no job stopped".into())); }
+        if !owned {
+            return Err(EngineError::InstallFailed(
+                "running worker ownership is unverified; no job stopped".into(),
+            ));
+        }
         cancel_job(paths, job_id)?;
         let deadline = std::time::Instant::now() + Duration::from_secs(30);
         loop {
-            let active = ACTIVE_DOWNLOAD_EXECUTIONS.get_or_init(Default::default).lock()
+            let active = ACTIVE_DOWNLOAD_EXECUTIONS
+                .get_or_init(Default::default)
+                .lock()
                 .map_err(|_| EngineError::InstallFailed("execution registry unavailable".into()))?
                 .contains(&execution_key);
-            if !active { break; }
+            if !active {
+                break;
+            }
             if std::time::Instant::now() >= deadline {
                 return Err(EngineError::InstallFailed("original canceled; worker still draining; repeat restart_current for this original to finish recovery".into()));
             }
@@ -9176,7 +9384,11 @@ fn build_attempt_rows(
         current_by_key.insert(key.clone(), current_attempt_id_for_group(group_rows));
         max_attempt_no_by_key.insert(
             key.clone(),
-            group_rows.iter().map(|row| row.attempt_no).max().unwrap_or(1),
+            group_rows
+                .iter()
+                .map(|row| row.attempt_no)
+                .max()
+                .unwrap_or(1),
         );
     }
 
@@ -10117,7 +10329,15 @@ fn enqueue_with_type_item_batch_track_and_id_conn(
     id: String,
 ) -> Result<JobRow> {
     enqueue_with_type_item_batch_track_id_and_target_key_conn(
-        conn, paths, job_type, params_json, item_id, batch_id, track, id, None,
+        conn,
+        paths,
+        job_type,
+        params_json,
+        item_id,
+        batch_id,
+        track,
+        id,
+        None,
     )
 }
 
@@ -10218,7 +10438,10 @@ fn cancel_reopened_job_after_enqueue_failure(paths: &AppPaths, job_id: &str, rea
 }
 
 /// WP-0321 S6: read the current owner (id, status) of a `download_direct_url` target key, if any.
-fn existing_job_for_target_key(paths: &AppPaths, target_key: &str) -> Result<Option<(String, String)>> {
+fn existing_job_for_target_key(
+    paths: &AppPaths,
+    target_key: &str,
+) -> Result<Option<(String, String)>> {
     let conn = db::open_readonly(paths)?;
     let row: Option<(String, String)> = conn
         .query_row(
@@ -10634,6 +10857,7 @@ fn run_cosyvoice_dub_render(
     cmd.arg("--model-dir").arg(&model_parent);
     cmd.arg("--backend").arg("cosyvoice");
     cmd.env("PYTHONNOUSERSITE", "1");
+    cmd.env("PYTHONDONTWRITEBYTECODE", "1");
     // The model, Qwen base, and wetext normalizer graph are all resolved from the
     // managed app-local pack. The wrapper intercepts wetext's otherwise-networked
     // ModelScope lookup and refuses any unexpected repository lookup.
@@ -10674,6 +10898,21 @@ fn run_cosyvoice_dub_render(
             output.status.code(),
             stderr.trim()
         )));
+    }
+
+    // Successful child exit can still report failed inference segments.
+    if let Ok(report) = std::fs::read_to_string(report_path).and_then(|text| {
+        serde_json::from_str::<VoiceCloneReport>(&text).map_err(std::io::Error::other)
+    }) {
+        if let Some(details) = cosyvoice_failed_segment_diagnostics(&report, &output.stderr) {
+            log_line(
+                paths,
+                job_id,
+                "warn",
+                "tts_preview_cosyvoice_failed_segment_diagnostics",
+                details,
+            )?;
+        }
     }
 
     log_line(
@@ -10981,7 +11220,11 @@ fn youtube_gate_snapshot(paths: &AppPaths) -> YoutubeSharedGateSnapshot {
                 .next_eligible_probe_at_ms
                 .is_some_and(|at| at <= now_ms());
             (
-                if probe_due { "waiting".to_string() } else { "held".to_string() },
+                if probe_due {
+                    "waiting".to_string()
+                } else {
+                    "held".to_string()
+                },
                 policy.next_eligible_probe_at_ms,
                 Some(
                     if probe_due {
@@ -10995,15 +11238,15 @@ fn youtube_gate_snapshot(paths: &AppPaths) -> YoutubeSharedGateSnapshot {
         }
         _ => (state, next_eligible_at_ms, hold_reason),
     };
-    let (state, next_eligible_at_ms, hold_reason) =
-        match youtube_auth_circuit_expires_at_ms(paths) {
-            Some(expires_at_ms) => (
-                "held".to_string(),
-                Some(expires_at_ms),
-                Some("youtube_auth_circuit_open".to_string()),
-            ),
-            None => (state, next_eligible_at_ms, hold_reason),
-        };
+    let (state, next_eligible_at_ms, hold_reason) = match youtube_auth_circuit_expires_at_ms(paths)
+    {
+        Some(expires_at_ms) => (
+            "held".to_string(),
+            Some(expires_at_ms),
+            Some("youtube_auth_circuit_open".to_string()),
+        ),
+        None => (state, next_eligible_at_ms, hold_reason),
+    };
     YoutubeSharedGateSnapshot {
         state,
         next_eligible_at_ms,
@@ -11066,7 +11309,10 @@ fn youtube_policy_gate_fields(paths: &AppPaths) -> YoutubePolicyGateFields {
     cache
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(paths.base_dir.clone(), (std::time::Instant::now(), fields.clone()));
+        .insert(
+            paths.base_dir.clone(),
+            (std::time::Instant::now(), fields.clone()),
+        );
     fields
 }
 
@@ -11391,7 +11637,8 @@ fn runner_loop(
             // rows on its first run, so it must never block dispatch: run it on its own
             // thread and skip the tick while a previous run is still in flight.
             if retention_days > 0
-                && !TERMINAL_HISTORY_RETENTION_IN_FLIGHT.swap(true, std::sync::atomic::Ordering::SeqCst)
+                && !TERMINAL_HISTORY_RETENTION_IN_FLIGHT
+                    .swap(true, std::sync::atomic::Ordering::SeqCst)
             {
                 let paths = paths.clone();
                 std::thread::Builder::new()
@@ -11486,9 +11733,11 @@ fn runner_loop(
         }
 
         let selected_pending = db::open_readonly(&paths)
-            .and_then(|conn| has_selected_downloads_conn(&conn)).unwrap_or(false);
+            .and_then(|conn| has_selected_downloads_conn(&conn))
+            .unwrap_or(false);
         if JOB_RUNNER_SAFE_MODE.load(Ordering::SeqCst)
-            || (is_queue_paused(&paths).unwrap_or(true) && !selected_pending) {
+            || (is_queue_paused(&paths).unwrap_or(true) && !selected_pending)
+        {
             observe_youtube_gate(
                 &paths,
                 &runtime_state,
@@ -11540,7 +11789,9 @@ fn runner_loop(
         if youtube_start_gate.ready() {
             'youtube_tracks: for track in if selected_pending {
                 [JobTrack::YoutubeSingle, JobTrack::YoutubeRecurring]
-            } else { youtube_start_gate.candidate_order() } {
+            } else {
+                youtube_start_gate.candidate_order()
+            } {
                 if track == JobTrack::YoutubeRecurring && recurring_paused {
                     continue;
                 }
@@ -11864,16 +12115,26 @@ fn fetch_queued_jobs_for_track_inner(
     let conn = db::open_readonly(paths)?;
     let mut result = Vec::with_capacity(limit);
     let paused = is_queue_paused_conn(&conn)?;
-    if paused || (matches!(wanted_track, JobTrack::YoutubeSingle | JobTrack::OtherVideo)
-        && wanted_type.is_none_or(|kind| kind == JobType::DownloadDirectUrl.as_str())
-        && has_selected_downloads_conn(&conn)?) {
+    if paused
+        || (matches!(wanted_track, JobTrack::YoutubeSingle | JobTrack::OtherVideo)
+            && wanted_type.is_none_or(|kind| kind == JobType::DownloadDirectUrl.as_str())
+            && has_selected_downloads_conn(&conn)?)
+    {
         let mut stmt = conn.prepare("SELECT j.id,j.type,j.params_json FROM job j
           LEFT JOIN job_selected_download s ON s.job_id=j.id AND s.attempt_no=j.attempt_no
           WHERE j.status='queued' AND j.track=?1 AND (?2 IS NULL OR j.type=?2)
             AND (?3=0 OR s.job_id IS NOT NULL)
           ORDER BY CASE WHEN s.job_id IS NULL THEN 1 ELSE 0 END,s.ordinal,j.created_at_ms,j.id LIMIT ?4")?;
-        let rows = stmt.query_map(params![wanted_track.as_str(), wanted_type, paused as i64, limit as i64],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        let rows = stmt
+            .query_map(
+                params![
+                    wanted_track.as_str(),
+                    wanted_type,
+                    paused as i64,
+                    limit as i64
+                ],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         return Ok(rows);
     }
@@ -12330,12 +12591,15 @@ fn claim_job_for_track(
     });
 
     drop(conn);
-    let _publication = SELECTED_DOWNLOAD_PUBLICATION.lock().unwrap_or_else(|e| e.into_inner());
+    let _publication = SELECTED_DOWNLOAD_PUBLICATION
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     if JOB_RUNNER_SAFE_MODE.load(Ordering::SeqCst)
         || (is_queue_paused_conn(&tx)? && !selected_download_allowed_conn(&tx, job_id)?)
-        || selected_priority_prevents_claim_conn(&tx, job_id, track)? {
+        || selected_priority_prevents_claim_conn(&tx, job_id, track)?
+    {
         return Ok(DispatchClaimOutcome::DeferredChanged);
     }
     let current: Option<(String, String, String)> = tx
@@ -12593,11 +12857,9 @@ fn claim_and_spawn_for_track(
         let attempt_no: u32 = db::open_readonly(paths)
             .ok()
             .and_then(|conn| {
-                conn.query_row(
-                    "SELECT attempt_no FROM job WHERE id=?1",
-                    [&job_id],
-                    |row| row.get::<_, i64>(0),
-                )
+                conn.query_row("SELECT attempt_no FROM job WHERE id=?1", [&job_id], |row| {
+                    row.get::<_, i64>(0)
+                })
                 .optional()
                 .ok()
                 .flatten()
@@ -12644,8 +12906,7 @@ fn claim_and_spawn_for_track(
                 // too; it reuses the same bounded requeue instead of failing the download.
                 let destination_unreachable = job_type == "download_direct_url"
                     && is_destination_unreachable_error(&err_text);
-                if app_busy_eligible && (is_app_busy_error(&err_text) || destination_unreachable)
-                {
+                if app_busy_eligible && (is_app_busy_error(&err_text) || destination_unreachable) {
                     match requeue_job_for_app_busy_or_exhausted(&paths_worker, &job_id) {
                         Ok(true) => {
                             // Requeued for a later attempt; the job row is already back to
@@ -13874,11 +14135,15 @@ fn execute_job(
 ) -> Result<()> {
     let _download_execution = if type_str == "download_direct_url" {
         let key = download_execution_key(paths, job_id);
-        ACTIVE_DOWNLOAD_EXECUTIONS.get_or_init(Default::default).lock()
+        ACTIVE_DOWNLOAD_EXECUTIONS
+            .get_or_init(Default::default)
+            .lock()
             .map_err(|_| EngineError::InstallFailed("execution registry unavailable".into()))?
             .insert(key.clone());
         Some(DownloadExecutionGuard(key))
-    } else { None };
+    } else {
+        None
+    };
     let verification_demand_consumer = format!("job-start:{job_id}");
     let verification_demand_generation = now_ms().max(0) as u64;
     let _ = crate::tools::set_youtube_po_provider_verification_foreground_demand(
@@ -14795,7 +15060,8 @@ fn execute_job(
                         &auth_fingerprint,
                         &runtime_epoch,
                     )?;
-                    let effective = youtube_protection::effective_policy(&baseline, &state, now_ms());
+                    let effective =
+                        youtube_protection::effective_policy(&baseline, &state, now_ms());
                     if !effective.eligible {
                         return Err(EngineError::InstallFailed(format!(
                             "YouTube automatic protection is in {} mode for subscription checks; next controlled probe is at {:?}",
@@ -21259,34 +21525,56 @@ fn job_terminal_write_context_with_shutdown(
     loop {
         if shutdown_requested() {
             if waiting {
-                append_engine_diagnostics_trace_row_best_effort(paths, "job_database_maintenance_wait_interrupted", "info",
-                    serde_json::json!({"job_id":job_id,"recovery":"original_running_job_on_startup"}));
+                append_engine_diagnostics_trace_row_best_effort(
+                    paths,
+                    "job_database_maintenance_wait_interrupted",
+                    "info",
+                    serde_json::json!({"job_id":job_id,"recovery":"original_running_job_on_startup"}),
+                );
             }
             return Err(EngineError::JobInterruptedByShutdown);
         }
         match db::write_context(paths) {
             Ok(context) => return Ok(context),
-            Err(error) if matches!(&error, EngineError::DatabaseRuntime(message)
-                if matches!(message.split(';').next(), Some("maintenance_unavailable" | "maintenance_backlog_limit"))) => {
+            Err(error)
+                if matches!(&error, EngineError::DatabaseRuntime(message)
+                if matches!(message.split(';').next(), Some("maintenance_unavailable" | "maintenance_backlog_limit"))) =>
+            {
                 if !waiting {
-                    append_engine_diagnostics_trace_row_best_effort(paths, "job_database_maintenance_wait", "warn",
+                    append_engine_diagnostics_trace_row_best_effort(
+                        paths,
+                        "job_database_maintenance_wait",
+                        "warn",
                         serde_json::json!({"job_id":job_id,"reason":error.to_string(),"worker_retained":true,
-                            "recovery":"wait_for_maintenance_or_shutdown","busy_attempt_counted":false}));
+                            "recovery":"wait_for_maintenance_or_shutdown","busy_attempt_counted":false}),
+                    );
                     waiting = true;
                 }
             }
             Err(error) => return Err(error),
         }
-        while database.checkpoint_maintenance_health().writer_backpressure.is_some() {
+        while database
+            .checkpoint_maintenance_health()
+            .writer_backpressure
+            .is_some()
+        {
             if shutdown_requested() {
-                append_engine_diagnostics_trace_row_best_effort(paths, "job_database_maintenance_wait_interrupted", "info",
-                    serde_json::json!({"job_id":job_id,"recovery":"original_running_job_on_startup"}));
+                append_engine_diagnostics_trace_row_best_effort(
+                    paths,
+                    "job_database_maintenance_wait_interrupted",
+                    "info",
+                    serde_json::json!({"job_id":job_id,"recovery":"original_running_job_on_startup"}),
+                );
                 return Err(EngineError::JobInterruptedByShutdown);
             }
             thread::sleep(Duration::from_millis(250));
         }
-        append_engine_diagnostics_trace_row_best_effort(paths, "job_database_maintenance_wait_retrying", "info",
-            serde_json::json!({"job_id":job_id,"retry_scope":"terminal_write_admission_only"}));
+        append_engine_diagnostics_trace_row_best_effort(
+            paths,
+            "job_database_maintenance_wait_retrying",
+            "info",
+            serde_json::json!({"job_id":job_id,"retry_scope":"terminal_write_admission_only"}),
+        );
     }
 }
 
@@ -21294,7 +21582,11 @@ fn set_succeeded(paths: &AppPaths, job_id: &str) -> Result<()> {
     set_succeeded_with_shutdown(paths, job_id, job_runner_shutdown_requested)
 }
 
-fn set_succeeded_with_shutdown(paths: &AppPaths, job_id: &str, shutdown_requested: impl Fn() -> bool) -> Result<()> {
+fn set_succeeded_with_shutdown(
+    paths: &AppPaths,
+    job_id: &str,
+    shutdown_requested: impl Fn() -> bool,
+) -> Result<()> {
     let conn = job_terminal_write_context_with_shutdown(paths, job_id, shutdown_requested)?;
     conn.execute(
         "UPDATE job SET status=?1, progress=1.0, finished_at_ms=?2, error=NULL WHERE id=?3 AND status=?4",
@@ -21305,7 +21597,10 @@ fn set_succeeded_with_shutdown(paths: &AppPaths, job_id: &str, shutdown_requeste
             JobStatus::Running.as_str()
         ],
     )?;
-    conn.execute("DELETE FROM job_selected_download WHERE job_id=?1", [job_id])?;
+    conn.execute(
+        "DELETE FROM job_selected_download WHERE job_id=?1",
+        [job_id],
+    )?;
     drop(conn);
     let _ = subscriptions::refresh_subscription_activity_rollup_for_job(paths, job_id);
     Ok(())
@@ -21367,7 +21662,11 @@ fn requeue_job_for_app_busy_or_exhausted(paths: &AppPaths, job_id: &str) -> Resu
     requeue_job_for_app_busy_with_shutdown(paths, job_id, job_runner_shutdown_requested)
 }
 
-fn requeue_job_for_app_busy_with_shutdown(paths: &AppPaths, job_id: &str, shutdown_requested: impl Fn() -> bool) -> Result<bool> {
+fn requeue_job_for_app_busy_with_shutdown(
+    paths: &AppPaths,
+    job_id: &str,
+    shutdown_requested: impl Fn() -> bool,
+) -> Result<bool> {
     let conn = job_terminal_write_context_with_shutdown(paths, job_id, shutdown_requested)?;
     let attempts: i64 = conn
         .query_row(
@@ -21418,7 +21717,10 @@ fn set_failed(paths: &AppPaths, job_id: &str, error: &str) -> Result<()> {
     )?;
     let mut failed_url_to_release: Option<Option<String>> = None;
     if changed > 0 {
-        conn.execute("DELETE FROM job_selected_download WHERE job_id=?1", [job_id])?;
+        conn.execute(
+            "DELETE FROM job_selected_download WHERE job_id=?1",
+            [job_id],
+        )?;
         let context: Option<(String, String)> = conn
             .query_row(
                 "SELECT type, params_json FROM job WHERE id=?1",
@@ -21445,17 +21747,31 @@ fn set_failed(paths: &AppPaths, job_id: &str, error: &str) -> Result<()> {
     Ok(())
 }
 
-fn preserve_shutdown_interrupted_download(paths: &AppPaths, job_id: &str, error: &EngineError) -> bool {
+fn preserve_shutdown_interrupted_download(
+    paths: &AppPaths,
+    job_id: &str,
+    error: &EngineError,
+) -> bool {
     if !matches!(error, EngineError::JobInterruptedByShutdown) {
         return false;
     }
     // Keep the original running row for the existing canonical startup recovery. Do not
     // publish a provider failure or manufacture a replacement attempt during shutdown.
-    let _ = log_line(paths, job_id, "info", "job_shutdown_interrupted", serde_json::json!({
-        "recovery": "original_running_job_on_startup"
-    }));
-    append_engine_diagnostics_trace_row_best_effort(paths, "job_shutdown_interrupted", "info",
-        serde_json::json!({"job_id":job_id,"recovery":"original_running_job_on_startup"}));
+    let _ = log_line(
+        paths,
+        job_id,
+        "info",
+        "job_shutdown_interrupted",
+        serde_json::json!({
+            "recovery": "original_running_job_on_startup"
+        }),
+    );
+    append_engine_diagnostics_trace_row_best_effort(
+        paths,
+        "job_shutdown_interrupted",
+        "info",
+        serde_json::json!({"job_id":job_id,"recovery":"original_running_job_on_startup"}),
+    );
     true
 }
 
@@ -21478,7 +21794,11 @@ fn direct_download_cancellation_error(shutdown_requested: bool) -> EngineError {
     }
 }
 
-fn direct_download_fallback_error(url: &str, direct_error: EngineError, fallback_error: EngineError) -> EngineError {
+fn direct_download_fallback_error(
+    url: &str,
+    direct_error: EngineError,
+    fallback_error: EngineError,
+) -> EngineError {
     if matches!(fallback_error, EngineError::JobInterruptedByShutdown) {
         return fallback_error;
     }
@@ -21489,8 +21809,10 @@ fn direct_download_fallback_error(url: &str, direct_error: EngineError, fallback
 }
 
 fn direct_download_child_error(error: EngineError, shutdown_requested: bool) -> EngineError {
-    if shutdown_requested && matches!(&error, EngineError::ExternalToolFailed { tool, code: None, stderr }
-        if matches!(tool.as_str(), "ffmpeg" | "ffprobe") && stderr == &format!("{tool} canceled")) {
+    if shutdown_requested
+        && matches!(&error, EngineError::ExternalToolFailed { tool, code: None, stderr }
+        if matches!(tool.as_str(), "ffmpeg" | "ffprobe") && stderr == &format!("{tool} canceled"))
+    {
         EngineError::JobInterruptedByShutdown
     } else {
         error
@@ -21842,7 +22164,11 @@ pub fn set_terminal_job_retention_days(paths: &AppPaths, days: u32) -> Result<u3
     let clamped = days.min(MAX_TERMINAL_JOB_RETENTION_DAYS);
     let mut conn = db::write_context(paths)?;
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    upsert_meta_conn(&tx, META_KEY_TERMINAL_JOB_RETENTION_DAYS, &clamped.to_string())?;
+    upsert_meta_conn(
+        &tx,
+        META_KEY_TERMINAL_JOB_RETENTION_DAYS,
+        &clamped.to_string(),
+    )?;
     tx.commit()?;
     Ok(clamped)
 }
@@ -22013,7 +22339,9 @@ pub fn get_youtube_protection_status(
     })
 }
 
-pub fn request_youtube_controlled_probe(paths: &AppPaths) -> Result<youtube_protection::DownloaderPolicySnapshot> {
+pub fn request_youtube_controlled_probe(
+    paths: &AppPaths,
+) -> Result<youtube_protection::DownloaderPolicySnapshot> {
     let auth = current_youtube_protection_auth_fingerprint(paths)?;
     let epoch = youtube_protection::runtime_epoch_for_paths(paths);
     let result = youtube_protection::request_controlled_download_probe(paths, &auth, &epoch);
@@ -22304,7 +22632,12 @@ fn youtube_lane_start_interval_secs(paths: &AppPaths, track: JobTrack, salt: &st
         .ok()
         .and_then(|settings| settings.policy_for_track(track.as_str()).cloned());
     let (base, jitter) = lane
-        .map(|policy| (policy.sleep_interval_secs as u64, policy.sleep_jitter_secs as u64))
+        .map(|policy| {
+            (
+                policy.sleep_interval_secs as u64,
+                policy.sleep_jitter_secs as u64,
+            )
+        })
         .unwrap_or((0, 0));
     base.saturating_add(bounded_runtime_jitter(jitter, salt))
 }
@@ -22403,8 +22736,7 @@ fn effective_youtube_scheduler_policy(
     )?
     .unwrap_or_else(|| youtube_protection::ANONYMOUS_AUTH_FINGERPRINT.to_string());
     let runtime_epoch = youtube_protection::runtime_epoch_for_paths(paths);
-    let execution_track =
-        JobTrack::for_direct_download(&url, params.subscription_id.as_deref());
+    let execution_track = JobTrack::for_direct_download(&url, params.subscription_id.as_deref());
     let profile = effective_direct_download_profile(
         paths,
         &url,
@@ -24572,7 +24904,8 @@ fn append_yt_dlp_runtime_args(
     args.push(
         paths
             .youtube_po_provider_plugin_dir()
-            .parent().expect("provider plugin has a parent")
+            .parent()
+            .expect("provider plugin has a parent")
             .to_string_lossy()
             .to_string(),
     );
@@ -24925,7 +25258,9 @@ fn yt_dlp_progress_fraction(line: &str) -> Option<f32> {
     if let Some(raw) = line.trim().strip_prefix("VV_ACTIVITY:") {
         let value: serde_json::Value = serde_json::from_str(raw).ok()?;
         let p = &value["progress"];
-        let total = p["total_bytes"].as_f64().or_else(|| p["total_bytes_estimate"].as_f64())?;
+        let total = p["total_bytes"]
+            .as_f64()
+            .or_else(|| p["total_bytes_estimate"].as_f64())?;
         let received = p["downloaded_bytes"].as_f64()?;
         return (total > 0.0 && received >= 0.0).then(|| (received / total).clamp(0.0, 1.0) as f32);
     }
@@ -24968,7 +25303,9 @@ fn read_command_pipe_with_progress<R: Read>(
         if text.starts_with("VV_MEDIA_PRE:") {
             // Publish authoritative metadata before transfer, including failed/partial attempts.
             let _ = ingest_ytdlp_download_metadata(&paths, &line, id, "");
-            if let Ok(info) = serde_json::from_slice::<serde_json::Value>(&line[b"VV_MEDIA_PRE:".len()..]) {
+            if let Ok(info) =
+                serde_json::from_slice::<serde_json::Value>(&line[b"VV_MEDIA_PRE:".len()..])
+            {
                 if let Ok(receipt) = crate::archive_quality::selection(&info) {
                     let _ = crate::archive_quality::save(&paths, id, &receipt);
                 }
@@ -24977,7 +25314,13 @@ fn read_command_pipe_with_progress<R: Read>(
         if text.starts_with("WARNING:") || text.starts_with("ERROR:") {
             if let Some(activity) = crate::job_activity::get(&paths, id) {
                 if let Some(message) = activity.lines.back() {
-                    let _ = log_line(&paths, id, "warn", "downloader_message", serde_json::json!({"message":message}));
+                    let _ = log_line(
+                        &paths,
+                        id,
+                        "warn",
+                        "downloader_message",
+                        serde_json::json!({"message":message}),
+                    );
                 }
             }
         }
@@ -25095,7 +25438,9 @@ fn run_command_output_with_control_inner(
                 // Capture intent when exit is observed: a genuine failure observed before
                 // shutdown must stay a failure even if shutdown starts during pipe draining.
                 if lifecycle_exit_is_shutdown_interruption(
-                    bind_yt_dlp_lifecycle, shutdown_at_exit, status.success(),
+                    bind_yt_dlp_lifecycle,
+                    shutdown_at_exit,
+                    status.success(),
                 ) {
                     return Err(CommandRunError::Canceled);
                 }
@@ -25118,7 +25463,11 @@ fn run_command_output_with_control_inner(
     }
 }
 
-fn lifecycle_exit_is_shutdown_interruption(lifecycle_owned: bool, shutdown_requested: bool, success: bool) -> bool {
+fn lifecycle_exit_is_shutdown_interruption(
+    lifecycle_owned: bool,
+    shutdown_requested: bool,
+    success: bool,
+) -> bool {
     lifecycle_owned && shutdown_requested && !success
 }
 
@@ -25731,7 +26080,9 @@ fn run_yt_dlp(
                 continue;
             }
             Err(CommandRunError::Spawn(e))
-                if e.kind() == std::io::ErrorKind::Interrupted && job_runner_shutdown_requested() => {
+                if e.kind() == std::io::ErrorKind::Interrupted
+                    && job_runner_shutdown_requested() =>
+            {
                 return Err(EngineError::JobInterruptedByShutdown);
             }
             Err(CommandRunError::Spawn(e)) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -25779,7 +26130,11 @@ fn run_yt_dlp(
                     job_id,
                     "downloader_outcome",
                     candidate_index,
-                    Some(if shutdown_requested { "shutdown_interrupted" } else { "canceled" }),
+                    Some(if shutdown_requested {
+                        "shutdown_interrupted"
+                    } else {
+                        "canceled"
+                    }),
                     None,
                     Some(launch_started.elapsed().as_millis().min(i64::MAX as u128) as i64),
                 );
@@ -26713,34 +27068,36 @@ fn download_url_to_library(
                 return Err(direct_err);
             }
             if is_canceled(paths, job_id).unwrap_or(false) {
-                return Err(direct_download_cancellation_error(JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)));
+                return Err(direct_download_cancellation_error(
+                    JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst),
+                ));
             }
             // Fallback for webpage URLs and hosts that need extractor logic.
             match download_yt_dlp_url_to_library(
-                    paths,
-                    url,
-                    job_id,
-                    provider,
-                    auth_cookie,
-                    output_dir,
-                    output_subdir,
-                    use_browser_cookies,
-                    browser_cookie_source,
-                    output_path_template,
-                    filename_template,
-                    format_preference,
-                    quality_preference,
-                    yt_dlp_retries,
-                    yt_dlp_fragment_retries,
-                    yt_dlp_concurrent_fragments,
-                    yt_dlp_limit_rate,
-                    yt_dlp_throttled_rate,
-                    yt_dlp_file_access_retries,
-                    yt_dlp_sleep_interval,
-                    yt_dlp_max_sleep_interval,
-                    yt_dlp_sleep_requests,
-                    subtitle_mode,
-                ) {
+                paths,
+                url,
+                job_id,
+                provider,
+                auth_cookie,
+                output_dir,
+                output_subdir,
+                use_browser_cookies,
+                browser_cookie_source,
+                output_path_template,
+                filename_template,
+                format_preference,
+                quality_preference,
+                yt_dlp_retries,
+                yt_dlp_fragment_retries,
+                yt_dlp_concurrent_fragments,
+                yt_dlp_limit_rate,
+                yt_dlp_throttled_rate,
+                yt_dlp_file_access_retries,
+                yt_dlp_sleep_interval,
+                yt_dlp_max_sleep_interval,
+                yt_dlp_sleep_requests,
+                subtitle_mode,
+            ) {
                 Ok(path) => Ok(path),
                 Err(yt_err) => Err(direct_download_fallback_error(url, direct_err, yt_err)),
             }
@@ -26942,8 +27299,12 @@ fn build_yt_dlp_output_template_for_attempt(
     // engine-owned attempt root.
     // Exactly "." means use the resolved subscription destination, not a path component.
     let path_template = normalize_non_empty(output_path_template)
-        .map(|value| if value == "." { Ok(String::new()) } else {
-            managed_ytdlp_template_basename_fragment(&value, "output path template")
+        .map(|value| {
+            if value == "." {
+                Ok(String::new())
+            } else {
+                managed_ytdlp_template_basename_fragment(&value, "output path template")
+            }
         })
         .transpose()?
         .unwrap_or_else(|| "%(channel,uploader|misc)s".to_string());
@@ -26962,7 +27323,11 @@ fn build_yt_dlp_output_template_for_attempt(
         .filter(|value| !value.is_empty())
         .map(|value| format!("_vvattempt-{value}"))
         .unwrap_or_default();
-    let prefix = if path_template.is_empty() { String::new() } else { format!("{path_template}_") };
+    let prefix = if path_template.is_empty() {
+        String::new()
+    } else {
+        format!("{path_template}_")
+    };
     let template = format!("{prefix}{file_template}_{suffix}{attempt_suffix}.%(ext)s");
     validate_managed_ytdlp_output_basename(&template)?;
     Ok(template)
@@ -27260,7 +27625,9 @@ fn download_direct_http_url_to_library(
 
     for candidate in media_candidates {
         if is_canceled(paths, job_id)? {
-            return Err(direct_download_cancellation_error(JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)));
+            return Err(direct_download_cancellation_error(
+                JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst),
+            ));
         }
 
         match download_direct_media_asset(
@@ -27349,7 +27716,9 @@ fn download_direct_media_asset(
     output_subdir: Option<&str>,
 ) -> Result<PathBuf> {
     if is_canceled(paths, job_id)? {
-        return Err(direct_download_cancellation_error(JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)));
+        return Err(direct_download_cancellation_error(
+            JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst),
+        ));
     }
 
     let request_url = strip_range_query_params(url);
@@ -27393,7 +27762,9 @@ fn download_direct_media_asset(
     loop {
         if is_canceled(paths, job_id)? {
             let _ = std::fs::remove_file(&temp_path);
-            return Err(direct_download_cancellation_error(JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)));
+            return Err(direct_download_cancellation_error(
+                JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst),
+            ));
         }
 
         let read = body_reader.read(&mut buf).map_err(|err| {
@@ -27488,7 +27859,8 @@ fn download_direct_media_asset(
     let output_guard = ManagedOutputGuard::acquire(&final_path)?;
 
     let source_probe = ffmpeg::probe(paths, &temp_path).map_err(|err| {
-        let err = direct_download_child_error(err, JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst));
+        let err =
+            direct_download_child_error(err, JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst));
         if matches!(err, EngineError::JobInterruptedByShutdown) {
             return err;
         }
@@ -27507,8 +27879,14 @@ fn download_direct_media_asset(
     }
 
     if final_path.exists() {
-        let validation = validate_managed_mkv_output(paths, &final_path, &expectations_from_probe(&source_probe))
-            .map_err(|err| direct_download_child_error(err, JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)));
+        let validation = validate_managed_mkv_output(
+            paths,
+            &final_path,
+            &expectations_from_probe(&source_probe),
+        )
+        .map_err(|err| {
+            direct_download_child_error(err, JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst))
+        });
         if let Err(err @ EngineError::JobInterruptedByShutdown) = validation {
             return Err(err);
         }
@@ -27559,7 +27937,9 @@ fn download_direct_media_asset(
     )? {
         JobCommandOutput::Completed(output) => output,
         JobCommandOutput::Canceled => {
-            return Err(direct_download_cancellation_error(JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)));
+            return Err(direct_download_cancellation_error(
+                JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst),
+            ));
         }
     };
     if !output.status.success() {
@@ -27572,7 +27952,9 @@ fn download_direct_media_asset(
     }
     let probe =
         validate_managed_mkv_output(paths, &muxing_path, &expectations_from_probe(&source_probe))
-            .map_err(|err| direct_download_child_error(err, JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)))?;
+            .map_err(|err| {
+            direct_download_child_error(err, JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst))
+        })?;
     if JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst) {
         return Err(EngineError::JobInterruptedByShutdown);
     }
@@ -27660,8 +28042,13 @@ fn atomic_publish_no_replace(staging: &Path, destination: &Path) -> Result<()> {
         // canonicalize supplies extended-length Windows paths, including UNC roots.
         // The final destination need not exist; resolve only its existing parent.
         let source = std::fs::canonicalize(staging)?;
-        let parent = destination.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
-        let name = destination.file_name().ok_or_else(|| EngineError::InstallFailed("managed output destination has no filename".into()))?;
+        let parent = destination
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or(Path::new("."));
+        let name = destination.file_name().ok_or_else(|| {
+            EngineError::InstallFailed("managed output destination has no filename".into())
+        })?;
         let target = std::fs::canonicalize(parent)?.join(name);
         let source_wide = source
             .as_os_str()
@@ -28023,7 +28410,9 @@ fn discover_embedded_media_urls(
 
     while let Some(page_url) = queue.pop_front() {
         if is_canceled(paths, job_id)? {
-            return Err(direct_download_cancellation_error(JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst)));
+            return Err(direct_download_cancellation_error(
+                JOB_RUNNER_SHUTDOWN_REQUESTED.load(Ordering::SeqCst),
+            ));
         }
         if visited.len() >= EMBED_CRAWL_MAX_PAGES || found.len() >= EMBED_CRAWL_MAX_CANDIDATES {
             break;
@@ -28498,9 +28887,14 @@ fn download_yt_dlp_url_to_library(
     let subtitle_mode = Some("auto");
     args.extend(["-f", "bv*+ba/b", "-S", "res,fps,hdr:12,quality"].map(str::to_string));
     let policy_plugin = crate::archive_quality::install_plugin(&attempt_output_dir)?;
-    args.extend(["--plugin-dirs".to_string(), policy_plugin.to_string_lossy().to_string(),
-        "--use-postprocessor".to_string(), "VoxVulgiArchivePolicy:when=pre_process".to_string(),
-        "--use-postprocessor".to_string(), "VoxVulgiArchiveMetadata:when=after_move".to_string()]);
+    args.extend([
+        "--plugin-dirs".to_string(),
+        policy_plugin.to_string_lossy().to_string(),
+        "--use-postprocessor".to_string(),
+        "VoxVulgiArchivePolicy:when=pre_process".to_string(),
+        "--use-postprocessor".to_string(),
+        "VoxVulgiArchiveMetadata:when=after_move".to_string(),
+    ]);
 
     append_yt_dlp_archive_download_options(
         &mut args,
@@ -29518,10 +29912,7 @@ fn retag_audio_language_in_place(
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("output.mkv");
-    let temp_path = parent.join(format!(
-        "{file_name}.retag-{}.mkv",
-        Uuid::new_v4().simple()
-    ));
+    let temp_path = parent.join(format!("{file_name}.retag-{}.mkv", Uuid::new_v4().simple()));
 
     let mut ff = cmd::command(paths.ffmpeg_cmd());
     ff.args(["-nostdin", "-y"])
@@ -30635,12 +31026,21 @@ fn yt_dlp_subtitles_requested(subtitle_mode: Option<&str>) -> bool {
 fn yt_dlp_reported_output_path(stdout: &str) -> Result<PathBuf> {
     // Plain --print filepath sanitizes non-ASCII directories under --restrict-filenames.
     // The JSON receipt retains the actual filesystem path.
-    let post = stdout.lines().filter_map(|line| line.strip_prefix("VV_MEDIA_POST:")).last()
-        .ok_or_else(|| EngineError::InstallFailed("Missing structured download output path".into()))?;
+    let post = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("VV_MEDIA_POST:"))
+        .last()
+        .ok_or_else(|| {
+            EngineError::InstallFailed("Missing structured download output path".into())
+        })?;
     let value: serde_json::Value = serde_json::from_str(post)?;
-    let path = value.get("filepath").and_then(serde_json::Value::as_str)
+    let path = value
+        .get("filepath")
+        .and_then(serde_json::Value::as_str)
         .filter(|path| !path.trim().is_empty())
-        .ok_or_else(|| EngineError::InstallFailed("Missing structured download output path".into()))?;
+        .ok_or_else(|| {
+            EngineError::InstallFailed("Missing structured download output path".into())
+        })?;
     Ok(PathBuf::from(path))
 }
 
@@ -33127,8 +33527,12 @@ mod tests {
         let paths = AppPaths::new(dir.path().join("selected_queue"));
         db::ensure_schema(&paths).expect("schema");
         let conn = db::open(&paths).expect("fixture");
-        for (id, track, created) in [("older", "youtube_single", 1), ("selected", "youtube_single", 100),
-            ("second", "youtube_single", 101), ("recurring", "youtube_recurring", 0)] {
+        for (id, track, created) in [
+            ("older", "youtube_single", 1),
+            ("selected", "youtube_single", 100),
+            ("second", "youtube_single", 101),
+            ("recurring", "youtube_recurring", 0),
+        ] {
             conn.execute(r#"INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path,track,batch_id)
                 VALUES(?1,'download_direct_url','queued',0,'{"url":"https://example.org/video"}',?2,'',?3,'selected-batch')"#,
                 params![id, created, track]).expect("seed");
@@ -33139,53 +33543,103 @@ mod tests {
     #[test]
     fn selected_downloads_filter_before_limit_and_claim_hold_unrelated_work() {
         let (_dir, paths) = selected_queue_fixture();
-        start_selected_downloads(&paths, &["selected".into(), "second".into()], "only").expect("select");
+        start_selected_downloads(&paths, &["selected".into(), "second".into()], "only")
+            .expect("select");
         let rows = fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 1).expect("fetch");
         assert_eq!(rows[0].0, "selected");
-        assert!(fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeRecurring, 10).expect("recurring").is_empty());
-        assert!(matches!(claim_job_for_track(&paths, "older", JobTrack::YoutubeSingle).expect("claim"), DispatchClaimOutcome::DeferredChanged));
+        assert!(
+            fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeRecurring, 10)
+                .expect("recurring")
+                .is_empty()
+        );
+        assert!(matches!(
+            claim_job_for_track(&paths, "older", JobTrack::YoutubeSingle).expect("claim"),
+            DispatchClaimOutcome::DeferredChanged
+        ));
         let conn = db::open_readonly(&paths).expect("read");
-        assert_eq!(conn.query_row("SELECT created_at_ms FROM job WHERE id='selected'", [], |r| r.get::<_,i64>(0)).unwrap(), 100);
+        assert_eq!(
+            conn.query_row(
+                "SELECT created_at_ms FROM job WHERE id='selected'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            100
+        );
     }
 
     #[test]
     fn selected_downloads_continue_all_prioritizes_without_reordering_originals() {
         let (_dir, paths) = selected_queue_fixture();
-        start_selected_downloads(&paths, &["second".into(), "selected".into()], "continue_all").expect("select");
+        start_selected_downloads(
+            &paths,
+            &["second".into(), "selected".into()],
+            "continue_all",
+        )
+        .expect("select");
         assert!(!is_queue_paused(&paths).unwrap());
         let rows = fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 10).expect("fetch");
-        assert_eq!(rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(), vec!["second", "selected", "older"]);
-        assert_eq!(fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeRecurring, 10).unwrap().len(), 1);
+        assert_eq!(
+            rows.iter().map(|r| r.0.as_str()).collect::<Vec<_>>(),
+            vec!["second", "selected", "older"]
+        );
+        assert_eq!(
+            fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeRecurring, 10)
+                .unwrap()
+                .len(),
+            1
+        );
         set_queue_paused(&paths, true).expect("explicit pause revokes selection");
-        assert!(fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 10).unwrap().is_empty());
+        assert!(
+            fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn selected_downloads_validate_whole_set_and_attempt_binding() {
         let (_dir, paths) = selected_queue_fixture();
-        assert!(start_selected_downloads(&paths, &["selected".into(), "missing".into()], "only").is_err());
+        assert!(
+            start_selected_downloads(&paths, &["selected".into(), "missing".into()], "only")
+                .is_err()
+        );
         let conn = db::open_readonly(&paths).expect("read");
         assert!(!has_selected_downloads_conn(&conn).unwrap());
         drop(conn);
         start_selected_downloads(&paths, &["selected".into()], "only").expect("select");
         let conn = db::open(&paths).expect("fixture");
-        conn.execute("UPDATE job SET attempt_no=attempt_no+1 WHERE id='selected'", []).unwrap();
+        conn.execute(
+            "UPDATE job SET attempt_no=attempt_no+1 WHERE id='selected'",
+            [],
+        )
+        .unwrap();
         assert!(!selected_download_allowed_conn(&conn, "selected").unwrap());
         drop(conn);
-        assert!(fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 10).unwrap().is_empty());
+        assert!(
+            fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 10)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
     fn selected_downloads_failure_preserves_remaining_batch_and_restart_pause() {
         let (_dir, paths) = selected_queue_fixture();
-        start_selected_downloads(&paths, &["selected".into(), "second".into()], "only").expect("select");
+        start_selected_downloads(&paths, &["selected".into(), "second".into()], "only")
+            .expect("select");
         let conn = db::open(&paths).expect("fixture");
-        conn.execute("UPDATE job SET status='running' WHERE id='selected'", []).unwrap();
+        conn.execute("UPDATE job SET status='running' WHERE id='selected'", [])
+            .unwrap();
         drop(conn);
         set_failed(&paths, "selected", "provider failure").expect("terminal failure");
-        assert_eq!(fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 10).unwrap()[0].0, "second");
+        assert_eq!(
+            fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 10).unwrap()[0].0,
+            "second"
+        );
         let conn = db::open(&paths).expect("fixture");
-        conn.execute("UPDATE job SET status='running' WHERE id='second'", []).unwrap();
+        conn.execute("UPDATE job SET status='running' WHERE id='second'", [])
+            .unwrap();
         requeue_orphaned_running_jobs(&conn).expect("restart recovery");
         assert!(is_queue_paused_conn(&conn).unwrap());
         assert!(selected_download_allowed_conn(&conn, "second").unwrap());
@@ -33197,31 +33651,70 @@ mod tests {
     #[test]
     fn selected_downloads_safe_mode_is_absolute_and_precedes_enqueue() {
         struct ResetSafeMode;
-        impl Drop for ResetSafeMode { fn drop(&mut self) { set_runner_safe_mode(false); } }
+        impl Drop for ResetSafeMode {
+            fn drop(&mut self) {
+                set_runner_safe_mode(false);
+            }
+        }
         let (_dir, paths) = selected_queue_fixture();
         let _reset = ResetSafeMode;
         set_runner_safe_mode(true);
         assert!(start_selected_downloads(&paths, &["selected".into()], "only").is_err());
-        assert!(enqueue_selected_download_batch(&paths, vec!["https://www.youtube.com/watch?v=3Q61HdKKJeo".into()],
-            None, None, None, None, None, vec![], "only").is_err());
-        assert!(matches!(claim_job_for_track(&paths, "selected", JobTrack::YoutubeSingle).unwrap(), DispatchClaimOutcome::DeferredChanged));
-        assert_eq!(db::open_readonly(&paths).unwrap().query_row("SELECT COUNT(*) FROM job", [], |r| r.get::<_,i64>(0)).unwrap(), 4);
+        assert!(enqueue_selected_download_batch(
+            &paths,
+            vec!["https://www.youtube.com/watch?v=3Q61HdKKJeo".into()],
+            None,
+            None,
+            None,
+            None,
+            None,
+            vec![],
+            "only"
+        )
+        .is_err());
+        assert!(matches!(
+            claim_job_for_track(&paths, "selected", JobTrack::YoutubeSingle).unwrap(),
+            DispatchClaimOutcome::DeferredChanged
+        ));
+        assert_eq!(
+            db::open_readonly(&paths)
+                .unwrap()
+                .query_row("SELECT COUNT(*) FROM job", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            4
+        );
     }
 
     #[test]
     fn selected_downloads_atomic_submission_publishes_only_before_claim() {
         let (_dir, paths) = selected_queue_fixture();
-        let receipt = enqueue_selected_download_batch(&paths, vec!["https://example.org/new-video.mkv".into()],
-            None, None, None, None, None, vec![], "only").expect("atomic submission");
+        let receipt = enqueue_selected_download_batch(
+            &paths,
+            vec!["https://example.org/new-video.mkv".into()],
+            None,
+            None,
+            None,
+            None,
+            None,
+            vec![],
+            "only",
+        )
+        .expect("atomic submission");
         assert!(receipt.submission_error.is_none());
         assert_eq!(receipt.jobs.len(), 1);
-        assert_eq!(receipt.start.as_ref().unwrap().job_ids, vec![receipt.jobs[0].id.clone()]);
+        assert_eq!(
+            receipt.start.as_ref().unwrap().job_ids,
+            vec![receipt.jobs[0].id.clone()]
+        );
         assert!(receipt.start.unwrap().rest_paused);
         let conn = db::open_readonly(&paths).unwrap();
         assert!(is_queue_paused_conn(&conn).unwrap());
         assert!(selected_download_allowed_conn(&conn, &receipt.jobs[0].id).unwrap());
         drop(conn);
-        assert!(matches!(claim_job_for_track(&paths, "older", JobTrack::YoutubeSingle).unwrap(), DispatchClaimOutcome::DeferredChanged));
+        assert!(matches!(
+            claim_job_for_track(&paths, "older", JobTrack::YoutubeSingle).unwrap(),
+            DispatchClaimOutcome::DeferredChanged
+        ));
         let rows = fetch_queued_jobs_for_track(&paths, JobTrack::OtherVideo, 1).unwrap();
         assert_eq!(rows[0].0, receipt.jobs[0].id);
     }
@@ -33230,10 +33723,21 @@ mod tests {
     fn selected_downloads_same_params_retry_invalidates_prepolicy_attempt_snapshot() {
         let (_dir, paths) = selected_queue_fixture();
         let mut conn = db::open(&paths).unwrap();
-        let snapshot: (i64, String) = conn.query_row("SELECT attempt_no,params_json FROM job WHERE id='selected'", [],
-            |r| Ok((r.get(0)?,r.get(1)?))).unwrap();
-        conn.execute("UPDATE job SET attempt_no=attempt_no+1 WHERE id='selected'", []).unwrap();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        let snapshot: (i64, String) = conn
+            .query_row(
+                "SELECT attempt_no,params_json FROM job WHERE id='selected'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        conn.execute(
+            "UPDATE job SET attempt_no=attempt_no+1 WHERE id='selected'",
+            [],
+        )
+        .unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
         assert!(validate_selected_snapshot_conn(&tx, "selected", snapshot.0, &snapshot.1).is_err());
         assert!(!has_selected_downloads_conn(&tx).unwrap());
     }
@@ -33244,26 +33748,49 @@ mod tests {
         let old = fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 1).unwrap();
         assert_eq!(old[0].0, "older");
         start_selected_downloads(&paths, &["selected".into()], "continue_all").unwrap();
-        assert!(matches!(claim_job_for_track(&paths, &old[0].0, JobTrack::YoutubeSingle).unwrap(), DispatchClaimOutcome::DeferredChanged));
-        assert!(matches!(claim_job_for_track(&paths, "recurring", JobTrack::YoutubeRecurring).unwrap(), DispatchClaimOutcome::DeferredChanged));
+        assert!(matches!(
+            claim_job_for_track(&paths, &old[0].0, JobTrack::YoutubeSingle).unwrap(),
+            DispatchClaimOutcome::DeferredChanged
+        ));
+        assert!(matches!(
+            claim_job_for_track(&paths, "recurring", JobTrack::YoutubeRecurring).unwrap(),
+            DispatchClaimOutcome::DeferredChanged
+        ));
         let conn = db::open_readonly(&paths).unwrap();
-        assert!(!selected_priority_prevents_claim_conn(&conn, "other", JobTrack::OtherVideo).unwrap());
-        assert!(!selected_priority_prevents_claim_conn(&conn, "selected", JobTrack::YoutubeSingle).unwrap());
+        assert!(
+            !selected_priority_prevents_claim_conn(&conn, "other", JobTrack::OtherVideo).unwrap()
+        );
+        assert!(
+            !selected_priority_prevents_claim_conn(&conn, "selected", JobTrack::YoutubeSingle)
+                .unwrap()
+        );
     }
 
     #[test]
     fn selected_downloads_other_video_priority_precedes_generic_scan_limit() {
         let (_dir, paths) = selected_queue_fixture();
         let conn = db::open(&paths).unwrap();
-        conn.execute("UPDATE job SET track='other_video' WHERE id IN ('older','selected','second')", []).unwrap();
+        conn.execute(
+            "UPDATE job SET track='other_video' WHERE id IN ('older','selected','second')",
+            [],
+        )
+        .unwrap();
         drop(conn);
         start_selected_downloads(&paths, &["selected".into()], "continue_all").expect("select");
         let generic = fetch_queued_jobs_for_track(&paths, JobTrack::OtherVideo, 1).unwrap();
         assert_eq!(generic[0].0, "selected");
-        let typed = fetch_queued_jobs_for_track_and_type(&paths, JobTrack::OtherVideo,
-            JobType::DownloadDirectUrl.as_str(), 1).unwrap();
+        let typed = fetch_queued_jobs_for_track_and_type(
+            &paths,
+            JobTrack::OtherVideo,
+            JobType::DownloadDirectUrl.as_str(),
+            1,
+        )
+        .unwrap();
         assert_eq!(typed[0].0, "selected");
-        assert!(matches!(claim_job_for_track(&paths, "older", JobTrack::OtherVideo).unwrap(), DispatchClaimOutcome::DeferredChanged));
+        assert!(matches!(
+            claim_job_for_track(&paths, "older", JobTrack::OtherVideo).unwrap(),
+            DispatchClaimOutcome::DeferredChanged
+        ));
     }
 
     fn seed_subtitle_publication_item(paths: &AppPaths, item_id: &str) {
@@ -33310,8 +33837,14 @@ INSERT INTO library_item (
     #[test]
     fn structured_download_path_preserves_unicode_and_ignores_plain_output() {
         let path = r"Z:\Video\휴지필름\test.mkv";
-        let stdout = format!("sanitized-path.mkv\nVV_MEDIA_POST:{}\npostprocessor finished\n", serde_json::json!({"filepath":path}));
-        assert_eq!(yt_dlp_reported_output_path(&stdout).unwrap(), PathBuf::from(path));
+        let stdout = format!(
+            "sanitized-path.mkv\nVV_MEDIA_POST:{}\npostprocessor finished\n",
+            serde_json::json!({"filepath":path})
+        );
+        assert_eq!(
+            yt_dlp_reported_output_path(&stdout).unwrap(),
+            PathBuf::from(path)
+        );
         assert!(yt_dlp_reported_output_path("sanitized-path.mkv").is_err());
         assert!(yt_dlp_reported_output_path("VV_MEDIA_POST:{}").is_err());
         assert!(yt_dlp_reported_output_path("VV_MEDIA_POST:invalid").is_err());
@@ -34692,7 +35225,8 @@ INSERT INTO library_item (
             "single lane base+jitter: {single_delay}"
         );
 
-        let recurring_delay = gate.record_start(&paths, "recurring-job", JobTrack::YoutubeRecurring);
+        let recurring_delay =
+            gate.record_start(&paths, "recurring-job", JobTrack::YoutubeRecurring);
         assert!(
             (10..=15).contains(&recurring_delay),
             "recurring lane base+jitter: {recurring_delay}"
@@ -34921,7 +35455,10 @@ INSERT INTO library_item (
                 (5..=10).contains(&profile.sleep_interval_secs),
                 "safe sleep for {url}"
             );
-            assert_eq!(profile.concurrent_fragments, 1, "safe fragment limit for {url}");
+            assert_eq!(
+                profile.concurrent_fragments, 1,
+                "safe fragment limit for {url}"
+            );
         }
         assert_eq!(
             effective_direct_download_profile(
@@ -34962,7 +35499,10 @@ INSERT INTO library_item (
         );
         assert_eq!(single.sleep_interval_secs, 5, "single lane sleep verbatim");
         assert_eq!(single.sleep_jitter_secs, 10, "single lane jitter verbatim");
-        assert_eq!(single.concurrent_fragments, 1, "single lane fragments verbatim");
+        assert_eq!(
+            single.concurrent_fragments, 1,
+            "single lane fragments verbatim"
+        );
 
         let recurring = effective_direct_download_profile(
             &paths,
@@ -34973,8 +35513,14 @@ INSERT INTO library_item (
             0,
             None,
         );
-        assert_eq!(recurring.sleep_interval_secs, 10, "recurring lane sleep verbatim");
-        assert_eq!(recurring.sleep_jitter_secs, 5, "recurring lane jitter verbatim");
+        assert_eq!(
+            recurring.sleep_interval_secs, 10,
+            "recurring lane sleep verbatim"
+        );
+        assert_eq!(
+            recurring.sleep_jitter_secs, 5,
+            "recurring lane jitter verbatim"
+        );
 
         let other = effective_direct_download_profile(
             &paths,
@@ -34985,8 +35531,14 @@ INSERT INTO library_item (
             2,
             None,
         );
-        assert_eq!(other.sleep_interval_secs, 3, "non-youtube keeps requested preset");
-        assert_eq!(other.concurrent_fragments, 8, "non-youtube keeps requested preset");
+        assert_eq!(
+            other.sleep_interval_secs, 3,
+            "non-youtube keeps requested preset"
+        );
+        assert_eq!(
+            other.concurrent_fragments, 8,
+            "non-youtube keeps requested preset"
+        );
     }
 
     #[test]
@@ -35124,13 +35676,27 @@ INSERT INTO library_item (
         let dir = tempfile::tempdir().unwrap();
         let paths = AppPaths::new(dir.path().to_path_buf());
         db::ensure_schema(&paths).unwrap();
-        let job = enqueue_with_type_item_batch_and_track(&paths, JobType::DownloadDirectUrl,
-            r#"{"url":"https://example.com/foreign.mp4"}"#.into(), None, None, JobTrack::OtherVideo).unwrap();
+        let job = enqueue_with_type_item_batch_and_track(
+            &paths,
+            JobType::DownloadDirectUrl,
+            r#"{"url":"https://example.com/foreign.mp4"}"#.into(),
+            None,
+            None,
+            JobTrack::OtherVideo,
+        )
+        .unwrap();
         let conn = db::open(&paths).unwrap();
-        conn.execute("UPDATE job SET status='running' WHERE id=?1", [&job.id]).unwrap();
+        conn.execute("UPDATE job SET status='running' WHERE id=?1", [&job.id])
+            .unwrap();
         drop(conn);
-        assert!(restart_download_current(&paths, &job.id).unwrap_err().to_string().contains("ownership"));
-        assert_eq!(get_job(&paths, &job.id).unwrap().unwrap().status, JobStatus::Running);
+        assert!(restart_download_current(&paths, &job.id)
+            .unwrap_err()
+            .to_string()
+            .contains("ownership"));
+        assert_eq!(
+            get_job(&paths, &job.id).unwrap().unwrap().status,
+            JobStatus::Running
+        );
         assert!(current_download_pacing_params(&paths, "null").is_err());
     }
 
@@ -35148,7 +35714,10 @@ INSERT INTO library_item (
             None, Some("recovery-batch".into()), JobTrack::OtherVideo).unwrap();
         let replacement = restart_download_current(&paths, &original.id).unwrap();
         let params: serde_json::Value = serde_json::from_str(&replacement.params_json).unwrap();
-        assert_eq!(params["yt_dlp_sleep_requests"], preset.yt_dlp_sleep_requests);
+        assert_eq!(
+            params["yt_dlp_sleep_requests"],
+            preset.yt_dlp_sleep_requests
+        );
         assert_eq!(params["output_dir"], "archive");
         assert_eq!(params["format"], "best");
         assert_eq!(params["subtitle_languages"], serde_json::json!(["en"]));
@@ -35156,9 +35725,20 @@ INSERT INTO library_item (
         assert_eq!(replacement.attempt_no, 1);
         assert_eq!(replacement.track, original.track);
         assert_eq!(replacement.batch_id, original.batch_id);
-        assert_eq!(get_job(&paths, &original.id).unwrap().unwrap().status, JobStatus::Queued);
-        assert_eq!(restart_download_current(&paths, &original.id).unwrap().id, replacement.id);
-        assert_eq!(restart_download_current(&paths, &original.id).unwrap().attempt_no, 1);
+        assert_eq!(
+            get_job(&paths, &original.id).unwrap().unwrap().status,
+            JobStatus::Queued
+        );
+        assert_eq!(
+            restart_download_current(&paths, &original.id).unwrap().id,
+            replacement.id
+        );
+        assert_eq!(
+            restart_download_current(&paths, &original.id)
+                .unwrap()
+                .attempt_no,
+            1
+        );
     }
 
     #[test]
@@ -35277,7 +35857,12 @@ INSERT INTO library_item (
         let paths = AppPaths::new(dir.path().to_path_buf());
         db::ensure_schema(&paths).unwrap();
         let conn = db::open(&paths).unwrap();
-        for (id, status, track, created) in [("old-running", "running", "youtube_single", 1), ("new-queued", "queued", "youtube_single", 5), ("image", "queued", "image_archive", 6), ("failure", "failed", "youtube_single", 7)] {
+        for (id, status, track, created) in [
+            ("old-running", "running", "youtube_single", 1),
+            ("new-queued", "queued", "youtube_single", 5),
+            ("image", "queued", "image_archive", 6),
+            ("failure", "failed", "youtube_single", 7),
+        ] {
             conn.execute("INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path,track,target_title) VALUES(?1,'download_direct_url',?2,0,'{}',?3,'',?4,?1)", params![id,status,created,track]).unwrap();
         }
         drop(conn);
@@ -35288,10 +35873,16 @@ INSERT INTO library_item (
         let second = operator_activity_page(&paths, "youtube", "now", 1, 1).unwrap();
         assert_eq!(second["jobs"][0]["job"]["id"], "new-queued");
         assert_eq!(second["has_more"], false);
-        assert_eq!(operator_activity_page(&paths,"images","now",0,20).unwrap()["total"],1);
-        assert_eq!(operator_activity_page(&paths,"youtube","attention",0,20).unwrap()["total"],1);
-        assert!(operator_activity_page(&paths,"unknown","now",0,20).is_err());
-        assert!(operator_activity_page(&paths,"all","unknown",0,20).is_err());
+        assert_eq!(
+            operator_activity_page(&paths, "images", "now", 0, 20).unwrap()["total"],
+            1
+        );
+        assert_eq!(
+            operator_activity_page(&paths, "youtube", "attention", 0, 20).unwrap()["total"],
+            1
+        );
+        assert!(operator_activity_page(&paths, "unknown", "now", 0, 20).is_err());
+        assert!(operator_activity_page(&paths, "all", "unknown", 0, 20).is_err());
     }
 
     #[test]
@@ -35312,8 +35903,11 @@ INSERT INTO library_item (
         assert_eq!(page["jobs"][0]["job"]["id"], "payload-31");
         let snapshot = database.snapshot();
         let receipt = snapshot.recent_receipts.last().unwrap();
-        assert!(receipt.file_bytes_read.unwrap() < 3 * 1024 * 1024,
-            "one-row page must not sort/read all 32 MiB payloads: {:?}", receipt.file_bytes_read);
+        assert!(
+            receipt.file_bytes_read.unwrap() < 3 * 1024 * 1024,
+            "one-row page must not sort/read all 32 MiB payloads: {:?}",
+            receipt.file_bytes_read
+        );
     }
 
     #[test]
@@ -35348,7 +35942,10 @@ INSERT INTO library_item (
         assert_eq!(gate.mode.as_deref(), Some("cooldown"));
         assert_eq!(gate.cooldown_attempt, 2);
         assert_eq!(gate.state, "held");
-        assert_eq!(gate.hold_reason.as_deref(), Some("adaptive_youtube_cooldown"));
+        assert_eq!(
+            gate.hold_reason.as_deref(),
+            Some("adaptive_youtube_cooldown")
+        );
         assert_eq!(gate.next_eligible_at_ms, Some(next_probe));
         assert_eq!(gate.entered_at_ms, Some(now - 3_600_000));
     }
@@ -35403,10 +36000,15 @@ INSERT INTO library_item (
         );
 
         let snapshot = get_job_tracks_runtime_snapshot(&paths).expect("runtime snapshot");
-        assert_eq!(snapshot.provider_file_identity_diagnostics.as_ref(),
+        assert_eq!(
+            snapshot.provider_file_identity_diagnostics.as_ref(),
             Some(&tools::provider_file_identity_diagnostics(&paths)),
-            "snapshot must expose the memory counters after its existing gate projection");
-        assert!(serde_json::to_value(&snapshot).unwrap()["provider_file_identity_diagnostics"].is_object());
+            "snapshot must expose the memory counters after its existing gate projection"
+        );
+        assert!(
+            serde_json::to_value(&snapshot).unwrap()["provider_file_identity_diagnostics"]
+                .is_object()
+        );
         assert_eq!(snapshot.tracks.len(), JobTrack::ALL.len());
         let single = snapshot
             .tracks
@@ -36072,6 +36674,242 @@ INSERT INTO library_item (
     }
 
     #[test]
+    fn wp0329_cosy_failed_report_retains_bounded_child_stderr_only_for_failed_segments() {
+        let failed: VoiceCloneReport = serde_json::from_value(serde_json::json!({
+            "segments": [{"index": 7, "voice_clone_outcome": "failed", "error": "clone_failed: shape", "failure_diagnostics": {"traceback": "original frame"}}]
+        })).unwrap();
+        let stderr = format!("{}Traceback: original failure", "é".repeat(20_000));
+        let details = cosyvoice_failed_segment_diagnostics(&failed, stderr.as_bytes()).unwrap();
+        assert_eq!(details["failed_segment_indices"], serde_json::json!([7]));
+        assert_eq!(details["stderr_truncated"], true);
+        let tail = details["stderr_tail"].as_str().unwrap();
+        assert_eq!(tail.chars().count(), 16_384);
+        assert!(tail.ends_with("Traceback: original failure"));
+        let successful: VoiceCloneReport = serde_json::from_value(serde_json::json!({
+            "segments": [{"index": 7, "voice_clone_outcome": "converted"}]
+        }))
+        .unwrap();
+        assert!(cosyvoice_failed_segment_diagnostics(&successful, stderr.as_bytes()).is_none());
+        assert_eq!(
+            cosyvoice_failed_segment_diagnostics(&failed, b"").unwrap()["stderr_tail"],
+            ""
+        );
+    }
+
+    #[test]
+    fn wp0329_cosy_failure_evidence_keeps_real_traceback_and_reference_dimensions() {
+        let source = include_str!("../resources/tooling/voxvulgi_cosyvoice_render.py");
+        let code = format!(
+            r#"import ast, traceback, tempfile, wave, os
+source = {}
+tree = ast.parse(source)
+node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'failed_segment_diagnostics')
+exec(compile(ast.Module(body=[node], type_ignores=[]), 'actual_render_helper', 'exec'))
+with tempfile.TemporaryDirectory() as root:
+    path = os.path.join(root, 'reference.wav')
+    with wave.open(path, 'wb') as w:
+        w.setnchannels(1); w.setsampwidth(2); w.setframerate(16000); w.writeframes(bytes(640))
+    try:
+        raise RuntimeError('actual-shape-failure')
+    except RuntimeError:
+        evidence = failed_segment_diagnostics({{'text': 'private text', 'start_ms': 0, 'end_ms': 20}}, path, [])
+    assert 'RuntimeError: actual-shape-failure' in evidence['traceback']
+    assert len(evidence['traceback']) <= 16384
+    assert evidence['reference'] == {{'frames': 320, 'sample_rate': 16000, 'channels': 1, 'sample_width_bytes': 2}}
+    assert 'text' not in evidence and evidence['text_characters'] == 12
+    try:
+        raise RuntimeError('x' * 20000)
+    except RuntimeError:
+        missing = failed_segment_diagnostics({{}}, path + '.missing', [object()])
+    assert len(missing['traceback']) == 16384 and len(missing['reference_probe_error']) <= 512
+    assert 'chunk_probe_error' in missing
+"#,
+            serde_json::to_string(source).unwrap()
+        );
+        let python = std::env::var_os("VOXVULGI_TEST_PYTHON").unwrap_or_else(|| "python".into());
+        let mut command = crate::cmd::command(python);
+        let fixture = tempfile::tempdir().unwrap();
+        let fixture_path = fixture.path().join("owning_render_regression.py");
+        std::fs::write(&fixture_path, code.as_bytes()).unwrap();
+        command.arg("-I").arg("-S").arg(&fixture_path);
+        let output =
+            crate::cmd::run_owned_output(&mut command, std::time::Duration::from_secs(15), || {
+                false
+            })
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn wp0329_cosy_renderer_prevents_bytecode_mutating_governed_model_tree() {
+        let source = include_str!("../resources/tooling/voxvulgi_cosyvoice_render.py");
+        let code = format!(
+            r#"import ast, sys, tempfile, os, importlib
+source = {}
+tree = ast.parse(source)
+setter = next(n for n in tree.body if isinstance(n, ast.Assign) and any(isinstance(t, ast.Attribute) and isinstance(t.value, ast.Name) and t.value.id == 'sys' and t.attr == 'dont_write_bytecode' for t in n.targets))
+exec(compile(ast.Module(body=[setter], type_ignores=[]), 'actual_renderer_startup', 'exec'))
+with tempfile.TemporaryDirectory() as root:
+    path = os.path.join(root, 'owned_model_fixture.py')
+    with open(path, 'w') as f: f.write('value = 42\n')
+    sys.path.insert(0, root)
+    assert importlib.import_module('owned_model_fixture').value == 42
+    assert os.listdir(root) == ['owned_model_fixture.py'], 'model import created ungoverned bytecode'
+"#,
+            serde_json::to_string(source).unwrap()
+        );
+        let python = std::env::var_os("VOXVULGI_TEST_PYTHON").unwrap_or_else(|| "python".into());
+        let mut command = crate::cmd::command(python);
+        let fixture = tempfile::tempdir().unwrap();
+        let fixture_path = fixture.path().join("owning_render_regression.py");
+        std::fs::write(&fixture_path, code.as_bytes()).unwrap();
+        command.arg("-I").arg("-S").arg(&fixture_path);
+        let output =
+            crate::cmd::run_owned_output(&mut command, std::time::Duration::from_secs(15), || {
+                false
+            })
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires governed Cosy interpreter via VOXVULGI_TEST_COSY_PYTHON"]
+    fn wp0329_cosy_cpu_llm_dtype_normalization_preserves_gpu_policy() {
+        let source = include_str!("../resources/tooling/voxvulgi_cosyvoice_render.py");
+        let code = format!(
+            r#"import ast, types, torch
+source = {}
+tree = ast.parse(source)
+node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'normalize_cpu_llm_dtype')
+exec(compile(ast.Module(body=[node], type_ignores=[]), 'actual_renderer_cpu_dtype', 'exec'))
+class Llm(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embedding = torch.nn.Embedding(4, 3)
+        self.nested = torch.nn.Sequential(torch.nn.Linear(3, 2).to(dtype=torch.bfloat16), torch.nn.ReLU())
+    def forward(self, tokens):
+        return self.nested(self.embedding(tokens))
+llm = Llm()
+tokens = torch.tensor([0, 1], dtype=torch.long)
+assert llm.embedding.weight.dtype == torch.float32
+assert llm.nested[0].weight.dtype == torch.bfloat16
+try:
+    llm(tokens)
+except RuntimeError as error:
+    assert 'dtype' in str(error)
+else:
+    raise AssertionError('counterfactual mixed-dtype forward unexpectedly succeeded')
+owned = types.SimpleNamespace(model=types.SimpleNamespace(device=torch.device('cpu'), llm=llm))
+receipt = normalize_cpu_llm_dtype(owned)
+assert receipt['cpu_float32_applied'] is True
+assert len(receipt['floating_parameters_before']) == 2
+assert all(parameter.dtype == torch.float32 for parameter in llm.parameters())
+output = llm(tokens)
+assert output.dtype == torch.float32 and tuple(output.shape) == (2, 2) and torch.isfinite(output).all()
+class NoFloatLlm(Llm):
+    def float(self):
+        raise AssertionError('non-CPU guard must not cast the LLM')
+# CUDA device metadata exercises the guard without requiring a CUDA allocation.
+gpu_guard_llm = NoFloatLlm()
+gpu_guard = types.SimpleNamespace(model=types.SimpleNamespace(device=torch.device('cuda'), llm=gpu_guard_llm))
+gpu_receipt = normalize_cpu_llm_dtype(gpu_guard)
+assert gpu_receipt['cpu_float32_applied'] is False
+assert gpu_receipt['floating_parameters_before'] == gpu_receipt['floating_parameters_after']
+assert gpu_guard_llm.nested[0].weight.dtype == torch.bfloat16
+"#,
+            serde_json::to_string(source).unwrap()
+        );
+        let python = std::env::var_os("VOXVULGI_TEST_COSY_PYTHON").expect(
+            "owning real-Torch regression requires explicit governed VOXVULGI_TEST_COSY_PYTHON",
+        );
+        let fixture = tempfile::tempdir().unwrap();
+        let fixture_path = fixture.path().join("cosy_cpu_dtype_regression.py");
+        std::fs::write(&fixture_path, code.as_bytes()).unwrap();
+        let mut command = crate::cmd::command(python);
+        command.arg("-I").arg("-B").arg(&fixture_path);
+        let output =
+            crate::cmd::run_owned_output(&mut command, std::time::Duration::from_secs(60), || {
+                false
+            })
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore = "requires governed Torch and SoundFile via VOXVULGI_TEST_COSY_PYTHON"]
+    fn wp0329_cosy_generated_wav_preserves_channels_samples_and_rejects_invalid_audio() {
+        let source = include_str!("../resources/tooling/voxvulgi_cosyvoice_render.py");
+        let code = format!(
+            r#"import ast, os, tempfile, torch, soundfile
+source = {}
+tree = ast.parse(source)
+node = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == 'save_generated_wav')
+exec(compile(ast.Module(body=[node], type_ignores=[]), 'actual_renderer_wave_writer', 'exec'))
+with tempfile.TemporaryDirectory() as root:
+    original = torch.tensor([[0.123, -0.25, 0.5, -0.375], [0.75, -0.5, 0.321, -0.125]], dtype=torch.float64)
+    path = os.path.join(root, 'asymmetric_stereo.wav')
+    save_generated_wav(path, original, 24000)
+    info = soundfile.info(path)
+    assert info.format == 'WAV' and info.subtype == 'PCM_16'
+    assert info.frames == 4 and info.channels == 2 and info.samplerate == 24000
+    actual, rate = soundfile.read(path, dtype='float32', always_2d=True)
+    assert rate == 24000 and actual.shape == (4, 2)
+    expected = original.to(dtype=torch.float32).transpose(0, 1)
+    assert torch.max(torch.abs(torch.from_numpy(actual) - expected)).item() <= 1 / 32768 + 1e-7
+    invalid = [torch.empty(1, 0), torch.empty(0, 4), torch.zeros(4), torch.tensor([[float('nan')]]), torch.tensor([[float('inf')]]), torch.tensor([[1.0]]), torch.tensor([[-1.1]])]
+    for index, audio in enumerate(invalid):
+        rejected = os.path.join(root, 'rejected_' + str(index) + '.wav')
+        try:
+            save_generated_wav(rejected, audio, 24000)
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError('invalid generated audio was published')
+        assert not os.path.exists(rejected)
+    rejected = os.path.join(root, 'invalid_rate.wav')
+    try:
+        save_generated_wav(rejected, original, 0)
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError('invalid sample rate was published')
+    assert not os.path.exists(rejected)
+"#,
+            serde_json::to_string(source).unwrap()
+        );
+        let python = std::env::var_os("VOXVULGI_TEST_COSY_PYTHON").expect(
+            "owning real-audio regression requires explicit governed VOXVULGI_TEST_COSY_PYTHON",
+        );
+        let fixture = tempfile::tempdir().unwrap();
+        let fixture_path = fixture.path().join("cosy_wave_regression.py");
+        std::fs::write(&fixture_path, code.as_bytes()).unwrap();
+        let mut command = crate::cmd::command(python);
+        command.arg("-I").arg("-B").arg(&fixture_path);
+        let output =
+            crate::cmd::run_owned_output(&mut command, std::time::Duration::from_secs(60), || {
+                false
+            })
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
     fn summarize_voice_clone_report_detects_partial_fallback() {
         let report = VoiceCloneReport {
             segments_total: 3,
@@ -36546,15 +37384,27 @@ EOF
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
         db::ensure_schema(&paths).expect("schema");
-        let overview = jobs_overview_snapshot_with_context(&paths, None, None,
-            Some(db::DatabaseOperationContext::new("agent_bridge", "jobs.overview")
-                .with_request_id("overview-request-test"))).expect("overview");
+        let overview = jobs_overview_snapshot_with_context(
+            &paths,
+            None,
+            None,
+            Some(
+                db::DatabaseOperationContext::new("agent_bridge", "jobs.overview")
+                    .with_request_id("overview-request-test"),
+            ),
+        )
+        .expect("overview");
         assert_eq!(overview.preview_view, "now");
         assert!(overview.jobs.is_empty());
         assert_eq!(overview.counts.total, 0);
-        let runtime = db::AppDatabase::for_paths(&paths).expect("runtime").snapshot();
-        let receipt = runtime.recent_receipts.iter()
-            .find(|row| row.request_id.as_deref() == Some("overview-request-test")).expect("correlated receipt");
+        let runtime = db::AppDatabase::for_paths(&paths)
+            .expect("runtime")
+            .snapshot();
+        let receipt = runtime
+            .recent_receipts
+            .iter()
+            .find(|row| row.request_id.as_deref() == Some("overview-request-test"))
+            .expect("correlated receipt");
         assert_eq!(receipt.operation, "jobs.overview");
         assert!(receipt.queue_wait_ms.is_some());
         assert!(receipt.phase_ms.contains_key("open"));
@@ -36568,16 +37418,35 @@ EOF
         let paths = AppPaths::new(dir.path().to_path_buf());
         db::ensure_schema(&paths).expect("schema");
         let database = db::AppDatabase::for_paths(&paths).expect("runtime");
-        database.write_context(db::DatabaseOperationContext::new("test", "remove_owned_fixture_table"))
-            .expect("writer").execute_batch("DROP TABLE job").expect("fixture failure");
-        let baseline = jobs_overview_snapshot(&paths, None, None).expect_err("missing table").to_string();
-        let actual = jobs_overview_snapshot_with_context(&paths, None, None,
-            Some(db::DatabaseOperationContext::new("agent_bridge", "jobs.overview")
-                .with_request_id("overview-failure-test"))).expect_err("same failure").to_string();
+        database
+            .write_context(db::DatabaseOperationContext::new(
+                "test",
+                "remove_owned_fixture_table",
+            ))
+            .expect("writer")
+            .execute_batch("DROP TABLE job")
+            .expect("fixture failure");
+        let baseline = jobs_overview_snapshot(&paths, None, None)
+            .expect_err("missing table")
+            .to_string();
+        let actual = jobs_overview_snapshot_with_context(
+            &paths,
+            None,
+            None,
+            Some(
+                db::DatabaseOperationContext::new("agent_bridge", "jobs.overview")
+                    .with_request_id("overview-failure-test"),
+            ),
+        )
+        .expect_err("same failure")
+        .to_string();
         assert_eq!(actual, baseline);
         let runtime = database.snapshot();
-        let receipt = runtime.recent_receipts.iter()
-            .find(|row| row.request_id.as_deref() == Some("overview-failure-test")).expect("failure receipt");
+        let receipt = runtime
+            .recent_receipts
+            .iter()
+            .find(|row| row.request_id.as_deref() == Some("overview-failure-test"))
+            .expect("failure receipt");
         assert_eq!(receipt.outcome, "failed");
         assert!(receipt.phase_ms.contains_key("overview_queries"));
     }
@@ -36791,28 +37660,75 @@ EOF
         let paths = AppPaths::new(dir.path().to_path_buf());
         db::ensure_schema(&paths).expect("schema");
         let params_json = r#"{"url":"https://www.youtube.com/watch?v=shutdown-fixture","provider":"youtube_yt_dlp_v1"}"#;
-        let job = enqueue_with_type_item_and_batch_id(&paths, JobType::DownloadDirectUrl,
-            params_json.to_string(), None, Some("shutdown-original-batch".to_string())).expect("enqueue");
+        let job = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::DownloadDirectUrl,
+            params_json.to_string(),
+            None,
+            Some("shutdown-original-batch".to_string()),
+        )
+        .expect("enqueue");
         let conn = db::open(&paths).expect("fixture connection");
-        conn.execute("UPDATE job SET status='running', started_at_ms=42, attempt_no=3 WHERE id=?1", [&job.id]).expect("running attempt");
-        let outcome_count_before: i64 = conn.query_row("SELECT COUNT(*) FROM downloader_outcome", [], |row|row.get(0)).expect("outcome count");
-        let error = augment_yt_dlp_error("https://www.youtube.com/watch?v=shutdown-fixture",
-            yt_dlp_cancellation_error(true), true, false, true);
+        conn.execute(
+            "UPDATE job SET status='running', started_at_ms=42, attempt_no=3 WHERE id=?1",
+            [&job.id],
+        )
+        .expect("running attempt");
+        let outcome_count_before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM downloader_outcome", [], |row| {
+                row.get(0)
+            })
+            .expect("outcome count");
+        let error = augment_yt_dlp_error(
+            "https://www.youtube.com/watch?v=shutdown-fixture",
+            yt_dlp_cancellation_error(true),
+            true,
+            false,
+            true,
+        );
         assert!(matches!(error, EngineError::JobInterruptedByShutdown));
-        assert!(preserve_shutdown_interrupted_download(&paths, &job.id, &error));
+        assert!(preserve_shutdown_interrupted_download(
+            &paths, &job.id, &error
+        ));
         let before_recovery: (String, i64, String, Option<String>, String, Option<String>, Option<i64>) = conn.query_row(
             "SELECT id,attempt_no,params_json,batch_id,status,error,finished_at_ms FROM job WHERE id=?1", [&job.id],
             |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?))).expect("preserved original");
-        assert_eq!(before_recovery, (job.id.clone(), 3, params_json.to_string(), Some("shutdown-original-batch".into()), "running".into(), None, None));
-        assert_eq!(requeue_orphaned_running_jobs(&conn).expect("canonical startup recovery"), 1);
+        assert_eq!(
+            before_recovery,
+            (
+                job.id.clone(),
+                3,
+                params_json.to_string(),
+                Some("shutdown-original-batch".into()),
+                "running".into(),
+                None,
+                None
+            )
+        );
+        assert_eq!(
+            requeue_orphaned_running_jobs(&conn).expect("canonical startup recovery"),
+            1
+        );
         let recovered: (String, i64, String, Option<String>, String, Option<i64>, Option<i64>, Option<String>) = conn.query_row(
             "SELECT id,attempt_no,params_json,batch_id,status,started_at_ms,finished_at_ms,error FROM job WHERE id=?1", [&job.id],
             |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?,row.get(6)?,row.get(7)?))).expect("recovered original");
-        assert_eq!(recovered, (job.id.clone(), 3, params_json.to_string(), Some("shutdown-original-batch".into()), "queued".into(), None, None, None));
+        assert_eq!(
+            recovered,
+            (
+                job.id.clone(),
+                3,
+                params_json.to_string(),
+                Some("shutdown-original-batch".into()),
+                "queued".into(),
+                None,
+                None,
+                None
+            )
+        );
         let (jobs, attempts, outcomes): (i64,i64,i64) = conn.query_row(
             "SELECT (SELECT COUNT(*) FROM job),(SELECT COUNT(*) FROM job_attempt),(SELECT COUNT(*) FROM downloader_outcome)", [],
             |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?))).expect("no manufactured lineage or failure");
-        assert_eq!((jobs,attempts,outcomes), (1,0,outcome_count_before));
+        assert_eq!((jobs, attempts, outcomes), (1, 0, outcome_count_before));
     }
 
     #[test]
@@ -36820,31 +37736,77 @@ EOF
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
         db::ensure_schema(&paths).expect("schema");
-        let original_params = r#"{"url":"http://127.0.0.1:53190/wp0332-active.mkv","provider":"direct_http"}"#;
-        let job = enqueue_with_type_item_and_batch_id(&paths, JobType::DownloadDirectUrl,
-            original_params.into(), None, Some("direct-http-shutdown-batch".into())).expect("enqueue");
+        let original_params =
+            r#"{"url":"http://127.0.0.1:53190/wp0332-active.mkv","provider":"direct_http"}"#;
+        let job = enqueue_with_type_item_and_batch_id(
+            &paths,
+            JobType::DownloadDirectUrl,
+            original_params.into(),
+            None,
+            Some("direct-http-shutdown-batch".into()),
+        )
+        .expect("enqueue");
         let conn = db::open(&paths).expect("fixture connection");
-        conn.execute("UPDATE job SET status='running',started_at_ms=42,attempt_no=2 WHERE id=?1", [&job.id]).expect("running");
+        conn.execute(
+            "UPDATE job SET status='running',started_at_ms=42,attempt_no=2 WHERE id=?1",
+            [&job.id],
+        )
+        .expect("running");
         let counts_before: (i64, i64) = conn.query_row(
             "SELECT (SELECT COUNT(*) FROM job_attempt),(SELECT COUNT(*) FROM downloader_outcome)", [],
             |r| Ok((r.get(0)?, r.get(1)?))).expect("counts");
-        let error = direct_download_fallback_error("http://127.0.0.1:53190/wp0332-active.mkv",
-            EngineError::InstallFailed("not direct media".into()), direct_download_cancellation_error(true));
+        let error = direct_download_fallback_error(
+            "http://127.0.0.1:53190/wp0332-active.mkv",
+            EngineError::InstallFailed("not direct media".into()),
+            direct_download_cancellation_error(true),
+        );
         assert!(matches!(error, EngineError::JobInterruptedByShutdown));
-        assert!(preserve_shutdown_interrupted_download(&paths, &job.id, &error));
+        assert!(preserve_shutdown_interrupted_download(
+            &paths, &job.id, &error
+        ));
         let before: (String, i64, String, Option<String>, String, Option<String>, Option<i64>) = conn.query_row(
             "SELECT id,attempt_no,params_json,batch_id,status,error,finished_at_ms FROM job WHERE id=?1", [&job.id],
             |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?))).expect("canonical original");
-        assert_eq!(before, (job.id.clone(), 2, original_params.into(), Some("direct-http-shutdown-batch".into()), "running".into(), None, None));
-        assert_eq!(requeue_orphaned_running_jobs(&conn).expect("startup recovery"), 1);
-        let after: (String, i64, String, Option<String>, String) = conn.query_row(
-            "SELECT id,attempt_no,params_json,batch_id,status FROM job WHERE id=?1", [&job.id],
-            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).expect("recovered original");
-        assert_eq!(after, (job.id, 2, original_params.into(), Some("direct-http-shutdown-batch".into()), "queued".into()));
+        assert_eq!(
+            before,
+            (
+                job.id.clone(),
+                2,
+                original_params.into(),
+                Some("direct-http-shutdown-batch".into()),
+                "running".into(),
+                None,
+                None
+            )
+        );
+        assert_eq!(
+            requeue_orphaned_running_jobs(&conn).expect("startup recovery"),
+            1
+        );
+        let after: (String, i64, String, Option<String>, String) = conn
+            .query_row(
+                "SELECT id,attempt_no,params_json,batch_id,status FROM job WHERE id=?1",
+                [&job.id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            )
+            .expect("recovered original");
+        assert_eq!(
+            after,
+            (
+                job.id,
+                2,
+                original_params.into(),
+                Some("direct-http-shutdown-batch".into()),
+                "queued".into()
+            )
+        );
         let counts_after: (i64, i64) = conn.query_row(
             "SELECT (SELECT COUNT(*) FROM job_attempt),(SELECT COUNT(*) FROM downloader_outcome)", [],
             |r| Ok((r.get(0)?, r.get(1)?))).expect("counts");
-        assert_eq!(counts_after, counts_before, "shutdown creates neither attempt nor provider failure");
+        assert_eq!(
+            counts_after, counts_before,
+            "shutdown creates neither attempt nor provider failure"
+        );
     }
 
     #[test]
@@ -36854,15 +37816,33 @@ EOF
         db::ensure_schema(&paths).expect("schema");
         let job = enqueue(&paths, JobType::DownloadDirectUrl, "{}".into()).expect("enqueue");
         let conn = db::open(&paths).expect("fixture connection");
-        conn.execute("UPDATE job SET status='canceled' WHERE id=?1", [&job.id]).expect("user cancel");
-        let error = download_direct_media_asset(&paths, "http://127.0.0.1:1/never-requested.mkv", &job.id, None, None, None)
-            .expect_err("canceled before network");
+        conn.execute("UPDATE job SET status='canceled' WHERE id=?1", [&job.id])
+            .expect("user cancel");
+        let error = download_direct_media_asset(
+            &paths,
+            "http://127.0.0.1:1/never-requested.mkv",
+            &job.id,
+            None,
+            None,
+            None,
+        )
+        .expect_err("canceled before network");
         assert!(matches!(&error, EngineError::InstallFailed(message) if message == "job canceled"));
-        assert!(!preserve_shutdown_interrupted_download(&paths, &job.id, &error));
-        assert_eq!(requeue_orphaned_running_jobs(&conn).expect("startup recovery"), 0);
-        let combined = direct_download_fallback_error("http://127.0.0.1/media.mkv",
-            EngineError::InstallFailed("http 500".into()), direct_download_cancellation_error(false));
-        assert!(matches!(&combined, EngineError::InstallFailed(message) if message.contains("http 500") && message.contains("job canceled")));
+        assert!(!preserve_shutdown_interrupted_download(
+            &paths, &job.id, &error
+        ));
+        assert_eq!(
+            requeue_orphaned_running_jobs(&conn).expect("startup recovery"),
+            0
+        );
+        let combined = direct_download_fallback_error(
+            "http://127.0.0.1/media.mkv",
+            EngineError::InstallFailed("http 500".into()),
+            direct_download_cancellation_error(false),
+        );
+        assert!(
+            matches!(&combined, EngineError::InstallFailed(message) if message.contains("http 500") && message.contains("job canceled"))
+        );
     }
 
     #[test]
@@ -36880,32 +37860,74 @@ EOF
             let (mut stream, _) = loop {
                 match listener.accept() {
                     Ok(accepted) => break accepted,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+                    Err(error)
+                        if error.kind() == std::io::ErrorKind::WouldBlock
+                            && Instant::now() < deadline =>
+                    {
+                        thread::sleep(Duration::from_millis(10))
+                    }
                     Err(error) => panic!("bounded fixture accept: {error}"),
                 }
             };
-            stream.set_read_timeout(Some(Duration::from_secs(3))).expect("bounded read");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("bounded read");
             let mut request = [0; 4096];
             stream.read(&mut request).expect("request headers");
             stream.write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").expect("response");
         });
-        let error = download_direct_media_asset(&paths, &format!("http://{address}/failure.mkv"), &job.id, None,
-            Some(dir.path().to_str().expect("path")), None).expect_err("real HTTP error");
+        let error = download_direct_media_asset(
+            &paths,
+            &format!("http://{address}/failure.mkv"),
+            &job.id,
+            None,
+            Some(dir.path().to_str().expect("path")),
+            None,
+        )
+        .expect_err("real HTTP error");
         server.join().expect("owned server joined");
-        assert!(matches!(&error, EngineError::InstallFailed(message) if message.contains("http 500")));
-        assert!(!preserve_shutdown_interrupted_download(&paths, &job.id, &error));
+        assert!(
+            matches!(&error, EngineError::InstallFailed(message) if message.contains("http 500"))
+        );
+        assert!(!preserve_shutdown_interrupted_download(
+            &paths, &job.id, &error
+        ));
     }
 
     #[test]
     fn direct_http_owned_child_abort_requires_shutdown_and_exact_cancellation() {
         for tool in ["ffmpeg", "ffprobe"] {
-            let canceled = || EngineError::ExternalToolFailed { tool: tool.into(), code: None, stderr: format!("{tool} canceled") };
-            assert!(matches!(direct_download_child_error(canceled(), true), EngineError::JobInterruptedByShutdown));
-            assert!(matches!(direct_download_child_error(canceled(), false), EngineError::ExternalToolFailed { .. }));
-            let nonzero = EngineError::ExternalToolFailed { tool: tool.into(), code: Some(1), stderr: format!("{tool} canceled") };
-            assert!(matches!(direct_download_child_error(nonzero, true), EngineError::ExternalToolFailed { code: Some(1), .. }));
-            let timeout = EngineError::ExternalToolFailed { tool: tool.into(), code: None, stderr: format!("{tool} timed out") };
-            assert!(matches!(direct_download_child_error(timeout, true), EngineError::ExternalToolFailed { .. }));
+            let canceled = || EngineError::ExternalToolFailed {
+                tool: tool.into(),
+                code: None,
+                stderr: format!("{tool} canceled"),
+            };
+            assert!(matches!(
+                direct_download_child_error(canceled(), true),
+                EngineError::JobInterruptedByShutdown
+            ));
+            assert!(matches!(
+                direct_download_child_error(canceled(), false),
+                EngineError::ExternalToolFailed { .. }
+            ));
+            let nonzero = EngineError::ExternalToolFailed {
+                tool: tool.into(),
+                code: Some(1),
+                stderr: format!("{tool} canceled"),
+            };
+            assert!(matches!(
+                direct_download_child_error(nonzero, true),
+                EngineError::ExternalToolFailed { code: Some(1), .. }
+            ));
+            let timeout = EngineError::ExternalToolFailed {
+                tool: tool.into(),
+                code: None,
+                stderr: format!("{tool} timed out"),
+            };
+            assert!(matches!(
+                direct_download_child_error(timeout, true),
+                EngineError::ExternalToolFailed { .. }
+            ));
         }
     }
 
@@ -36916,18 +37938,36 @@ EOF
         db::ensure_schema(&paths).expect("schema");
         let job = enqueue(&paths, JobType::DownloadDirectUrl, "{}".to_string()).expect("enqueue");
         let conn = db::open(&paths).expect("fixture connection");
-        conn.execute("UPDATE job SET status='running' WHERE id=?1", [&job.id]).expect("running");
-        let error = EngineError::ExternalToolFailed { tool:"yt-dlp".into(), code:Some(1), stderr:"actual subtitle failure".into() };
+        conn.execute("UPDATE job SET status='running' WHERE id=?1", [&job.id])
+            .expect("running");
+        let error = EngineError::ExternalToolFailed {
+            tool: "yt-dlp".into(),
+            code: Some(1),
+            stderr: "actual subtitle failure".into(),
+        };
         assert!(!lifecycle_exit_is_shutdown_interruption(true, false, false));
         assert!(!lifecycle_exit_is_shutdown_interruption(false, true, false));
         assert!(!lifecycle_exit_is_shutdown_interruption(true, true, true));
         assert!(lifecycle_exit_is_shutdown_interruption(true, true, false));
-        assert!(!preserve_shutdown_interrupted_download(&paths, &job.id, &error));
-        assert!(!matches!(yt_dlp_cancellation_error(false), EngineError::JobInterruptedByShutdown));
+        assert!(!preserve_shutdown_interrupted_download(
+            &paths, &job.id, &error
+        ));
+        assert!(!matches!(
+            yt_dlp_cancellation_error(false),
+            EngineError::JobInterruptedByShutdown
+        ));
         set_failed(&paths, &job.id, &error.to_string()).expect("ordinary failure bookkeeping");
-        assert_eq!(requeue_orphaned_running_jobs(&conn).expect("startup recovery"), 0);
-        let (status, persisted_error): (String,Option<String>) = conn.query_row("SELECT status,error FROM job WHERE id=?1", [&job.id],
-            |row|Ok((row.get(0)?,row.get(1)?))).expect("failed row");
+        assert_eq!(
+            requeue_orphaned_running_jobs(&conn).expect("startup recovery"),
+            0
+        );
+        let (status, persisted_error): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status,error FROM job WHERE id=?1",
+                [&job.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("failed row");
         assert_eq!(status, "failed");
         assert_eq!(persisted_error.as_deref(), Some(error.to_string().as_str()));
     }
@@ -37655,8 +38695,7 @@ EOF
     /// before any file was ever touched rather than leaving an orphaned row after files were
     /// already removed.
     #[test]
-    fn flush_jobs_cache_deletes_rows_before_files_so_a_row_delete_failure_leaves_files_untouched()
-    {
+    fn flush_jobs_cache_deletes_rows_before_files_so_a_row_delete_failure_leaves_files_untouched() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
         db::ensure_schema(&paths).expect("schema");
@@ -37684,9 +38723,18 @@ EOF
         std::fs::write(succeeded_artifacts.join("a.txt"), "a").expect("artifact file");
 
         let result = flush_jobs_cache(&paths, None);
-        assert!(result.is_err(), "row-delete failure must surface as an error");
-        assert!(succeeded_log.exists(), "files must survive an aborted row delete");
-        assert!(succeeded_artifacts.exists(), "artifacts must survive an aborted row delete");
+        assert!(
+            result.is_err(),
+            "row-delete failure must surface as an error"
+        );
+        assert!(
+            succeeded_log.exists(),
+            "files must survive an aborted row delete"
+        );
+        assert!(
+            succeeded_artifacts.exists(),
+            "artifacts must survive an aborted row delete"
+        );
     }
 
     #[test]
@@ -37939,15 +38987,30 @@ EOF
         let conn = db::open(paths).expect("open");
         db::migrate(&conn).expect("migrate");
         let rows: [(&str, &str, &str, i64); 7] = [
-            ("purge-eligible-failed", "download_direct_url", "failed", old_at_ms),
+            (
+                "purge-eligible-failed",
+                "download_direct_url",
+                "failed",
+                old_at_ms,
+            ),
             (
                 "purge-eligible-canceled",
                 "youtube_subscription_refresh_v1",
                 "canceled",
                 old_at_ms,
             ),
-            ("purge-keep-queued", "download_direct_url", "queued", old_at_ms),
-            ("purge-keep-running", "download_direct_url", "running", old_at_ms),
+            (
+                "purge-keep-queued",
+                "download_direct_url",
+                "queued",
+                old_at_ms,
+            ),
+            (
+                "purge-keep-running",
+                "download_direct_url",
+                "running",
+                old_at_ms,
+            ),
             // Non-purgeable type (`mux_dub_preview_v1`, a localization job type): excluded by
             // the allow-list even though it is old and terminal.
             (
@@ -37956,8 +39019,18 @@ EOF
                 "failed",
                 old_at_ms,
             ),
-            ("purge-keep-succeeded-by-default", "download_direct_url", "succeeded", old_at_ms),
-            ("purge-keep-recent-failed", "download_direct_url", "failed", recent_at_ms),
+            (
+                "purge-keep-succeeded-by-default",
+                "download_direct_url",
+                "succeeded",
+                old_at_ms,
+            ),
+            (
+                "purge-keep-recent-failed",
+                "download_direct_url",
+                "failed",
+                recent_at_ms,
+            ),
         ];
         for (id, job_type, status, created_at_ms) in rows {
             conn.execute(
@@ -37978,21 +39051,21 @@ EOF
         let old_at_ms = now - 40 * 86_400_000;
         seed_purge_history_rows(&paths, old_at_ms, now);
 
-        let receipt =
-            purge_terminal_job_history(&paths, 30, false, true).expect("dry run purge");
+        let receipt = purge_terminal_job_history(&paths, 30, false, true).expect("dry run purge");
         assert!(receipt.dry_run);
         assert_eq!(receipt.deleted, 0);
         assert_eq!(receipt.backup_path, None);
-        assert_eq!(receipt.total, 2, "failed download + canceled refresh are eligible");
+        assert_eq!(
+            receipt.total, 2,
+            "failed download + canceled refresh are eligible"
+        );
         assert!(receipt
             .counts_by_type_status
             .iter()
             .any(|row| row.job_type == "download_direct_url" && row.status == "failed"));
-        assert!(receipt
-            .counts_by_type_status
-            .iter()
-            .any(|row| row.job_type == "youtube_subscription_refresh_v1"
-                && row.status == "canceled"));
+        assert!(receipt.counts_by_type_status.iter().any(|row| row.job_type
+            == "youtube_subscription_refresh_v1"
+            && row.status == "canceled"));
 
         let conn = db::open(&paths).expect("open");
         let remaining: i64 = conn
@@ -38010,8 +39083,7 @@ EOF
         let old_at_ms = now - 40 * 86_400_000;
         seed_purge_history_rows(&paths, old_at_ms, now);
 
-        let receipt =
-            purge_terminal_job_history(&paths, 30, false, false).expect("execute purge");
+        let receipt = purge_terminal_job_history(&paths, 30, false, false).expect("execute purge");
         assert!(!receipt.dry_run);
         assert_eq!(receipt.deleted, 2);
         assert_eq!(receipt.total, 2);
@@ -38019,7 +39091,10 @@ EOF
         let backup_file = PathBuf::from(&backup_path);
         assert!(backup_file.exists(), "backup file must exist before delete");
         assert!(
-            std::fs::metadata(&backup_file).expect("backup metadata").len() > 0,
+            std::fs::metadata(&backup_file)
+                .expect("backup metadata")
+                .len()
+                > 0,
             "backup file must not be empty"
         );
         let backup_conn = rusqlite::Connection::open_with_flags(
@@ -38853,7 +39928,10 @@ EOF
             .expect("load")
             .expect("state 1");
         assert_eq!(first.backoff_count, 1);
-        assert_eq!(first.expires_at_ms - first.blocked_at_ms, YOUTUBE_AUTH_BLOCK_WAIT_MS);
+        assert_eq!(
+            first.expires_at_ms - first.blocked_at_ms,
+            YOUTUBE_AUTH_BLOCK_WAIT_MS
+        );
 
         record_youtube_auth_block(&paths, key.to_string(), "r2".to_string(), None, None)
             .expect("record 2");
@@ -39100,10 +40178,19 @@ EOF
     fn configured_browser_session_error_is_preserved_without_anonymous_retry() {
         let dir = tempfile::tempdir().unwrap();
         let paths = AppPaths::new(dir.path().join("app"));
-        let args = vec!["--write-link".into(), "--cookies-from-browser".into(), "firefox".into()];
-        let error = run_yt_dlp_with_browser_cookie_retry(&paths, &args, None, 1, true, None).unwrap_err().to_string();
+        let args = vec![
+            "--write-link".into(),
+            "--cookies-from-browser".into(),
+            "firefox".into(),
+        ];
+        let error = run_yt_dlp_with_browser_cookie_retry(&paths, &args, None, 1, true, None)
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("forbidden"), "{error}");
-        assert!(!error.contains("retry without browser cookies"), "original error must not be replaced by anonymous fallback: {error}");
+        assert!(
+            !error.contains("retry without browser cookies"),
+            "original error must not be replaced by anonymous fallback: {error}"
+        );
     }
 
     #[test]
@@ -39439,7 +40526,11 @@ EOF
                 Vec::new(),
             )
             .expect("reenqueue cycle");
-            assert_eq!(reenqueued.len(), 1, "cycle {cycle} must reopen the same row");
+            assert_eq!(
+                reenqueued.len(),
+                1,
+                "cycle {cycle} must reopen the same row"
+            );
             assert_eq!(reenqueued[0].id, job_id);
         }
 
@@ -39452,7 +40543,10 @@ EOF
                 |row| row.get(0),
             )
             .expect("count rows for target key");
-        assert_eq!(row_count, 1, "one durable row per video, regardless of reenqueue count");
+        assert_eq!(
+            row_count, 1,
+            "one durable row per video, regardless of reenqueue count"
+        );
 
         let reread = get_job(&paths, &job_id)
             .expect("get job")
@@ -39468,7 +40562,10 @@ EOF
                 |row| row.get(0),
             )
             .expect("count job_attempt rows");
-        assert_eq!(attempt_history_count, 5, "attempt history is trimmed to JOB_ATTEMPT_HISTORY_LIMIT");
+        assert_eq!(
+            attempt_history_count, 5,
+            "attempt history is trimmed to JOB_ATTEMPT_HISTORY_LIMIT"
+        );
     }
 
     #[test]
@@ -39497,7 +40594,12 @@ EOF
         db::migrate(&conn).expect("migrate");
         conn.execute(
             "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
-            params![JobStatus::Failed.as_str(), now_ms(), "batch A failure", &job_id],
+            params![
+                JobStatus::Failed.as_str(),
+                now_ms(),
+                "batch A failure",
+                &job_id
+            ],
         )
         .expect("mark terminal in batch A");
         // See s6_reenqueue_same_video_reuses_row_and_caps_attempts_at_five: release the claim this
@@ -39522,7 +40624,9 @@ EOF
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].id, job_id);
 
-        let reread = get_job(&paths, &job_id).expect("get job").expect("job exists");
+        let reread = get_job(&paths, &job_id)
+            .expect("get job")
+            .expect("job exists");
         assert_eq!(reread.batch_id.as_deref(), Some("batch-B"));
 
         let history_batch: Option<String> = conn
@@ -39536,7 +40640,10 @@ EOF
 
         let detail_a = get_batch_detail(&paths, "batch-A").expect("batch A detail");
         assert!(
-            detail_a.attempts.iter().any(|attempt| attempt.job.id == job_id),
+            detail_a
+                .attempts
+                .iter()
+                .any(|attempt| attempt.job.id == job_id),
             "batch A detail must still show the historical attempt after the row moved to batch B"
         );
     }
@@ -39580,8 +40687,14 @@ EOF
                 Vec::new(),
             )
         });
-        let result_a = thread_a.join().expect("thread a joined").expect("thread a enqueue");
-        let result_b = thread_b.join().expect("thread b joined").expect("thread b enqueue");
+        let result_a = thread_a
+            .join()
+            .expect("thread a joined")
+            .expect("thread a enqueue");
+        let result_b = thread_b
+            .join()
+            .expect("thread b joined")
+            .expect("thread b enqueue");
 
         let total_created = result_a.len() + result_b.len();
         assert_eq!(
@@ -39681,7 +40794,10 @@ EOF
             .expect("lock execution registry")
             .remove(&execution_key);
 
-        assert_eq!(stored_job_status(&paths, &failed.id), JobStatus::Failed.as_str());
+        assert_eq!(
+            stored_job_status(&paths, &failed.id),
+            JobStatus::Failed.as_str()
+        );
     }
 
     #[test]
@@ -39726,7 +40842,10 @@ EOF
                 |row| row.get(0),
             )
             .expect("count job_attempt rows");
-        assert_eq!(attempt_history_count, 0, "idempotent restart on a never-started row adds no attempt history");
+        assert_eq!(
+            attempt_history_count, 0,
+            "idempotent restart on a never-started row adds no attempt history"
+        );
     }
 
     #[test]
@@ -39755,8 +40874,14 @@ EOF
         assert_eq!(summary.reused_active_jobs, 0);
         assert_eq!(summary.failed_retries, 0);
 
-        assert_eq!(stored_job_status(&paths, &first.id), JobStatus::Queued.as_str());
-        assert_eq!(stored_job_status(&paths, &second.id), JobStatus::Queued.as_str());
+        assert_eq!(
+            stored_job_status(&paths, &first.id),
+            JobStatus::Queued.as_str()
+        );
+        assert_eq!(
+            stored_job_status(&paths, &second.id),
+            JobStatus::Queued.as_str()
+        );
     }
 
     #[test]
@@ -39778,7 +40903,12 @@ EOF
         db::migrate(&conn).expect("migrate");
         conn.execute(
             "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
-            params![JobStatus::Failed.as_str(), now_ms(), "second failure", &failed.id],
+            params![
+                JobStatus::Failed.as_str(),
+                now_ms(),
+                "second failure",
+                &failed.id
+            ],
         )
         .expect("mark terminal again");
 
@@ -39789,7 +40919,10 @@ EOF
                 |row| row.get(0),
             )
             .expect("count job_attempt rows before purge");
-        assert!(attempt_history_before > 0, "fixture must have attempt history to prove cascade");
+        assert!(
+            attempt_history_before > 0,
+            "fixture must have attempt history to prove cascade"
+        );
 
         purge_terminal_job_history(&paths, 0, true, false).expect("purge terminal history");
 
@@ -39809,7 +40942,10 @@ EOF
                 |row| row.get(0),
             )
             .expect("count job_attempt rows after purge");
-        assert_eq!(attempt_count_after, 0, "purge must cascade-delete job_attempt history");
+        assert_eq!(
+            attempt_count_after, 0,
+            "purge must cascade-delete job_attempt history"
+        );
     }
 
     #[test]
@@ -39847,7 +40983,8 @@ EOF
             "op-deleted-batch",
             "old failure",
         );
-        let err = retry_job(&paths, &deleted_job.id).expect_err("operator-deleted retry must refuse");
+        let err =
+            retry_job(&paths, &deleted_job.id).expect_err("operator-deleted retry must refuse");
         assert!(err
             .to_string()
             .contains("operator-deleted media requires an explicit selected-item redownload"));
@@ -39905,7 +41042,12 @@ EOF
         db::migrate(&conn).expect("migrate");
         conn.execute(
             "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4",
-            params![JobStatus::Failed.as_str(), now_ms(), "old failure", &failed.id],
+            params![
+                JobStatus::Failed.as_str(),
+                now_ms(),
+                "old failure",
+                &failed.id
+            ],
         )
         .expect("mark failed");
 
@@ -40513,7 +41655,12 @@ EOF
         assert_eq!(params.subscription_id.as_deref(), Some("subscription-1"));
         assert_eq!(params.output_path_template.as_deref(), Some("."));
         assert_eq!(params.filename_template.as_deref(), Some("{title}_{id}"));
-        let template = build_yt_dlp_output_template(&jobs[0].id, params.output_path_template.as_deref(), params.filename_template.as_deref()).expect("subscription producer must feed the real output consumer");
+        let template = build_yt_dlp_output_template(
+            &jobs[0].id,
+            params.output_path_template.as_deref(),
+            params.filename_template.as_deref(),
+        )
+        .expect("subscription producer must feed the real output consumer");
         assert!(!template.contains(".."));
         assert!(template.starts_with("%(title)"));
     }
@@ -40789,10 +41936,21 @@ EOF
 
     #[test]
     fn subscription_dot_template_is_consumable_without_permitting_traversal() {
-        let output = build_yt_dlp_output_template("12345678-long", Some("."), Some("{title}_{id}")).unwrap();
+        let output =
+            build_yt_dlp_output_template("12345678-long", Some("."), Some("{title}_{id}")).unwrap();
         assert_eq!(output, "%(title).80B_%(id)s_12345678.%(ext)s");
-        for invalid in ["..", "./nested", "nested/../file", "/root", r"C:\root", r"\\server\share"] {
-            assert!(build_yt_dlp_output_template("12345678", Some(invalid), None).is_err(), "{invalid}");
+        for invalid in [
+            "..",
+            "./nested",
+            "nested/../file",
+            "/root",
+            r"C:\root",
+            r"\\server\share",
+        ] {
+            assert!(
+                build_yt_dlp_output_template("12345678", Some(invalid), None).is_err(),
+                "{invalid}"
+            );
         }
     }
 
@@ -41914,7 +43072,10 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
     #[cfg(windows)]
     fn atomic_no_replace_publish_supports_long_staging_and_destination_paths() {
         let dir = tempfile::tempdir().unwrap();
-        let deep = dir.path().join("archive-subscription".repeat(5)).join("attempt-staging".repeat(6));
+        let deep = dir
+            .path()
+            .join("archive-subscription".repeat(5))
+            .join("attempt-staging".repeat(6));
         std::fs::create_dir_all(&deep).unwrap();
         let staging = deep.join("source-".repeat(12) + ".mkv");
         let destination = deep.join("output-".repeat(12) + ".mkv");
@@ -43535,8 +44696,12 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
 
     #[test]
     fn app_busy_classifier_matches_known_transient_errors_only() {
-        assert!(is_app_busy_error("database runtime error: maintenance_unavailable"));
-        assert!(is_app_busy_error("database runtime error: maintenance_backlog_limit"));
+        assert!(is_app_busy_error(
+            "database runtime error: maintenance_unavailable"
+        ));
+        assert!(is_app_busy_error(
+            "database runtime error: maintenance_backlog_limit"
+        ));
         assert!(is_app_busy_error(
             "database runtime error: writer_admission_timeout"
         ));
@@ -43548,9 +44713,7 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
             "some wrapper: database is locked (code 5)"
         ));
         assert!(!is_app_busy_error("yt-dlp: video unavailable"));
-        assert!(!is_app_busy_error(
-            "HTTP Error 429: Too Many Requests"
-        ));
+        assert!(!is_app_busy_error("HTTP Error 429: Too Many Requests"));
         assert!(!is_app_busy_error("playlist does not exist"));
     }
 
@@ -43565,7 +44728,9 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
         assert!(!is_destination_unreachable_error(
             "model/tool install failed: verified root alias target is currently unavailable: Z:\\Video"
         ));
-        assert!(!is_destination_unreachable_error("download folder not found: Z:\\Video"));
+        assert!(!is_destination_unreachable_error(
+            "download folder not found: Z:\\Video"
+        ));
     }
 
     fn seed_app_busy_job_row(paths: &AppPaths, id: &str) {
@@ -43620,13 +44785,26 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
     fn maintenance_terminal_observe_refusal(database: &db::AppDatabase) {
         let deadline = Instant::now() + Duration::from_secs(3);
         loop {
-            if database.snapshot().recent_receipts.iter().any(|r|r.outcome == "maintenance_unavailable" && r.admitted_at_ms.is_none()) { return; }
-            assert!(Instant::now() < deadline, "actual pre-admission refusal missing");
+            if database
+                .snapshot()
+                .recent_receipts
+                .iter()
+                .any(|r| r.outcome == "maintenance_unavailable" && r.admitted_at_ms.is_none())
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "actual pre-admission refusal missing"
+            );
             thread::sleep(Duration::from_millis(10));
         }
     }
 
-    fn maintenance_terminal_original_row(paths: &AppPaths, id: &str) -> (String, i64, String, i64, String) {
+    fn maintenance_terminal_original_row(
+        paths: &AppPaths,
+        id: &str,
+    ) -> (String, i64, String, i64, String) {
         let connection = db::open_readonly(paths).expect("canonical reader");
         connection.query_row("SELECT status,attempt_no,batch_id,app_busy_attempts,params_json FROM job WHERE id=?1",[id],
             |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).expect("original row")
@@ -43637,26 +44815,43 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
         let dir = tempfile::tempdir().expect("fixture");
         let paths = AppPaths::new(dir.path().to_path_buf());
         let id = "maintenance-completed-original";
-        let database = maintenance_terminal_fixture(&paths,id);
-        let original = maintenance_terminal_original_row(&paths,id);
+        let database = maintenance_terminal_fixture(&paths, id);
+        let original = maintenance_terminal_original_row(&paths, id);
         let artifact = dir.path().join("retained.mkv");
-        std::fs::write(&artifact,b"already-published-once").expect("completed publication fixture");
-        let mut owner = database.start_checkpoint_maintenance().expect("actual owner");
+        std::fs::write(&artifact, b"already-published-once")
+            .expect("completed publication fixture");
+        let mut owner = database
+            .start_checkpoint_maintenance()
+            .expect("actual owner");
         database.set_test_maintenance_unavailable(true);
         let worker_paths = paths.clone();
-        let worker = thread::spawn(move||set_succeeded_with_shutdown(&worker_paths,id,||false));
+        let worker =
+            thread::spawn(move || set_succeeded_with_shutdown(&worker_paths, id, || false));
         maintenance_terminal_observe_refusal(&database);
-        assert!(!worker.is_finished(), "live worker must retain terminal persistence");
-        assert_eq!(maintenance_terminal_original_row(&paths,id),original);
-        assert_eq!(std::fs::read(&artifact).unwrap(),b"already-published-once");
+        assert!(
+            !worker.is_finished(),
+            "live worker must retain terminal persistence"
+        );
+        assert_eq!(maintenance_terminal_original_row(&paths, id), original);
+        assert_eq!(std::fs::read(&artifact).unwrap(), b"already-published-once");
         database.set_test_maintenance_unavailable(false);
-        worker.join().expect("worker join").expect("terminal persistence");
-        let after = maintenance_terminal_original_row(&paths,id);
-        assert_eq!(after.0,"succeeded");
-        assert_eq!((after.1,after.2,after.3,after.4),(original.1,original.2,original.3,original.4));
-        assert_eq!(std::fs::read(&artifact).unwrap(),b"already-published-once");
-        owner.stop_and_join(Duration::from_secs(5)).expect("owner join");
-        database.shutdown_and_drain(Duration::from_secs(5)).expect("drain");
+        worker
+            .join()
+            .expect("worker join")
+            .expect("terminal persistence");
+        let after = maintenance_terminal_original_row(&paths, id);
+        assert_eq!(after.0, "succeeded");
+        assert_eq!(
+            (after.1, after.2, after.3, after.4),
+            (original.1, original.2, original.3, original.4)
+        );
+        assert_eq!(std::fs::read(&artifact).unwrap(), b"already-published-once");
+        owner
+            .stop_and_join(Duration::from_secs(5))
+            .expect("owner join");
+        database
+            .shutdown_and_drain(Duration::from_secs(5))
+            .expect("drain");
     }
 
     #[test]
@@ -43664,22 +44859,34 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
         let dir = tempfile::tempdir().expect("fixture");
         let paths = AppPaths::new(dir.path().to_path_buf());
         let id = "maintenance-requeue-original";
-        let database = maintenance_terminal_fixture(&paths,id);
-        let original = maintenance_terminal_original_row(&paths,id);
-        let mut owner = database.start_checkpoint_maintenance().expect("actual owner");
+        let database = maintenance_terminal_fixture(&paths, id);
+        let original = maintenance_terminal_original_row(&paths, id);
+        let mut owner = database
+            .start_checkpoint_maintenance()
+            .expect("actual owner");
         database.set_test_maintenance_unavailable(true);
         let worker_paths = paths.clone();
-        let worker = thread::spawn(move||requeue_job_for_app_busy_with_shutdown(&worker_paths,id,||false));
+        let worker = thread::spawn(move || {
+            requeue_job_for_app_busy_with_shutdown(&worker_paths, id, || false)
+        });
         maintenance_terminal_observe_refusal(&database);
         assert!(!worker.is_finished());
-        assert_eq!(maintenance_terminal_original_row(&paths,id),original);
+        assert_eq!(maintenance_terminal_original_row(&paths, id), original);
         database.set_test_maintenance_unavailable(false);
         assert!(worker.join().expect("worker join").expect("requeue"));
-        let after = maintenance_terminal_original_row(&paths,id);
-        assert_eq!(after.0,"queued"); assert_eq!(after.3,1);
-        assert_eq!((after.1,after.2,after.4),(original.1,original.2,original.4));
-        owner.stop_and_join(Duration::from_secs(5)).expect("owner join");
-        database.shutdown_and_drain(Duration::from_secs(5)).expect("drain");
+        let after = maintenance_terminal_original_row(&paths, id);
+        assert_eq!(after.0, "queued");
+        assert_eq!(after.3, 1);
+        assert_eq!(
+            (after.1, after.2, after.4),
+            (original.1, original.2, original.4)
+        );
+        owner
+            .stop_and_join(Duration::from_secs(5))
+            .expect("owner join");
+        database
+            .shutdown_and_drain(Duration::from_secs(5))
+            .expect("drain");
     }
 
     #[test]
@@ -43687,23 +44894,45 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
         let dir = tempfile::tempdir().expect("fixture");
         let paths = AppPaths::new(dir.path().to_path_buf());
         let id = "maintenance-shutdown-original";
-        let database = maintenance_terminal_fixture(&paths,id);
-        let original = maintenance_terminal_original_row(&paths,id);
-        let mut owner = database.start_checkpoint_maintenance().expect("actual owner");
+        let database = maintenance_terminal_fixture(&paths, id);
+        let original = maintenance_terminal_original_row(&paths, id);
+        let mut owner = database
+            .start_checkpoint_maintenance()
+            .expect("actual owner");
         database.set_test_maintenance_unavailable(true);
         let shutdown = Arc::new(AtomicBool::new(false));
-        let worker_shutdown = shutdown.clone(); let worker_paths = paths.clone();
-        let worker = thread::spawn(move||set_succeeded_with_shutdown(&worker_paths,id,||worker_shutdown.load(Ordering::Acquire)));
+        let worker_shutdown = shutdown.clone();
+        let worker_paths = paths.clone();
+        let worker = thread::spawn(move || {
+            set_succeeded_with_shutdown(&worker_paths, id, || {
+                worker_shutdown.load(Ordering::Acquire)
+            })
+        });
         maintenance_terminal_observe_refusal(&database);
-        assert!(!worker.is_finished()); shutdown.store(true,Ordering::Release);
-        assert!(matches!(worker.join().expect("worker join"),Err(EngineError::JobInterruptedByShutdown)));
-        assert_eq!(maintenance_terminal_original_row(&paths,id),original);
+        assert!(!worker.is_finished());
+        shutdown.store(true, Ordering::Release);
+        assert!(matches!(
+            worker.join().expect("worker join"),
+            Err(EngineError::JobInterruptedByShutdown)
+        ));
+        assert_eq!(maintenance_terminal_original_row(&paths, id), original);
         database.set_test_maintenance_unavailable(false);
         let connection = db::open_readonly(&paths).expect("canonical reader");
-        let count:i64=connection.query_row("SELECT COUNT(*) FROM job WHERE id LIKE 'maintenance-%'",[],|r|r.get(0)).unwrap();
-        assert_eq!(count,1); drop(connection);
-        owner.stop_and_join(Duration::from_secs(5)).expect("owner join");
-        database.shutdown_and_drain(Duration::from_secs(5)).expect("drain");
+        let count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM job WHERE id LIKE 'maintenance-%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+        drop(connection);
+        owner
+            .stop_and_join(Duration::from_secs(5))
+            .expect("owner join");
+        database
+            .shutdown_and_drain(Duration::from_secs(5))
+            .expect("drain");
     }
 
     fn expectation(language: Option<&str>, title: Option<&str>) -> StreamExpectation {
@@ -43748,20 +44977,14 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
 
     #[test]
     fn retag_plan_none_when_track_counts_differ() {
-        let expected = vec![
-            expectation(Some("ko"), None),
-            expectation(Some("en"), None),
-        ];
+        let expected = vec![expectation(Some("ko"), None), expectation(Some("en"), None)];
         let actual = vec![expectation(None, None)];
         assert!(plan_audio_language_retag(&expected, &actual).is_none());
     }
 
     #[test]
     fn retag_plan_handles_multiple_tracks_independently() {
-        let expected = vec![
-            expectation(Some("ko"), None),
-            expectation(Some("en"), None),
-        ];
+        let expected = vec![expectation(Some("ko"), None), expectation(Some("en"), None)];
         let actual = vec![expectation(Some("en"), None), expectation(None, None)];
         let plan = plan_audio_language_retag(&expected, &actual).expect("retaggable");
         assert_eq!(plan.len(), 1);

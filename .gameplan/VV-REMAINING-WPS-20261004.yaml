@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 32
+generation: 37
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -53,3 +53,8 @@ steps:
 - {id: GP-037, role: any, at: before_round, do: require terminal archived artifact rebinding before installed engine probe launch, check: {type: confirm}, source: 'launch preflight RED: managedbuild archived prior Currentcandidate', state: active}
 - {id: GP-038, role: any, at: before_round, do: verify prepared input identity uses independently proven per-file SHA record algorithm, check: {type: confirm}, source: 'pre-freeze finding: rawbyte treehash differed from original prepared marker', state: active}
 - {id: GP-039, role: any, at: before_round, do: verify qualifier copied destinations omit inherited readonly source attributes, check: {type: file, path: offline-installer-runtime/scripts/qualify_offline_runtime.ps1, contains: '/A-:R'}, source: 'Q RED: frozen readonly yt-dlp copied attribute prevented owned staged engine overlay', state: active}
+- {id: GP-040, role: any, at: before_round, do: verify Diagnostics navigation settles before semantic measurement, check: {type: file, path: .local/wp0329_measure_diagnostics_load.py, contains: mount_deadline}, source: 'measurement RED: async navigation returned while Options DOM remained mounted', state: active}
+- {id: GP-041, role: any, at: before_round, do: verify diagnostic replay interpreter matches portable manifest path, check: {type: file, path: .local/wp0329_cosy_exact_replay.py, contains: required_files}, source: 'replay RED: Scripts venv stub refused missing pyvenv.cfg; product uses portable root python', state: active}
+- {id: GP-042, role: any, at: before_round, do: require successful preparation mutation before subsequent dispatch, check: {type: confirm}, source: 'mistake: add refused verb bind but command sequence continued to check and replay', state: active}
+- {id: GP-043, role: any, at: before_round, do: require exact qualified model copy before retained inference replay, check: {type: file, path: .local/wp0329_cosy_exact_replay.py, contains: qualified_model_before}, source: 'replay RED: first model run wrote bytecode; preserve installed generation and exact-check fresh qualified copy', state: active}
+- {id: GP-044, role: any, at: before_round, do: require governed WAV writer before genuine cloned output retry, check: {type: file, path: product/engine/resources/tooling/voxvulgi_cosyvoice_render.py, contains: def save_generated_wav}, source: 'actual dtype replay RED: Torchaudio save requires missing TorchCodec after genuine synthesis', state: active}

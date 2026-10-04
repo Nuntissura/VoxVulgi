@@ -59,11 +59,27 @@ fn canonical_managed_backend_id(raw: &str) -> Option<String> {
     }
 }
 
-pub fn managed_default_backend_id(paths: &AppPaths) -> String {
-    if let Ok(Some(raw)) = paths.dub_backend_id_override() {
-        if let Some(id) = canonical_managed_backend_id(&raw) {
-            return id;
+fn configured_managed_backend_id(paths: &AppPaths) -> Option<String> {
+    paths
+        .dub_backend_id_override()
+        .ok()
+        .flatten()
+        .and_then(|raw| canonical_managed_backend_id(&raw))
+}
+
+fn managed_default_from_readiness(paths: &AppPaths, cosyvoice_installed: bool) -> String {
+    configured_managed_backend_id(paths).unwrap_or_else(|| {
+        if cosyvoice_installed {
+            "cosyvoice".to_string()
+        } else {
+            "openvoice_v2".to_string()
         }
+    })
+}
+
+pub fn managed_default_backend_id(paths: &AppPaths) -> String {
+    if let Some(id) = configured_managed_backend_id(paths) {
+        return id;
     }
     if tools::cosyvoice_pack_status(paths).installed {
         "cosyvoice".to_string()
@@ -96,7 +112,7 @@ pub fn backend_catalog_with_performance(
             cosy_pack.status_detail.clone(),
         )
     };
-    let default_backend_id = managed_default_backend_id(paths);
+    let default_backend_id = managed_default_from_readiness(paths, cosy_pack.installed);
 
     let openvoice_status = if pack.installed {
         (
@@ -428,6 +444,36 @@ fn normalize_goal(value: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wp0329_catalog_default_reuses_readiness_and_preserves_overrides() {
+        let directory = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(directory.path().to_path_buf());
+        assert_eq!(managed_default_from_readiness(&paths, true), "cosyvoice");
+        assert_eq!(
+            managed_default_from_readiness(&paths, false),
+            "openvoice_v2"
+        );
+        for (raw, expected) in [
+            ("openvoice_v2", "openvoice_v2"),
+            ("voice_preserving_local_v1", "openvoice_v2"),
+            ("dub_voice_preserving_v1", "openvoice_v2"),
+            ("cosyvoice", "cosyvoice"),
+            ("cosyvoice2", "cosyvoice"),
+            ("cosyvoice_2", "cosyvoice"),
+        ] {
+            paths.set_dub_backend_id_override(raw).unwrap();
+            for ready in [true, false] {
+                assert_eq!(managed_default_from_readiness(&paths, ready), expected);
+            }
+        }
+        paths.set_dub_backend_id_override("unknown").unwrap();
+        assert_eq!(managed_default_from_readiness(&paths, true), "cosyvoice");
+        assert_eq!(
+            managed_default_from_readiness(&paths, false),
+            "openvoice_v2"
+        );
+    }
 
     fn test_catalog(tier: &str) -> VoiceBackendCatalog {
         VoiceBackendCatalog {

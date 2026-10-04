@@ -25,6 +25,8 @@ import json
 import os
 import stat
 import sys
+
+sys.dont_write_bytecode = True
 import threading
 import time
 import traceback
@@ -356,6 +358,75 @@ def reference_duration_seconds(path):
     return float(info.frames) / float(info.samplerate)
 
 
+def save_generated_wav(path, audio, sample_rate):
+    """Write genuine channels-by-samples model output with the bundled SoundFile."""
+    import soundfile
+    import torch
+
+    samples = audio.detach().to(device="cpu", dtype=torch.float32)
+    if samples.ndim != 2 or samples.shape[0] == 0 or samples.shape[1] == 0:
+        raise RuntimeError("CosyVoice generated empty or invalid audio dimensions")
+    if not bool(torch.isfinite(samples).all()):
+        raise RuntimeError("CosyVoice generated nonfinite audio")
+    if bool((samples < -1.0).any()) or bool((samples > 32767.0 / 32768.0).any()):
+        raise RuntimeError("CosyVoice generated audio exceeds the PCM16 range")
+    if int(sample_rate) <= 0:
+        raise RuntimeError("CosyVoice generated invalid sample rate")
+    soundfile.write(path, samples.transpose(0, 1).numpy(), int(sample_rate),
+                    format="WAV", subtype="PCM_16")
+
+
+def normalize_cpu_llm_dtype(cosyvoice):
+    """Keep the CPU-only CosyVoice LLM graph consistent with its FP32 embeddings."""
+    model = cosyvoice.model
+
+    def counts():
+        result = {}
+        for parameter in model.llm.parameters():
+            if not parameter.is_floating_point():
+                continue
+            key = f"{parameter.dtype}@{parameter.device}"
+            if key not in result and len(result) >= 7:
+                key = "other"
+            result[key] = result.get(key, 0) + 1
+        return result
+
+    before = counts()
+    applied = model.device.type == "cpu"
+    if applied:
+        model.llm.float()
+    return {"cpu_float32_applied": applied, "floating_parameters_before": before,
+            "floating_parameters_after": counts()}
+
+
+def failed_segment_diagnostics(seg, ref_path, chunks):
+    """Bounded failure evidence; no transcript, new dependency, or fallback."""
+    import wave
+
+    result = {
+        "traceback": traceback.format_exc()[-16384:],
+        "text_characters": len(str(seg.get("text") or "")),
+        "start_ms": seg.get("start_ms"),
+        "end_ms": seg.get("end_ms"),
+        "chunk_shapes": [],
+    }
+    try:
+        result["chunk_shapes"] = [list(chunk.shape) for chunk in chunks[:8]]
+    except Exception as diagnostic_error:
+        result["chunk_probe_error"] = str(diagnostic_error)[:512]
+    try:
+        with wave.open(ref_path, "rb") as reference:
+            result["reference"] = {
+                "frames": reference.getnframes(),
+                "sample_rate": reference.getframerate(),
+                "channels": reference.getnchannels(),
+                "sample_width_bytes": reference.getsampwidth(),
+            }
+    except Exception as diagnostic_error:
+        result["reference_probe_error"] = str(diagnostic_error)[:512]
+    return result
+
+
 def pick_reference(seg):
     profiles = seg.get("tts_voice_profile_paths") or []
     if not isinstance(profiles, list):
@@ -390,6 +461,8 @@ def run_warmup(model_dir):
     print(f"[cosyvoice] warmup: loading model from {model_path}", flush=True)
     _t0 = time.monotonic()
     cosyvoice = cosyvoice_cls(model_dir=model_path)
+    dtype_diagnostics = normalize_cpu_llm_dtype(cosyvoice)
+    print(f"[cosyvoice] llm_dtype {json.dumps(dtype_diagnostics, sort_keys=True)}", flush=True)
     print(f"[cosyvoice] warmup: model loaded in {time.monotonic() - _t0:.1f}s", flush=True)
 
     ref = os.path.join(os.path.dirname(os.path.abspath(__file__)), "asset", "zero_shot_prompt.wav")
@@ -454,6 +527,8 @@ def main():
     print(f"[cosyvoice] loading model from {model_path}", flush=True)
     _load_t0 = time.monotonic()
     cosyvoice = cosyvoice_cls(model_dir=model_path)
+    dtype_diagnostics = normalize_cpu_llm_dtype(cosyvoice)
+    print(f"[cosyvoice] llm_dtype {json.dumps(dtype_diagnostics, sort_keys=True)}", flush=True)
     sample_rate = int(cosyvoice.sample_rate)
     print(
         f"[cosyvoice] model loaded in {time.monotonic() - _load_t0:.1f}s; "
@@ -512,6 +587,7 @@ def main():
             print(f"[cosyvoice] seg {idx}: FAILED ({rec['error']})", flush=True)
             continue
 
+        chunks = []
         try:
             dur = reference_duration_seconds(ref_path)
             if dur is not None and dur > MAX_REFERENCE_SECONDS:
@@ -532,7 +608,7 @@ def main():
             audio = torch.cat(chunks, dim=1)  # concatenate multi-sentence output
 
             os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-            torchaudio.save(out_path, audio, sample_rate)
+            save_generated_wav(out_path, audio, sample_rate)
             if not (os.path.isfile(out_path) and os.path.getsize(out_path) > 0):
                 raise RuntimeError("CosyVoice wrote no output file")
 
@@ -543,6 +619,7 @@ def main():
         except Exception as exc:  # noqa: BLE001 - record real failure, never silence
             rec["voice_clone_outcome"] = "failed"
             rec["error"] = f"clone_failed: {exc}"
+            rec["failure_diagnostics"] = failed_segment_diagnostics(seg, ref_path, chunks)
             print(f"[cosyvoice] seg {idx}: FAILED {exc}", flush=True)
             traceback.print_exc()
 
@@ -564,6 +641,7 @@ def main():
         "created_at_ms": int(time.time() * 1000),
         "backend_id": "cosyvoice",
         "device": "cpu",
+        "llm_dtype_diagnostics": dtype_diagnostics,
         "segments_total": len(segments),
         "segments_base_ok": converted_ok,
         "segments_converted_ok": converted_ok,
