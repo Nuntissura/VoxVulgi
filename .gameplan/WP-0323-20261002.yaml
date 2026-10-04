@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-0323-20261002
 parent: null
-generation: 12
+generation: 18
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -36,3 +36,8 @@ steps:
 - {id: GP-020, role: any, at: before_round, do: require frontend Node contract cwd = product/desktop with local tsx dependency, check: {type: confirm}, source: 'infra: root cwd could not resolve tsx for frontend contract', state: active}
 - {id: GP-021, role: any, at: before_round, do: require Rust source selectors anchor actual function line beyond quoted test strings, check: {type: confirm}, source: 'fail: desktop source test split matched earlier quoted run marker', state: active}
 - {id: GP-022, role: any, at: before_round, do: require production proof records timeout snapshots and exact derived trigger effects, check: {type: confirm}, source: 'fail: owner trial lacked timeout phases; fixture job inserts increment derived projection', state: active}
+- {id: GP-023, role: any, at: before_round, do: require desktop build log path matches entrypoint nonce filename contract, check: {type: confirm}, source: 'infra: managed build rejected nonconforming custom log filename before compilation', state: active}
+- {id: GP-024, role: any, at: before_round, do: require WMI startup fields use uint16 ShowWindow and uint32 CreateFlags, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0334/20261003/invoke_native_core_stage.ps1, contains: 'ShowWindow=[uint16]0;CreateFlags=[uint32]8'}, source: 'infra: native verifier dispatch type mismatch from untyped CIM fields', state: active}
+- {id: GP-025, role: any, at: before_round, do: require fixture preparation outside workload budget; no timed child wait, check: {type: file, path: .local/wp0333_run_production_owner_native_pk.py, not_contains: wait(timeout=}, source: 'infra:240s controller budget omitted fixture preparation before180s workload', state: retired}
+- {id: GP-026, role: any, at: before_round, do: verify fixture preparation outside workload budget; polls never impose final child deadline, check: {type: confirm}, source: 'infra:240s controller budget omitted fixture preparation before180s workload', state: active}
+- {id: GP-027, role: any, at: before_round, do: require UTF8 atomic temp+replace for governance writes; preserve previous JSON entities, check: {type: confirm}, source: 'infra: default cp1252 write rejected Unicode and truncated WP JSON; recovered exact HEAD', state: active}

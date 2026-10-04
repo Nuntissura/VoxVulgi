@@ -1486,8 +1486,66 @@
       "note": "Actual production-owner crash proof PASS:32externally flushed ACKpayloads independently reopened32exact, uncommitted2MB sentinel absent, every protected table equal, schema61/quick_checkOK/source unchanged. Actual runtime SQLite3.53.2 fixedsourceID; controller killed only owned disposablechild231604. Processcrash is notpowerfailure proof. Current counterpart and independentsource review pass; prior two-writer-timeout variance retained. Proceed exactmanagedCoreOnly candidate/normalinstalled30minute/download/export/active-shutdown; WP staysIN_PROGRESS and live read_admission_timeout unresolved.",
       "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_crash/verdict.json",
       "status_retained": "IN_PROGRESS"
+    },
+    {
+      "date": "2026-10-04",
+      "record_id": "WP-0333-INSTALLED-OWNER-SCOPED-PROOF-20261004-001",
+      "note": "Supersedes historical checkpoint-unselected/source-only status. Checkpoint policy approved, independently reviewed and implemented in installed source5dfde8cdbcc84e765c23c2c8381bf4beee099793/nativeSHA dada82abb2f902e3e7fcb31bb106fc5903bd03a25e57b5df43ca017608fa01c2. Managed build/nativeUpdate independently preserve14surfaces; unchanged0.1.205.83owning tests GREEN(38engine/3desktop/42frontend); production-owner crash32exactACK independently retained. Exact only-selected1176bca5 attempt1/batch3092bf17 succeeded with durablelineage, matchingH264/AACeng/SubRipeng/fullAVdecode; globalpause1/nootherjobs. First export316canonical/group matches. Exact3Q history78classified/1346preserved unknown, classificationuptodate/bannerabsent. Normal1800.069s/61samples independent7streams0DBerrors/parseerrors, but mostlypaused plus one45sdownload NOT required30minutes with downloads running. Activee95e32c7 close preserves originalrunning attempt1/batch254099d5/noerror/selectedgrant,14fullrow equal; runnerjoined1791090124305 thenownerjoined4306/PASSIVE13of13busy0/nocloseerror thenDBdrained4308/app+sidecar+ownedchildrenabsent. Startup recovery/completion pending.",
+      "evidence": {
+        "update": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0334/20261003/native_update_5dfde8c/independent_native_update_review.json",
+        "crash": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_crash/verdict.json",
+        "single": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/installed_selected_5dfde8c/controlled_terminal_independent.json",
+        "decode": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/installed_selected_5dfde8c/controlled_decode.json",
+        "streams": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/installed_selected_5dfde8c/selected_stream_comparison.json",
+        "export": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/export_independent_comparison.json",
+        "history": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/single_history_settled_audit.json",
+        "normal": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0323/20261003/live_monitor_1791088267011/live_30minute_result.json",
+        "trace": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0323/20261003/live_monitor_1791088267011/independent_trace_review_final.json",
+        "shutdown": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261004/checkpoint_shutdown_5dfde8c/db_shutdown_checkpoint_owner/independent_after_close_review.json",
+        "children": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261004/checkpoint_shutdown_5dfde8c/db_shutdown_checkpoint_owner/independent_shutdown_trace_children.json"
+      },
+      "remaining": "Both WPs IN_PROGRESS. First productionRED2writer timeouts remains unexplained. NativeCOUNT824ACK/2261reads/0errors is not yet accepted here as independent proof; PKcounterpart pending. Prepared86selected workload runtime unrun. Full30minute-running-download and independent final acceptance remain. No release/version/changelog edit or complete timeout-resolution claim.",
+      "status_retained": "IN_PROGRESS"
+    },
+    {
+      "date": "2026-10-04",
+      "record_id": "WP-0333-NATIVE-COUNT-PK-PHASE-20261004-001",
+      "status_retained": "IN_PROGRESS",
+      "note": "Supersedes native COUNT/PK pending status only. Matched180s native trials retain same example executableSHA a035df01da17a262c42f904bdf6fdc5191b066171f79f0ddfec1a66d4940d08d, exact example/runtime/factory hashes and schema61sourcebackup a07dc9b6ded8cbf3b2730bc0abb0ada3e1802ef83208780603017c07cf847088. COUNT824ACK/2261reads/0errors GREEN; PK720ACK/2468reads/2writer_admission_timeout RED. Independent WAL-aware canonical reread for each reconciles exactstdoutACKset, all69protectedtables and only exactfixture-job derived dirty-trigger delta. COUNT controller240s infrastructureRED preserved; original child finished naturally and independently reverified withoutrestart. PK holder request0-133 admitted1791091114652/open3ms/use232ms; successful native MAINxClose7914.0958ms thenACK1791091122802 (WALxClose0.022ms/WALsync232.157ms). Queued1-133 and2-133 never admitted, nativecallbacks0, wait5010/5003ms. Concurrent three native readerxOpen maxima7913.4561/7913.4551/7913.4859ms and maintenancePASSIVE8564ms overlap; maintenance later2410/2410, final2421/2421/ownerjoined1100ms. This localizes FIFO admission failure to admitted writer physical close and falsifiesCOUNT-only causal explanation; OS/API retry/filter/preemption root cause remains unproved. Earlier REDs preserved. Windows profiling token medium/noSeSystemProfilePrivilege; noWPRsession started/noelevation. Collector underreview.86selected-running proof remains prepared/unrun and held until recorded critical failure resolved; no bounds/policy bypass or wholeWPclosure.",
+      "evidence": {
+        "matched_identity": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_pair.json",
+        "count": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_count_summary.json",
+        "count_independent": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_count_independent.json",
+        "count_natural_completion": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_count_completed_owned.json",
+        "pk": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_pk_summary.json",
+        "pk_independent": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_pk_independent.json",
+        "pk_events": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_pk_stdout.log",
+        "pk_owned": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_pk_owned.json",
+        "wpr_readiness": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/native_wpr_readiness.json"
+      },
+      "remaining": [
+        "Attribute actual OS/API physicalclose delay under reviewed owned profiling authority",
+        "Fix and independently stabilize recorded FIFO timeout before exact final normalrunning-download acceptance",
+        "Keep planned86running proof and allhistoricREDs; IN_PROGRESS retained"
+      ]
     }
   ],
+  "native_probe_validation_20261004": {
+    "record_id": "WP-0333-NATIVE-PROBE-VALIDATION-20261004-001",
+    "callback_test_passed": 1,
+    "affected_runtime_regressions_passed": 26,
+    "logs": [
+      "product/desktop/build_target/logs/wp0333_native_open_read_probe_20261004.log",
+      "product/desktop/build_target/logs/wp0333_native_probe_runtime_regressions_20261004.log",
+      "product/desktop/build_target/logs/wp0333_native_open_read_harness_20261004.log"
+    ],
+    "production_policy_changed_by_probe": false,
+    "resolution_proven": false,
+    "next_dependency": "Operator answer to one administrator-prompt request before privileged Windows FileIO/CPU capture; current native token lacks SeSystemProfilePrivilege",
+    "prepared_collector": ".local/proofWP333/collect_owned_wpr.ps1",
+    "capture_started": false,
+    "analysis_limit": "Built-in tracerpt exists; full stack/symbol decoding is not yet demonstrated and must be verified before accepting OS attribution"
+  },
   "session_review_20261003": {
     "record_id": "WP-0333-REVIEW-20261003-01",
     "date": "2026-10-03",

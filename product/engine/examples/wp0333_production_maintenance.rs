@@ -35,7 +35,11 @@ fn insert(connection: &Connection,id: &str,payload: &str)->rusqlite::Result<usiz
 }
 fn main()->ProofResult<()> {
     let args:Vec<_>=std::env::args_os().collect();
-    if args.len()!=4{return Err("Usage: <absent-absolute-root> <standalone-schema61-backup> <expected-source-sha256>".into())}
+    if args.len()!=4 && args.len()!=6{return Err("Usage: <absent-absolute-root> <standalone-schema61-backup> <expected-source-sha256> [count|pk seconds30..180]".into())}
+    let workload=if args.len()==6 {args[4].to_str().ok_or("Invalid workload")?}else{"count"};
+    if !matches!(workload,"count"|"pk"){return Err("Require count or pk workload".into())}
+    let seconds=if args.len()==6 {args[5].to_str().ok_or("Invalid seconds")?.parse::<u64>()?}else{30};
+    if !(30..=180).contains(&seconds){return Err("Require seconds30..180".into())}
     let requested=PathBuf::from(&args[1]);
     if !requested.is_absolute()||requested.exists(){return Err("Require fresh absent absolute root".into())}
     let root=requested.parent().ok_or("Parent missing")?.canonicalize()?.join(requested.file_name().ok_or("Filename missing")?);
@@ -51,11 +55,13 @@ fn main()->ProofResult<()> {
     let density:i64=original.query_row("SELECT COUNT(*) FROM job",[],|r|r.get(0))?;
     let collision:i64=original.query_row("SELECT COUNT(*) FROM job WHERE id GLOB 'wp0333_production_fixture_*'",[],|r|r.get(0))?;
     let payload:String=original.query_row("SELECT params_json FROM job WHERE type='download_direct_url' AND status='queued' LIMIT 1",[],|r|r.get(0))?;
+    let read_job:String=original.query_row("SELECT id FROM job ORDER BY id LIMIT 1",[],|r|r.get(0))?;
+    let read_meta:String=original.query_row("SELECT key FROM meta ORDER BY key LIMIT 1",[],|r|r.get(0))?;
     if schema!=61||density<1000||collision!=0{return Err("Require canonical-density schema61 without fixture prefix".into())}
     drop(original); fs::create_dir(&root)?; fs::create_dir(root.join("db"))?;
     let destination=root.join("db/app.sqlite"); fs::copy(&source,&destination)?;
     if hash(&source)?!=source_hash||hash(&destination)?!=source_hash{return Err("Copy identity mismatch".into())}
-    fs::write(root.join("wp0333_production_fixture.json"),serde_json::to_vec_pretty(&json!({"source":source,"source_sha256":source_hash,"schema":schema,"job_density":density,"pid":std::process::id()}))?)?;
+    fs::write(root.join("wp0333_production_fixture.json"),serde_json::to_vec_pretty(&json!({"source":source,"source_sha256":source_hash,"schema":schema,"job_density":density,"pid":std::process::id(),"read_workload":workload,"seconds":seconds,"read_job":read_job,"read_meta_key":read_meta}))?)?;
     let database=db::AppDatabase::for_paths(&AppPaths::new(root.clone()))?;
     let mut maintenance=database.start_checkpoint_maintenance()?;
     let (pin_ready_tx,pin_ready_rx)=mpsc::channel();
@@ -69,10 +75,11 @@ fn main()->ProofResult<()> {
         connection.execute_batch("COMMIT").map_err(|e|e.to_string())?; drop(connection); Ok(())
     });
     pin_ready_rx.recv_timeout(Duration::from_secs(3))?;
-    let barrier=Arc::new(Barrier::new(7)); let deadline=Instant::now()+Duration::from_secs(30);
+    let barrier=Arc::new(Barrier::new(7)); let deadline=Instant::now()+Duration::from_secs(seconds);
     let mut workers=Vec::new();
     for index in 0..6 {
         let database=database.clone(); let barrier=barrier.clone(); let payload=payload.clone();
+        let read_job=read_job.clone();let read_meta=read_meta.clone();let workload=workload.to_owned();
         workers.push(thread::spawn(move|| {
             let mut acknowledged=Vec::new();let mut errors=Vec::new();let mut reads=0u64;let mut ordinal=0;
             let mut error_events=Vec::new();let mut error_snapshot_overflow=0;
@@ -89,15 +96,21 @@ fn main()->ProofResult<()> {
                 let result=if index<3 {
                     (||->voxvulgi_engine::Result<()> {let connection=database.write_context(context)?;insert(&connection,&id,&payload)?;drop(connection);Ok(())})()
                 }else{
-                    database.read(context,|connection|{let _:i64=connection.query_row("SELECT COUNT(*) FROM job WHERE type='download_direct_url'",[],|r|r.get(0))?;Ok(())})
+                    database.read(context,|connection|{
+                        if workload=="count" {let _:i64=connection.query_row("SELECT COUNT(*) FROM job WHERE type='download_direct_url'",[],|r|r.get(0))?;}
+                        else if index==3 {let _:String=connection.query_row("SELECT value FROM meta WHERE key=?1",[&read_meta],|r|r.get(0))?;}
+                        else {let _:String=connection.query_row("SELECT status FROM job WHERE id=?1",[&read_job],|r|r.get(0))?;}
+                        Ok(())
+                    })
                 };
                 let elapsed_ns=attempt_started.elapsed().as_nanos();
-                let callbacks=db::AppDatabase::finish_vfs_timing_probe();
+                let mut callbacks=db::AppDatabase::finish_vfs_timing_probe().to_vec();
+                callbacks.extend(db::AppDatabase::vfs_open_read_timing_probe());
                 let finished_at_ms=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis();
                 // Context and physical connection dropped before measurement serialization.
                 let measurement=json!({"request_id":format!("wp0333-production-{index}-{ordinal}"),"started_at_ms":started_at_ms,
                     "finished_at_ms":finished_at_ms,"elapsed_ns":elapsed_ns,"callbacks":callbacks,"succeeded":result.is_ok()});
-                if attempt_measurements.len()<512 {attempt_measurements.push(measurement.clone());}else{attempt_measurement_overflow+=1;}
+                if attempt_measurements.len()<2048 {attempt_measurements.push(measurement.clone());}else{attempt_measurement_overflow+=1;}
                 match result {
                     Ok(()) if index<3=>{emit(json!({"event":"ack","job_id":id,"at_ms":finished_at_ms}));acknowledged.push(id)},
                     Ok(())=>reads+=1,
@@ -131,7 +144,7 @@ fn main()->ProofResult<()> {
     let recovery=manual.iter().any(|r|r["phase"]=="after_pin"&&r["receipt"]["busy"]==0&&r["receipt"]["log_frames"].as_i64().is_some_and(|n|n>=0)&&r["receipt"]["log_frames"]==r["receipt"]["checkpointed_frames"]);
     let final_complete=owner_shutdown.final_checkpoint.as_ref().is_some_and(|r|r.busy==0&&r.log_frames>=0&&r.log_frames==r.checkpointed_frames);
     let source_unchanged=hash(&source)?==source_hash;
-    let summary=json!({"root":root,"source_backup":source,"source_sha256":source_hash,"workers":reports,"acknowledged_ids":ack_ids,"errors":errors,"manual":manual,"observed_partial":partial,"observed_recovery":recovery,"health_observations":observations,"owner_shutdown":owner_shutdown,"drain_error":drain.as_ref().err().map(ToString::to_string),"source_unchanged":source_unchanged,"final_runtime":database.snapshot()});
+    let summary=json!({"root":root,"source_backup":source,"source_sha256":source_hash,"read_workload":workload,"seconds":seconds,"reader_interval_ms":100,"writer_interval_ms":100,"writer_count":3,"reader_count":3,"pin_seconds":5,"read_job":read_job,"read_meta_key":read_meta,"workers":reports,"acknowledged_ids":ack_ids,"errors":errors,"manual":manual,"observed_partial":partial,"observed_recovery":recovery,"health_observations":observations,"owner_shutdown":owner_shutdown,"drain_error":drain.as_ref().err().map(ToString::to_string),"source_unchanged":source_unchanged,"final_runtime":database.snapshot()});
     fs::write(root.join("production_maintenance_summary.json"),serde_json::to_vec_pretty(&summary)?)?;
     emit(json!({"event":"terminal","summary":root.join("production_maintenance_summary.json"),"errors":errors,"acknowledged":ack_ids.len()}));
     if errors!=0||!partial||!recovery||!final_complete||!source_unchanged||drain.is_err(){return Err("Actual owner proof failed; inspect retained summary".into())}

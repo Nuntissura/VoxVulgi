@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: batch
 assignment: WP-0332-20261004-live
 parent: null
-generation: 20
+generation: 21
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -43,3 +43,4 @@ steps:
 - {id: GP-027, role: any, at: before_verdict, do: require staged verifier receipts and captured native process stdout stderr before retry, check: {type: confirm}, source: 'infra: independent after-close JSON parse failed without saved stage traceback', state: active}
 - {id: GP-028, role: any, at: before_verdict, do: require recovery observer accepts queued running succeeded on same original identity, check: {type: confirm}, source: 'infra: queued-only assertion refused autonomous persisted-grant recovery', state: active}
 - {id: GP-029, role: any, at: before_verdict, do: require samefile identity for canonical extended Windows media path, check: {type: confirm}, source: 'infra: extended path prefix failed lexical containment before ffprobe', state: active}
+- {id: GP-030, role: any, at: before_verdict, do: require native observer dispatch aborts when preparation check exits nonzero, check: {type: confirm}, source: 'infra: chained PowerShell dispatched reader after invalid long confirmation note', state: active}
