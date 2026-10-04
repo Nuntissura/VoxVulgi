@@ -128,3 +128,37 @@ test("qualification composes authoritative venv packages without portable bootst
     else console.error(`Retained runtime package composition fixture: ${root}`);
   }
 });
+
+
+test("qualification stages read-only prepared files as writable without changing source", { skip: process.platform !== "win32" }, () => {
+  const root = mkdtempSync(join(tmpdir(), "vv-readonly-qualified-copy-"));
+  let passed = false;
+  try {
+    const input = join(root, "prepared"); const destination = join(root, "generation");
+    mkdirSync(join(input, "yt-dlp"), { recursive: true });
+    const sourceExe = join(input, "yt-dlp", "yt-dlp.exe");
+    const sourcePth = join(input, "python311._pth");
+    writeFileSync(sourceExe, "immutable-source-engine"); writeFileSync(sourcePth, "immutable-source-pth");
+    const replacement = join(root, "selected-engine.exe"); writeFileSync(replacement, "selected-engine");
+    const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+    const copier = source.slice(source.indexOf("function Copy-Tree("), source.indexOf("function Get-PythonDistributionMetadata("));
+    const command = `$ErrorActionPreference='Stop';${copier};$src=@(${quote(sourceExe)},${quote(sourcePth)});foreach($p in $src){(Get-Item -LiteralPath $p).IsReadOnly=$true};$before=@($src|ForEach-Object{@{path=$_;attributes=[int](Get-Item -LiteralPath $_).Attributes;sha=(Get-FileHash -LiteralPath $_).Hash}});Copy-Tree ${quote(input)} ${quote(destination)};$dst=@(${quote(join(destination, "yt-dlp", "yt-dlp.exe"))},${quote(join(destination, "python311._pth"))});if(@($dst|Where-Object{(Get-Item -LiteralPath $_).IsReadOnly}).Count){throw 'Staged copies retained read-only'};[IO.File]::Copy(${quote(replacement)},$dst[0],$true);[IO.File]::WriteAllText($dst[1],'qualified-writable-pth');$after=@($src|ForEach-Object{@{path=$_;attributes=[int](Get-Item -LiteralPath $_).Attributes;sha=(Get-FileHash -LiteralPath $_).Hash}});@{before=$before;after=$after}|ConvertTo-Json -Depth 4 -Compress`;
+    const copied = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", command], { encoding: "utf8", windowsHide: true });
+    assert.equal(copied.status, 0, `${root}\n${copied.stderr}`);
+    const observed = JSON.parse(copied.stdout.trim());
+    assert.deepEqual(observed.after, observed.before, "source attributes and hashes must be preserved");
+    assert.ok(observed.before.every((entry: any) => (entry.attributes & 1) !== 0));
+    assert.equal(readFileSync(sourceExe, "utf8"), "immutable-source-engine");
+    assert.equal(readFileSync(sourcePth, "utf8"), "immutable-source-pth");
+    assert.equal(readFileSync(join(destination, "yt-dlp", "yt-dlp.exe"), "utf8"), "selected-engine");
+    assert.equal(readFileSync(join(destination, "python311._pth"), "utf8"), "qualified-writable-pth");
+    passed = true;
+  } finally {
+    if (passed) {
+      const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+      const cleanup = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", `$ErrorActionPreference='Stop';Get-ChildItem -LiteralPath ${quote(root)} -File -Recurse -Force|ForEach-Object{$_.IsReadOnly=$false}`], { encoding: "utf8", windowsHide: true });
+      assert.equal(cleanup.status, 0, cleanup.stderr);
+      rmSync(root, { recursive: true, force: true });
+    } else console.error(`Retained read-only copy fixture: ${root}`);
+  }
+});

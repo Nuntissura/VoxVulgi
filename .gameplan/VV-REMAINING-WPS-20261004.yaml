@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 31
+generation: 32
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -52,3 +52,4 @@ steps:
 - {id: GP-036, role: any, at: before_round, do: require extracted qualifier consumer executed from owned script with natural script root, check: {type: confirm}, source: 'freeze fixture RED: Command function PSScriptRoot empty', state: active}
 - {id: GP-037, role: any, at: before_round, do: require terminal archived artifact rebinding before installed engine probe launch, check: {type: confirm}, source: 'launch preflight RED: managedbuild archived prior Currentcandidate', state: active}
 - {id: GP-038, role: any, at: before_round, do: verify prepared input identity uses independently proven per-file SHA record algorithm, check: {type: confirm}, source: 'pre-freeze finding: rawbyte treehash differed from original prepared marker', state: active}
+- {id: GP-039, role: any, at: before_round, do: verify qualifier copied destinations omit inherited readonly source attributes, check: {type: file, path: offline-installer-runtime/scripts/qualify_offline_runtime.ps1, contains: '/A-:R'}, source: 'Q RED: frozen readonly yt-dlp copied attribute prevented owned staged engine overlay', state: active}

@@ -162,7 +162,7 @@ function Import-PreparedPayloadIdentity([string]$ReceiptPath, [hashtable]$Expect
 
 function Copy-Tree([string]$Source, [string]$Destination, [string[]]$ExcludeDirectories = @()) {
   [IO.Directory]::CreateDirectory($Destination) | Out-Null
-  $args = @($Source, $Destination, '/E', '/COPY:DAT', '/DCOPY:DAT', '/R:1', '/W:1', '/XJ', '/NFL', '/NDL', '/NJH', '/NJS', '/NP')
+  $args = @($Source, $Destination, '/E', '/COPY:DAT', '/A-:R', '/DCOPY:DAT', '/R:1', '/W:1', '/XJ', '/NFL', '/NDL', '/NJH', '/NJS', '/NP')
   if ($ExcludeDirectories.Count -gt 0) { $args += '/XD'; $args += $ExcludeDirectories }
   & robocopy.exe @args | Out-Null
   if ($LASTEXITCODE -ge 8) { throw "robocopy failed with exit code $LASTEXITCODE ($Source -> $Destination)" }
