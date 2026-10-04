@@ -21,7 +21,7 @@ This is the single source of truth for work status.
 
 Rows are historical, append-only per WP; do not rewrite old Notes text. This file is not machine-parsed (verified 2026-09-23: no script in `governance/scripts`, `offline-installer-runtime/scripts`, or `product/**/*.{ts,rs,ps1}` reads `TASK_BOARD.md`), so row format may stay free-form prose.
 
-## Current open-work snapshot — 2026-10-03
+## Current open-work snapshot — 2026-10-04
 
 Fresh board-row count: 332 packets: 253 DONE (including four qualified historical DONE labels), 32 NEEDS_VALIDATION, 14 IN_PROGRESS, 9 BLOCKED, 12 BACKLOG, 1 REVIEW, and 11 SUPERSEDED. WP-0169 and WP-0327 have accepted proof; WP-0332 now has independently passing packaged active-close/restart recovery and keep-data update proof. WP-0333 records the fixed-SQLite prerequisite and disposable checkpoint-maintenance experiment. Earlier packet intent and remaining acceptance are preserved.
 
