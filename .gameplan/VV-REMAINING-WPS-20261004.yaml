@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 25
+generation: 27
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -46,3 +46,5 @@ steps:
 - {id: GP-030, role: any, at: before_round, do: require frozen source-bound Cosy graph test controller before batch, check: {type: file, path: .local/vv_cosy_graph_focused_tests.py, contains: assert gate.returncode == 0}, source: 'recorded RED: runtime84 omitted Lightning pkg_resources; targeted pin and model graph proof required', state: active}
 - {id: GP-031, role: any, at: before_round, do: require observed full Git HEAD passed unchanged to focused controller, check: {type: confirm}, source: 'mistake: wrong fullSHA dispatch refused before tests', state: active}
 - {id: GP-032, role: any, at: before_round, do: verify embedded Python dict braces escaped in Rust format string, check: {type: confirm}, source: 'compile RED: unescaped Python dict in focused Rust test', state: active}
+- {id: GP-033, role: any, at: before_round, do: require explicit UTF8 for focused source identity read, check: {type: file, path: .local/vv_cosy_graph_focused_tests.py, contains: encoding='utf-8'}, source: 'preflight RED: defaultcp1252 refused UTF8 tools.rs before test child', state: active}
+- {id: GP-034, role: any, at: before_round, do: verify helper future import remains first in separately compiled test module, check: {type: file, path: product/engine/src/tools.rs, contains: exec(compile(}, source: 'focused RED: test __name__ preceded helper futureimport', state: active}
