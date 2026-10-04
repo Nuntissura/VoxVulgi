@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: wp
 assignment: WP-0323-20261002
 parent: null
-generation: 5
+generation: 6
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -29,3 +29,4 @@ steps:
 - {id: GP-013, role: any, at: before_round, do: record inspected WP-0323 working diff identity before focused checks, check: {type: confirm}, source: Operator requests remediation; focused iteration uses inspected working diff, state: active}
 - {id: GP-014, role: any, at: before_round, do: verify active gameplan pointer selects WP-0323 remediation, check: {type: file, path: .gameplan-active, contains: WP-0323-20261002.yaml}, source: Gate rejected old WP-0325 pointer; activate current remediation plan, state: active}
 - {id: GP-015, role: any, at: before_round, do: require isolated regression proof; live SQLite lock probe cannot certify recovery, check: {type: confirm}, source: Live read-only probe hit SQLite lock; preserve exact live validation gap, state: active}
+- {id: GP-016, role: any, at: before_round, do: require focused test filter executes expected nonzero count; exact filters include module prefix, check: {type: confirm}, source: Wasted numeric proof used unqualified --exact and executed zero tests, state: active}

@@ -4467,7 +4467,9 @@ fn redact_diagnostics_value(value: serde_json::Value) -> serde_json::Value {
         serde_json::Value::Object(map) => serde_json::Value::Object(
             map.into_iter()
                 .map(|(key, value)| {
-                    let value = if sensitive_key(&key) {
+                    let value = if key == "file_bytes_read" && (value.is_number() || value.is_null()) {
+                        value
+                    } else if sensitive_key(&key) {
                         serde_json::Value::String("<redacted>".into())
                     } else {
                         redact_diagnostics_value(value)
@@ -5158,10 +5160,9 @@ fn capped_process_snapshot(process: &DiagnosticsProcessSnapshot) -> DiagnosticsP
 /// the lock evidence survives the trace-row cap instead of being replaced
 /// wholesale (WP-0320 MT-2, evidence: three ~264 KB rows dropped entirely).
 /// Stage 1 caps the process snapshot's child list; stage 2 drops `process`
-/// entirely. `details` (cmd/message/busy attribution) is never touched by
-/// either stage. Returns the row to write and whether the row is still over
-/// cap even without `process`, in which case the caller must fall back to
-/// the generic details-truncation path.
+/// entirely. If history alone exceeds the cap, retain its latest tail and
+/// current-incident IDs without dropping admitted candidates or attribution.
+/// Exceptionally large error text is bounded separately and explicitly marked.
 fn fit_lock_row_to_cap(
     mut row: DiagnosticsTraceEntry,
     max_bytes: usize,
@@ -5186,7 +5187,54 @@ fn fit_lock_row_to_cap(
             return (row, false);
         }
     }
-    (row, true)
+    const HISTORY_TAIL: usize = 32;
+    let mut incident_ids = std::collections::HashSet::new();
+    for key in ["operation_id", "failed_operation_id"] {
+        if let Some(id) = row.details.get(key).and_then(serde_json::Value::as_u64) {
+            incident_ids.insert(id);
+        }
+    }
+    if let Some(candidates) = row.details.pointer("/contention/active_internal_candidates")
+        .and_then(serde_json::Value::as_array) {
+        for candidate in candidates {
+            if let Some(id) = candidate["operation_id"].as_u64() { incident_ids.insert(id); }
+        }
+    }
+    if let Some(contention) = row.details.get_mut("contention").and_then(serde_json::Value::as_object_mut) {
+        if let Some(history) = contention.get_mut("recent_receipts").and_then(serde_json::Value::as_array_mut) {
+            let original = history.len();
+            let tail_start = original.saturating_sub(HISTORY_TAIL);
+            let mut index = 0;
+            history.retain(|receipt| {
+                let retain = index >= tail_start || receipt["operation_id"].as_u64()
+                    .is_some_and(|id| incident_ids.contains(&id));
+                index += 1;
+                retain
+            });
+            let retained = history.len();
+            contention.insert("history_compaction".into(), serde_json::json!({
+                "original_count":original,"retained_count":retained,"omitted_count":original-retained,
+                "latest_tail_limit":HISTORY_TAIL,"current_incident_ids_preserved":true,
+                "reason":"trace_row_cap_history_only"
+            }));
+        }
+    }
+    if fits(&row) { return (row, false); }
+    if let Some(error) = row.details.get("error").and_then(serde_json::Value::as_str) {
+        const MAX_ERROR_CHARS: usize = 8192;
+        let bounded: String = error.chars().take(MAX_ERROR_CHARS).collect();
+        if bounded.len() < error.len() {
+            let original_bytes = error.len();
+            let retained_bytes = bounded.len();
+            row.details["error"] = serde_json::Value::String(bounded);
+            row.details["error_truncation"] = serde_json::json!({
+                "truncated":true,"original_bytes":original_bytes,"retained_bytes":retained_bytes,
+                "max_chars":MAX_ERROR_CHARS,"retained":"prefix"
+            });
+        }
+    }
+    let still_over = !fits(&row);
+    (row, still_over)
 }
 
 fn append_diagnostics_trace_row(
@@ -7525,6 +7573,81 @@ mod tests {
         assert_eq!(fitted.event, "database_locked");
         assert_eq!(fitted.details["cmd"], "jobs_overview");
         assert_eq!(fitted.details["message"], "database is locked");
+    }
+
+    #[test]
+    fn database_locked_details_only_history_preserves_incident_under_cap() {
+        for all_historical_failed in [false, true] {
+            let candidates = serde_json::json!([{"operation_id":14,"mode":"write",
+                "admitted_at_ms":100,"phase_ms":{"connection_close":0,"connection_use":0,"open":15}}]);
+            let history: Vec<_> = (0..512).map(|id| serde_json::json!({
+                "operation_id":id,"operation":"subscriptions.rs:".to_string()+&"x".repeat(600),
+                "outcome":if all_historical_failed || id == 7 {"read_admission_timeout"} else {"completed_read_context"},
+                "enqueued_at_ms":100,"finished_at_ms":200,"phase_ms":{"connection_use":4000}
+            })).collect();
+            let row = DiagnosticsTraceEntry {
+                ts_ms:200,event:"database_locked".into(),level:"warn".into(),
+                details:serde_json::json!({"cmd":"jobs_track_activity","error":"database is locked",
+                    "failed_operation_id":7,"contention":{"classification":"internal_candidates",
+                    "active_internal_candidates":candidates.clone(),"recent_receipts":history}}),
+                process:None,incident_id:None,span_id:None,
+            };
+            assert!(serde_json::to_string(&row).unwrap().len()>DIAGNOSTICS_TRACE_MAX_ROW_BYTES);
+            let (fitted, over) = fit_lock_row_to_cap(row,DIAGNOSTICS_TRACE_MAX_ROW_BYTES);
+            assert!(!over,"even512 historical failures must not overflow the bounded tail");
+            assert!(serde_json::to_string(&fitted).unwrap().len()+1<=DIAGNOSTICS_TRACE_MAX_ROW_BYTES);
+            assert_eq!(fitted.event,"database_locked");
+            assert_eq!(fitted.details["cmd"],"jobs_track_activity");
+            assert_eq!(fitted.details["error"],"database is locked");
+            assert_eq!(fitted.details["contention"]["classification"],"internal_candidates");
+            assert_eq!(fitted.details["contention"]["active_internal_candidates"],candidates);
+            let retained=fitted.details["contention"]["recent_receipts"].as_array().unwrap();
+            assert_eq!(retained.len(),34);
+            assert!(retained.iter().any(|r|r["operation_id"]==7));
+            assert!(retained.iter().any(|r|r["operation_id"]==14));
+            assert_eq!(retained.last().unwrap()["operation_id"],511);
+            assert_eq!(fitted.details["contention"]["history_compaction"]["original_count"],512);
+            assert_eq!(fitted.details["contention"]["history_compaction"]["retained_count"],34);
+            assert_eq!(fitted.details["contention"]["history_compaction"]["omitted_count"],478);
+        }
+    }
+
+    #[test]
+    fn database_locked_oversized_unicode_error_retains_prefix_and_attribution() {
+        let error="database is locked: ".to_owned()+&"💥".repeat(100_000);
+        let row=DiagnosticsTraceEntry {
+            ts_ms:0,event:"database_locked".into(),level:"warn".into(),
+            details:serde_json::json!({"cmd":"jobs_track_activity","error":error,
+                "contention":{"classification":"external_or_unknown","active_internal_candidates":[],"recent_receipts":[]}}),
+            process:None,incident_id:None,span_id:None,
+        };
+        let (fitted,over)=fit_lock_row_to_cap(row,DIAGNOSTICS_TRACE_MAX_ROW_BYTES);
+        assert!(!over);
+        assert_eq!(fitted.event,"database_locked");
+        assert_eq!(fitted.details["cmd"],"jobs_track_activity");
+        assert!(fitted.details["error"].as_str().unwrap().starts_with("database is locked: "));
+        assert_eq!(fitted.details["error"].as_str().unwrap().chars().count(),8192);
+        assert_eq!(fitted.details["error_truncation"]["truncated"],true);
+        assert_eq!(fitted.details["error_truncation"]["original_bytes"],400020);
+        assert_eq!(fitted.details["contention"]["classification"],"external_or_unknown");
+    }
+
+    #[test]
+    fn diagnostics_numeric_file_bytes_read_survives_without_path_exception() {
+        let redacted=redact_diagnostics_value(serde_json::json!({
+            "receipts":[{"file_bytes_read":8589934592u64},{"file_bytes_read":null},
+                {"file_bytes_read":"C:\\private\\database.sqlite"},
+                {"file_bytes_read":true},{"file_bytes_read":{"token":"private-secret"}}],
+            "file_path":"C:\\private\\database.sqlite",
+            "other_file_metric":42,"FILE_BYTES_READ":42
+        }));
+        assert_eq!(redacted["receipts"][0]["file_bytes_read"],8589934592u64);
+        assert!(redacted["receipts"][1]["file_bytes_read"].is_null());
+        for index in 2..5 { assert_eq!(redacted["receipts"][index]["file_bytes_read"],"<redacted>"); }
+        assert_eq!(redacted["file_path"],"<redacted>");
+        assert_eq!(redacted["other_file_metric"],"<redacted>");
+        assert_eq!(redacted["FILE_BYTES_READ"],"<redacted>");
+        assert!(!redacted.to_string().contains("private"));
     }
 
     #[test]
