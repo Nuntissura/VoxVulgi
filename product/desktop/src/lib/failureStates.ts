@@ -137,6 +137,16 @@ type Rule = {
 // Scope C catalogue, in the exact numbered order from the WP. First match wins.
 const RULES: Rule[] = [
   {
+    kind: "app_busy",
+    test: /maintenance_unavailable|maintenance_backlog_limit/i,
+    label: "Database maintenance blocked new writes",
+    whatHappened: "Database maintenance is unavailable or its pending work exceeded the safety limit.",
+    whoActs: "app",
+    appWillDo: "Continues maintenance and permits new writes after recovery; job retries remain bounded.",
+    actions: [],
+    tone: "warn",
+  },
+  {
     // 1. app_busy — internal database contention. Must be checked before any
     // timeout/network rule (58 of the 195 live errors were mislabeled "Network
     // problem" this way).

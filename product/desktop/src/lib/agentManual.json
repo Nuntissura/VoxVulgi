@@ -4,7 +4,7 @@
   "commands": [
     {
       "name": "database.runtime_status",
-      "description": "Read bounded in-memory database admission state and terminal operation receipts, plus read-only WAL file sizes. Opens no SQLite connection and takes no database admission slot. connection_use includes SQL and caller work; connection_close appears immediately before connection drop; terminal receipts contain its completed duration. A zero value on an active operation is the initial marker or a submillisecond completed close.",
+      "description": "Read bounded in-memory database admission state and terminal operation receipts, plus read-only WAL file sizes. Opens no SQLite connection and takes no database admission slot. checkpoint_maintenance reports the shared background PASSIVE owner, cycle age, partial progress, backlog and explicit new-write backpressure; diagnostics reads do not checkpoint. Diagnostics trace exposes the same state and its explicit Run passive WAL checkpoint action shares that owner. connection_use includes SQL and caller work; connection_close appears immediately before connection drop; terminal receipts contain its completed duration. A zero value on an active operation is the initial marker or a submillisecond completed close.",
       "read_only": true,
       "effect": "read_only",
       "input": {},

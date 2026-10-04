@@ -15,6 +15,18 @@ test("history reads recover from transient admission failures with a finite retr
   assert.equal(historyReadRetryDelay(error, 0), null);
 });
 
+test("maintenance backpressure stays recoverable and describes the database safeguard", () => {
+  for (const reason of ["maintenance_unavailable", "maintenance_backlog_limit"]) {
+    const message = `database runtime error: ${reason}`;
+    const failure = classifyFailure(message);
+    assert.equal(failure.kind, "app_busy");
+    assert.equal(failure.label, "Database maintenance blocked new writes");
+    assert.match(failure.appWillDo, /after recovery/);
+    assert.equal(historyReadRetryDelay(message, 1), 2000);
+    assert.equal(historyReadRetryDelay(message, 5), null);
+  }
+});
+
 const FIXTURES: Array<{ message: string; kind: FailureKind }> = [
   // 58 subs mislabeled "Network problem" before WP-0322 — must be app_busy.
   { message: "database runtime error: writer_admission_timeout", kind: "app_busy" },

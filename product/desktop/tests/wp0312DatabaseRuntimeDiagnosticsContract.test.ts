@@ -51,10 +51,14 @@ test("Database runtime helpers keep foreground reads separate from explicit main
   assert.match(status, /long_reader_candidates/);
   assert.match(status, /last_checkpoint/);
   assert.doesNotMatch(status, /wal_checkpoint|write_context/);
-  assert.match(checkpoint, /DatabaseOperationContext::new\("database_maintenance", "wal_checkpoint_passive"\)/);
-  assert.match(checkpoint, /PRAGMA wal_checkpoint\(PASSIVE\)/);
-  assert.match(checkpoint, /checkpoint_completed/);
-  assert.match(checkpoint, /checkpoint_busy/);
+  assert.match(checkpoint, /DatabaseOperationContext::new\("database_maintenance",\s*"wal_checkpoint_passive"\)/);
+  assert.match(checkpoint, /maintenance_shared\(\)/);
+  assert.match(checkpoint, /ManualCheckpoint/);
+  assert.doesNotMatch(checkpoint, /write_context|PRAGMA wal_checkpoint/);
+  const ownerCycle = sliceBetween(runtime, "fn maintenance_cycle(", "fn maintenance_worker(");
+  assert.match(ownerCycle, /PRAGMA wal_checkpoint\(PASSIVE\)/);
+  assert.match(ownerCycle, /checkpoint_completed/);
+  assert.match(ownerCycle, /checkpoint_busy/);
 });
 
 test("Database runtime receipts, FIFO readers, retries, and contention attribution are fail-closed", () => {
@@ -97,9 +101,9 @@ test("Diagnostics loads runtime status automatically but checkpoints only on ope
   assert.doesNotMatch(diagnostics, /data-testid="database-passive-checkpoint"[^>]*data-agent-safe-action/);
 });
 
-test("Database runtime help stays in the existing trace card and states evidence limits", () => {
+test("Database runtime help stays in the existing trace section and states evidence limits", () => {
   const diagnostics = readDesktop("src", "pages", "DiagnosticsPage.tsx");
-  const traceCard = sliceBetween(diagnostics, '<div className="card" id="diag-trace">', '<div className="card" id="diag-failures">');
+  const traceCard = sliceBetween(diagnostics, '<details className="diagnostics-section" id="diag-trace">', '<details className="diagnostics-section" id="diag-failures">');
   const databaseSection = sliceBetween(traceCard, "<h2>Database runtime</h2>", "<h2>Diagnostics trace</h2>");
 
   assert.doesNotMatch(databaseSection, /className="card/);
@@ -127,13 +131,13 @@ test("Demand registry classifies status as visibility read and checkpoint as mut
 test("database shutdown never rejects work from a runner that failed its bounded join", () => {
   const tauri = readDesktop("src-tauri", "src", "lib.rs");
   const exitHandler = sliceBetween(
-    tauri,
-    "if let tauri::RunEvent::Exit = event",
-    "        });",
+    tauri.slice(tauri.indexOf("\n        .run(|app_handle, event| {")),
+    "if let tauri::RunEvent::Exit = event {",
+    "\n        });",
   );
 
-  assert.match(exitHandler, /runner_join_succeeded = runner_join\.is_ok\(\)/);
-  assert.match(exitHandler, /if runner_join_succeeded \{[\s\S]*?shutdown_and_drain/);
+  assert.match(exitHandler, /runner_join_succeeded &= runner_join\.is_ok\(\)/);
+  assert.match(exitHandler, /if runner_join_succeeded && maintenance_join_succeeded \{[\s\S]*?shutdown_and_drain/);
   assert.match(exitHandler, /skipped_runner_not_joined/);
   const skipped = exitHandler.slice(exitHandler.indexOf("skipped_runner_not_joined"));
   assert.doesNotMatch(skipped, /shutdown_and_drain/);

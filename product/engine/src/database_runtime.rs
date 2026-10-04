@@ -1,4 +1,4 @@
-use super::{open_readonly_raw, open_write_raw};
+use super::{open_checkpoint_maintenance_raw, open_readonly_raw, open_runtime_write_raw, open_write_raw};
 use crate::paths::AppPaths;
 use crate::{EngineError, Result};
 use rusqlite::{Connection, ErrorCode, TransactionBehavior};
@@ -6,8 +6,8 @@ use serde::Serialize;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{mpsc, Arc, Condvar, Mutex, OnceLock, Weak};
 use std::thread::ThreadId;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -27,6 +27,10 @@ pub const WRITER_BATCH_MAX_OPERATIONS: usize = 1;
 pub const LONG_READER_WARNING_MS: u64 = 5_000;
 pub const WRITER_FAIRNESS_POLICY: &str = "strict_fifo_no_priority_bypass";
 pub const CHECKPOINT_POLICY: &str = "passive_maintenance_only_never_foreground";
+pub const CHECKPOINT_INTERVAL: Duration = Duration::from_millis(500);
+pub const CHECKPOINT_STALE_TIMEOUT: Duration = Duration::from_secs(10);
+pub const CHECKPOINT_BACKLOG_WARNING: u64 = 64 * 1024 * 1024;
+pub const CHECKPOINT_BACKLOG_LIMIT: u64 = 256 * 1024 * 1024;
 pub const CANCELLATION_POLICY: &str =
     "cancellable_before_admission_then_raii_rollback_or_terminal_commit";
 
@@ -190,6 +194,7 @@ pub struct DatabaseOperationReceipt {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct DatabaseRuntimeSnapshot {
+    pub checkpoint_maintenance: CheckpointMaintenanceHealth,
     pub database_path: PathBuf,
     pub sqlite_version: String,
     pub sqlite_version_number: i32,
@@ -208,6 +213,7 @@ pub struct DatabaseRuntimeSnapshot {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct WalHealth {
+    pub checkpoint_maintenance: CheckpointMaintenanceHealth,
     pub database_path: PathBuf,
     pub wal_path: PathBuf,
     pub wal_bytes: u64,
@@ -235,6 +241,310 @@ pub struct DatabaseContentionReceipt {
     pub database_path: PathBuf,
     pub active_internal_candidates: Vec<ActiveDatabaseOperation>,
     pub recent_receipts: Vec<DatabaseOperationReceipt>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckpointMaintenanceHealth {
+    pub enabled: bool,
+    pub owner_state: String,
+    pub last_cycle_at_ms: Option<u64>,
+    pub cycle_age_ms: Option<u64>,
+    pub consecutive_errors: u32,
+    pub last_error: Option<String>,
+    pub last_checkpoint: Option<WalCheckpointReceipt>,
+    pub backlog_bytes: Option<u64>,
+    pub backlog_warning: bool,
+    pub writer_backpressure: Option<String>,
+    pub physical_wal_bytes: u64,
+    pub max_physical_wal_bytes: u64,
+    pub cycles: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct CheckpointMaintenanceShutdownReceipt {
+    pub stop_requested: bool,
+    pub joined: bool,
+    pub elapsed_ms: u64,
+    pub final_checkpoint: Option<WalCheckpointReceipt>,
+    pub owner_close_error: Option<String>,
+}
+
+#[derive(Debug)]
+struct MaintenanceState {
+    ready: bool,
+    state: &'static str,
+    last_cycle: Instant,
+    health: CheckpointMaintenanceHealth,
+    final_receipt: Option<CheckpointMaintenanceShutdownReceipt>,
+}
+
+#[derive(Debug)]
+struct ManualCheckpoint {
+    runtime: Weak<RuntimeInner>,
+    operation_id: u64,
+    started: Instant,
+    reply: mpsc::SyncSender<std::result::Result<WalCheckpointReceipt, String>>,
+    replied: bool,
+}
+
+impl Drop for ManualCheckpoint {
+    fn drop(&mut self) {
+        if !self.replied {
+            let outcome=if std::thread::panicking() {"maintenance_owner_panicked"}else{"maintenance_request_abandoned"};
+            if let Some(runtime)=self.runtime.upgrade() {runtime.finish(self.operation_id,self.started,outcome,0);}
+            let _=self.reply.try_send(Err(outcome.into()));
+        }
+    }
+}
+
+struct CheckpointCycleTerminal<'a> {
+    runtime: &'a RuntimeInner,
+    operation_id: u64,
+    started: Instant,
+    finished: bool,
+}
+
+impl Drop for CheckpointCycleTerminal<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.runtime.finish(self.operation_id,self.started,
+                if std::thread::panicking(){"maintenance_owner_panicked"}else{"maintenance_cycle_abandoned"},0);
+        }
+    }
+}
+
+#[derive(Debug)]
+struct MaintenanceShared {
+    state: Mutex<MaintenanceState>,
+    wake: Condvar,
+    requests: Mutex<VecDeque<ManualCheckpoint>>,
+    stop: AtomicBool,
+    guards: AtomicUsize,
+}
+
+#[derive(Debug)]
+struct MaintenanceOwner {
+    shared: Arc<MaintenanceShared>,
+    handle: Option<std::thread::JoinHandle<()>>,
+}
+
+#[derive(Debug)]
+pub struct CheckpointMaintenanceGuard {
+    runtime: Weak<RuntimeInner>,
+    shared: Arc<MaintenanceShared>,
+}
+
+fn empty_maintenance_health() -> CheckpointMaintenanceHealth {
+    CheckpointMaintenanceHealth { enabled:false,owner_state:"not_started".into(),last_cycle_at_ms:None,
+        cycle_age_ms:None,consecutive_errors:0,last_error:None,last_checkpoint:None,backlog_bytes:None,
+        backlog_warning:false,writer_backpressure:None,physical_wal_bytes:0,max_physical_wal_bytes:0,cycles:0 }
+}
+
+fn checkpoint_backlog(log: i64, checkpointed: i64, page_size: u64) -> Option<u64> {
+    if log == -1 && checkpointed == -1 { return Some(0); }
+    if log < 0 || checkpointed < 0 || checkpointed > log || page_size == 0 { return None; }
+    Some((log as u64 - checkpointed as u64).saturating_mul(page_size))
+}
+
+fn maintenance_gate(state: &MaintenanceState) -> Option<&'static str> {
+    if !state.ready || state.state != "running" || state.last_cycle.elapsed() >= CHECKPOINT_STALE_TIMEOUT
+        || state.health.consecutive_errors >= 3 { return Some("maintenance_unavailable"); }
+    if state.health.backlog_bytes.is_some_and(|bytes|bytes >= CHECKPOINT_BACKLOG_LIMIT) {
+        return Some("maintenance_backlog_limit");
+    }
+    None
+}
+
+fn reject_manual_checkpoints(shared: &MaintenanceShared, reason: &str) {
+    let requests: Vec<_> = shared.requests.lock().unwrap_or_else(|p|p.into_inner()).drain(..).collect();
+    for mut request in requests {
+        if let Some(runtime)=request.runtime.upgrade() {
+            runtime.finish(request.operation_id,request.started,reason,0);
+        }
+        let _=request.reply.send(Err(reason.into()));
+        request.replied=true;
+    }
+}
+
+fn maintenance_cycle(runtime: &RuntimeInner, shared: &MaintenanceShared, connection: &Connection,
+    page_size: u64, operation_id: u64, started: Instant) -> Result<WalCheckpointReceipt> {
+    let mut terminal=CheckpointCycleTerminal{runtime,operation_id,started,finished:false};
+    runtime.admitted(operation_id,started.elapsed());
+    #[cfg(test)]
+    {
+        let manual=runtime.registry.lock().unwrap_or_else(|p|p.into_inner()).active.get(&operation_id)
+            .is_some_and(|operation|operation.operation=="wal_checkpoint_passive");
+        if manual && runtime.test_manual_checkpoint_panic.swap(false,Ordering::AcqRel) {
+            panic!("owned manual checkpoint panic fixture");
+        }
+    }
+    let result=connection.query_row("PRAGMA wal_checkpoint(PASSIVE)",[],|row| {
+        Ok((row.get::<_,i64>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?))
+    });
+    runtime.operation_metadata(operation_id,Some(("checkpoint_sql",started.elapsed())),None,None);
+    let physical=std::fs::metadata(runtime.database_path.with_extension("sqlite-wal")).map(|m|m.len()).unwrap_or(0);
+    let mut state=shared.state.lock().unwrap_or_else(|p|p.into_inner());
+    state.last_cycle=Instant::now();
+    state.health.last_cycle_at_ms=Some(now_ms());
+    state.health.cycles=state.health.cycles.saturating_add(1);
+    state.health.physical_wal_bytes=physical;
+    state.health.max_physical_wal_bytes=state.health.max_physical_wal_bytes.max(physical);
+    match result {
+        Ok((busy,log_frames,checkpointed_frames))=> {
+            let receipt=WalCheckpointReceipt{mode:"passive".into(),busy,log_frames,checkpointed_frames,
+                elapsed_ms:started.elapsed().as_millis().min(u64::MAX as u128) as u64};
+            // A busy or malformed no-WAL result must never erase a known backlog.
+            let backlog=if busy!=0 && (log_frames<0 || checkpointed_frames<0) {None}
+                else {checkpoint_backlog(log_frames,checkpointed_frames,page_size)};
+            if let Some(backlog)=backlog {state.health.backlog_bytes=Some(backlog);}
+            state.health.backlog_warning=state.health.backlog_bytes.is_some_and(|b|b>=CHECKPOINT_BACKLOG_WARNING);
+            state.health.consecutive_errors=0;
+            state.health.last_error=None;
+            state.health.last_checkpoint=Some(receipt.clone());
+            let warning=state.health.backlog_warning;
+            let backlog_bytes=state.health.backlog_bytes;
+            drop(state);
+            *runtime.last_checkpoint.lock().unwrap_or_else(|p|p.into_inner())=Some(receipt.clone());
+            runtime.finish(operation_id,started,if busy!=0 {"checkpoint_busy"}
+                else if log_frames>checkpointed_frames {"checkpoint_partial"}else{"checkpoint_completed"},0);
+            terminal.finished=true;
+            runtime.admission_changed.notify_all();
+            if warning || busy!=0 || log_frames>checkpointed_frames {
+                crate::diagnostics::emit_trace_event(&runtime.paths,"database_checkpoint_pressure","warn",
+                    serde_json::json!({"operation_id":operation_id,"busy":busy,"log_frames":log_frames,
+                        "checkpointed_frames":checkpointed_frames,"backlog_bytes":backlog_bytes,"physical_wal_bytes":physical}));
+            }
+            Ok(receipt)
+        }
+        Err(error)=> {
+            state.health.consecutive_errors=state.health.consecutive_errors.saturating_add(1);
+            state.health.last_error=Some(error.to_string());
+            let consecutive_errors=state.health.consecutive_errors;
+            drop(state);
+            runtime.finish(operation_id,started,"checkpoint_failed",0);
+            terminal.finished=true;
+            runtime.admission_changed.notify_all();
+            crate::diagnostics::emit_trace_event(&runtime.paths,"database_checkpoint_failed","warn",
+                serde_json::json!({"operation_id":operation_id,"consecutive_errors":consecutive_errors,
+                    "error":error.to_string().chars().take(4096).collect::<String>()}));
+            Err(error.into())
+        }
+    }
+}
+
+fn maintenance_worker(weak: Weak<RuntimeInner>, shared: &MaintenanceShared) -> Result<CheckpointMaintenanceShutdownReceipt> {
+    let runtime=weak.upgrade().ok_or_else(||EngineError::DatabaseRuntime("maintenance_runtime_gone".into()))?;
+    let connection=open_checkpoint_maintenance_raw(&runtime.database_path)?;
+    let page_size=connection.query_row("PRAGMA page_size",[],|row|row.get::<_,u64>(0))?;
+    {
+        let mut state=shared.state.lock().unwrap_or_else(|p|p.into_inner());
+        state.ready=true;
+        state.state="running";
+        state.last_cycle=Instant::now();
+    }
+    shared.wake.notify_all();
+    let mut next=Instant::now();
+    while !shared.stop.load(Ordering::Acquire) {
+        let request=shared.requests.lock().unwrap_or_else(|p|p.into_inner()).pop_front();
+        if let Some(mut request)=request {
+            let result=maintenance_cycle(&runtime,shared,&connection,page_size,request.operation_id,request.started);
+            let _=request.reply.send(result.map_err(|error|error.to_string()));
+            request.replied=true;
+        } else if Instant::now()>=next {
+            let (id,started)=runtime.register(&DatabaseOperationContext::new("database_maintenance","wal_checkpoint_background").maintenance(),DatabaseMode::Maintenance);
+            let _=maintenance_cycle(&runtime,shared,&connection,page_size,id,started);
+            next=Instant::now()+CHECKPOINT_INTERVAL;
+        } else {
+            let state=shared.state.lock().unwrap_or_else(|p|p.into_inner());
+            if shared.stop.load(Ordering::Acquire) {break;}
+            // Bounded wait also covers a notification arriving immediately before wait.
+            drop(shared.wake.wait_timeout(state,next.saturating_duration_since(Instant::now()).min(Duration::from_millis(50)))
+                .unwrap_or_else(|p|p.into_inner()));
+        }
+    }
+    reject_manual_checkpoints(shared,"maintenance_stopped_before_admission");
+    // RAII setup-error cleanup also waits for already admitted atomic operations.
+    let mut admission=runtime.admission.lock().unwrap_or_else(|p|p.into_inner());
+    while admission.writer_active || admission.active_readers>0 || !admission.waiting_writers.is_empty() || !admission.waiting_readers.is_empty() {
+        admission=runtime.admission_changed.wait_timeout(admission,Duration::from_millis(50)).unwrap_or_else(|p|p.into_inner()).0;
+    }
+    drop(admission);
+    let (id,started)=runtime.register(&DatabaseOperationContext::new("database_maintenance","wal_checkpoint_shutdown").maintenance(),DatabaseMode::Maintenance);
+    let final_checkpoint=maintenance_cycle(&runtime,shared,&connection,page_size,id,started).ok();
+    let owner_close_error=connection.close().err().map(|(_,error)|error.to_string());
+    Ok(CheckpointMaintenanceShutdownReceipt{stop_requested:true,joined:false,elapsed_ms:0,final_checkpoint,owner_close_error})
+}
+
+impl MaintenanceShared {
+    fn signal_stop(&self) {
+        self.stop.store(true, Ordering::Release);
+        self.wake.notify_all();
+    }
+}
+
+impl Drop for CheckpointMaintenanceGuard {
+    fn drop(&mut self) {
+        if self.shared.guards.fetch_sub(1, Ordering::AcqRel) == 1 {
+            if let Some(runtime) = self.runtime.upgrade() {
+                runtime.admission.lock().unwrap_or_else(|p|p.into_inner()).shutting_down = true;
+                runtime.admission_changed.notify_all();
+            }
+            self.shared.signal_stop();
+        }
+    }
+}
+
+impl CheckpointMaintenanceGuard {
+    pub fn stop_and_join(&mut self, timeout: Duration) -> Result<CheckpointMaintenanceShutdownReceipt> {
+        let started=Instant::now();
+        let deadline=started+timeout;
+        let runtime=self.runtime.upgrade().ok_or_else(||EngineError::DatabaseRuntime("maintenance_runtime_gone".into()))?;
+        let mut admission=runtime.admission.lock().unwrap_or_else(|p|p.into_inner());
+        admission.shutting_down=true;
+        runtime.admission_changed.notify_all();
+        while admission.writer_active || admission.active_readers>0 || !admission.waiting_writers.is_empty()
+            || !admission.waiting_readers.is_empty() {
+            if Instant::now()>=deadline {
+                drop(admission);
+                self.shared.signal_stop();
+                return Err(EngineError::DatabaseRuntime("maintenance_quiesce_timeout_unjoined".into()));
+            }
+            admission=runtime.admission_changed.wait_timeout(admission,
+                deadline.saturating_duration_since(Instant::now()).min(Duration::from_millis(50)))
+                .unwrap_or_else(|p|p.into_inner()).0;
+        }
+        drop(admission);
+        self.shared.signal_stop();
+        let mut state=self.shared.state.lock().unwrap_or_else(|p|p.into_inner());
+        while state.final_receipt.is_none() {
+            if Instant::now()>=deadline {
+                return Err(EngineError::DatabaseRuntime("maintenance_stop_timeout_unjoined_nonpreemptible_io".into()));
+            }
+            state=self.shared.wake.wait_timeout(state,deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|p|p.into_inner()).0;
+        }
+        let mut receipt=state.final_receipt.clone().expect("terminal owner receipt");
+        drop(state);
+        loop {
+            let finished=runtime.maintenance.lock().unwrap_or_else(|p|p.into_inner()).as_ref()
+                .and_then(|owner|owner.handle.as_ref()).is_none_or(|handle|handle.is_finished());
+            if finished {break;}
+            if Instant::now()>=deadline {
+                return Err(EngineError::DatabaseRuntime("maintenance_stop_timeout_unjoined_nonpreemptible_io".into()));
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let handle=runtime.maintenance.lock().unwrap_or_else(|p|p.into_inner()).as_mut().and_then(|o|o.handle.take());
+        if let Some(handle)=handle {
+            if handle.thread().id()==std::thread::current().id() {
+                return Err(EngineError::DatabaseRuntime("maintenance_self_join_refused".into()));
+            }
+            if handle.join().is_err() { return Err(EngineError::DatabaseRuntime("maintenance_worker_panicked".into())); }
+        }
+        receipt.joined=true;
+        receipt.elapsed_ms=started.elapsed().as_millis().min(u64::MAX as u128) as u64;
+        Ok(receipt)
+    }
 }
 
 #[derive(Debug)]
@@ -269,6 +579,11 @@ struct RegistryState {
 
 #[derive(Debug)]
 struct RuntimeInner {
+    #[cfg(test)]
+    test_manual_checkpoint_panic: AtomicBool,
+    #[cfg(test)]
+    test_maintenance_unavailable: AtomicBool,
+    maintenance: Mutex<Option<MaintenanceOwner>>,
     database_path: PathBuf,
     /// Paths of the first opener; used only to address the diagnostics trace.
     paths: AppPaths,
@@ -279,6 +594,35 @@ struct RuntimeInner {
 }
 
 impl RuntimeInner {
+    fn maintenance_shared(&self) -> Option<Arc<MaintenanceShared>> {
+        self.maintenance.lock().unwrap_or_else(|p|p.into_inner()).as_ref().map(|o|Arc::clone(&o.shared))
+    }
+
+    fn maintenance_health(&self) -> CheckpointMaintenanceHealth {
+        let Some(shared)=self.maintenance_shared() else { return empty_maintenance_health(); };
+        let state=shared.state.lock().unwrap_or_else(|p|p.into_inner());
+        let mut health=state.health.clone();
+        health.owner_state=state.state.into();
+        health.cycle_age_ms=Some(state.last_cycle.elapsed().as_millis().min(u64::MAX as u128) as u64);
+        health.writer_backpressure=maintenance_gate(&state).map(str::to_string);
+        if shared.stop.load(Ordering::Acquire) {health.writer_backpressure=Some("maintenance_unavailable".into());}
+        #[cfg(test)]
+        if self.test_maintenance_unavailable.load(Ordering::Acquire) {health.writer_backpressure=Some("maintenance_unavailable".into());}
+        health
+    }
+
+    fn maintenance_writer_gate(&self) -> Option<&'static str> {
+        #[cfg(test)]
+        if self.test_maintenance_unavailable.load(Ordering::Acquire) {return Some("maintenance_unavailable");}
+        let shared=self.maintenance_shared()?;
+        if shared.stop.load(Ordering::Acquire) {return Some("maintenance_unavailable");}
+        let state=shared.state.lock().unwrap_or_else(|p|p.into_inner());
+        maintenance_gate(&state)
+    }
+
+    fn maintained_writer_policy(&self) -> bool {
+        self.maintenance_shared().is_some_and(|s|s.state.lock().unwrap_or_else(|p|p.into_inner()).ready)
+    }
     fn register(&self, context: &DatabaseOperationContext, mode: DatabaseMode) -> (u64, Instant) {
         let operation_id = NEXT_OPERATION_ID.fetch_add(1, Ordering::Relaxed);
         let enqueued_at_ms = now_ms();
@@ -534,6 +878,10 @@ impl RuntimeInner {
             drop(state);
             return Err(self.fail_before_admission(operation_id, started, "runtime_shutting_down"));
         }
+        if let Some(reason)=self.maintenance_writer_gate() {
+            drop(state);
+            return Err(self.fail_before_admission(operation_id,started,reason));
+        }
         if state.waiting_writers.len() + usize::from(state.writer_active) >= WRITER_QUEUE_CAPACITY {
             drop(state);
             return Err(self.fail_before_admission(
@@ -570,6 +918,12 @@ impl RuntimeInner {
                 .map(|waiter| waiter.ticket == ticket && waiter.operation_id == operation_id)
                 .unwrap_or(false);
             if is_front && !state.writer_active {
+                if let Some(reason)=self.maintenance_writer_gate() {
+                    state.waiting_writers.retain(|w|w.operation_id!=operation_id);
+                    drop(state);
+                    self.admission_changed.notify_all();
+                    return Err(self.fail_before_admission(operation_id,started,reason));
+                }
                 state.waiting_writers.pop_front();
                 state.writer_active = true;
                 state.writer_thread = Some(current_thread);
@@ -1546,6 +1900,11 @@ impl AppDatabase {
             });
         }
         let runtime = Arc::new(RuntimeInner {
+            #[cfg(test)]
+            test_manual_checkpoint_panic: AtomicBool::new(false),
+            #[cfg(test)]
+            test_maintenance_unavailable: AtomicBool::new(false),
+            maintenance: Mutex::new(None),
             database_path: key.clone(),
             paths: paths.clone(),
             admission: Mutex::new(AdmissionState::default()),
@@ -1559,6 +1918,78 @@ impl AppDatabase {
 
     pub fn database_path(&self) -> &Path {
         &self.inner.database_path
+    }
+
+    /// Owner metadata only; opens no SQLite connection and reserves no admission slot.
+    pub fn checkpoint_maintenance_health(&self) -> CheckpointMaintenanceHealth {
+        self.inner.maintenance_health()
+    }
+
+    /// Explicit post-schema/default-library gate. Clones share one canonical owner.
+    pub fn start_checkpoint_maintenance(&self) -> Result<CheckpointMaintenanceGuard> {
+        if self.inner.admission.lock().unwrap_or_else(|p|p.into_inner()).shutting_down {
+            return Err(EngineError::DatabaseRuntime("maintenance_start_after_shutdown_refused".into()));
+        }
+        let shared={
+            let mut owner=self.inner.maintenance.lock().unwrap_or_else(|p|p.into_inner());
+            if let Some(owner)=owner.as_ref() {
+                owner.shared.guards.fetch_add(1,Ordering::AcqRel);
+                Arc::clone(&owner.shared)
+            } else {
+                let mut health=empty_maintenance_health();
+                health.enabled=true;
+                health.owner_state="initializing".into();
+                let shared=Arc::new(MaintenanceShared {
+                    state:Mutex::new(MaintenanceState{ready:false,state:"initializing",last_cycle:Instant::now(),health,final_receipt:None}),
+                    wake:Condvar::new(),requests:Mutex::new(VecDeque::new()),stop:AtomicBool::new(false),guards:AtomicUsize::new(1),
+                });
+                let weak=Arc::downgrade(&self.inner);
+                let worker_shared=Arc::clone(&shared);
+                let handle=std::thread::Builder::new().name("voxvulgi-passive-checkpoint".into()).spawn(move || {
+                    let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||maintenance_worker(weak,&worker_shared)));
+                    let receipt=match result {
+                        Ok(Ok(receipt))=>receipt,
+                        Ok(Err(error))=>CheckpointMaintenanceShutdownReceipt{stop_requested:worker_shared.stop.load(Ordering::Acquire),joined:false,
+                            elapsed_ms:0,final_checkpoint:None,owner_close_error:Some(error.to_string())},
+                        Err(_)=>CheckpointMaintenanceShutdownReceipt{stop_requested:worker_shared.stop.load(Ordering::Acquire),joined:false,
+                            elapsed_ms:0,final_checkpoint:None,owner_close_error:Some("maintenance_worker_panicked".into())},
+                    };
+                    let mut state=worker_shared.state.lock().unwrap_or_else(|p|p.into_inner());
+                    state.state=if receipt.owner_close_error.is_some(){"failed"}else{"stopped"};
+                    state.health.last_error=receipt.owner_close_error.clone().or(state.health.last_error.clone());
+                    state.final_receipt=Some(receipt);
+                    drop(state);
+                    reject_manual_checkpoints(&worker_shared,"maintenance_owner_exited");
+                    worker_shared.wake.notify_all();
+                })?;
+                *owner=Some(MaintenanceOwner{shared:Arc::clone(&shared),handle:Some(handle)});
+                shared
+            }
+        };
+        let guard=CheckpointMaintenanceGuard{runtime:Arc::downgrade(&self.inner),shared};
+        let deadline=Instant::now()+SHUTDOWN_DRAIN_TIMEOUT;
+        let mut state=guard.shared.state.lock().unwrap_or_else(|p|p.into_inner());
+        while !state.ready && state.final_receipt.is_none() {
+            if Instant::now()>=deadline {
+                drop(state);
+                return Err(EngineError::DatabaseRuntime("maintenance_initialization_timeout_unjoined".into()));
+            }
+            state=guard.shared.wake.wait_timeout(state,deadline.saturating_duration_since(Instant::now()))
+                .unwrap_or_else(|p|p.into_inner()).0;
+        }
+        if !state.ready || state.state!="running" || guard.shared.stop.load(Ordering::Acquire) {
+            let error=state.health.last_error.clone().unwrap_or_else(||"maintenance_not_running".into());
+            drop(state);
+            return Err(EngineError::DatabaseRuntime(error));
+        }
+        drop(state);
+        Ok(guard)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_test_maintenance_unavailable(&self, unavailable: bool) {
+        self.inner.test_maintenance_unavailable.store(unavailable,Ordering::Release);
+        self.inner.admission_changed.notify_all();
     }
 
     pub fn write_context(&self, context: DatabaseOperationContext) -> Result<DatabaseWriteContext> {
@@ -1577,7 +2008,7 @@ impl AppDatabase {
         let permit = self.inner.acquire_writer(&context)?;
         let read_meter = ReadMeter::start();
         let open_started = Instant::now();
-        match open_write_raw(&self.inner.database_path) {
+        match open_runtime_write_raw(&self.inner.database_path,self.inner.maintained_writer_policy()) {
             Ok(connection) => {
                 permit.phase("open", open_started.elapsed());
                 let initial_total_changes = connection.total_changes();
@@ -1789,6 +2220,7 @@ impl AppDatabase {
     }
 
     pub fn snapshot(&self) -> DatabaseRuntimeSnapshot {
+        let checkpoint_maintenance=self.inner.maintenance_health();
         // These static linked-library getters open no database and reserve no admission slot.
         let sqlite_version = rusqlite::version().to_owned();
         let sqlite_version_number = rusqlite::version_number();
@@ -1807,6 +2239,7 @@ impl AppDatabase {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         DatabaseRuntimeSnapshot {
+            checkpoint_maintenance,
             database_path: self.inner.database_path.clone(),
             sqlite_version,
             sqlite_version_number,
@@ -1854,6 +2287,7 @@ impl AppDatabase {
         let wal_path = PathBuf::from(format!("{}-wal", self.inner.database_path.display()));
         let shm_path = PathBuf::from(format!("{}-shm", self.inner.database_path.display()));
         WalHealth {
+            checkpoint_maintenance: self.inner.maintenance_health(),
             database_path: self.inner.database_path.clone(),
             wal_path: wal_path.clone(),
             wal_bytes: std::fs::metadata(wal_path)
@@ -1879,50 +2313,25 @@ impl AppDatabase {
     /// Runs the only runtime checkpoint mode exposed by the service. Callers must schedule this
     /// as maintenance; foreground projections never invoke checkpoint work implicitly.
     pub fn checkpoint_passive(&self) -> Result<WalCheckpointReceipt> {
-        let started = Instant::now();
-        let mut database = self.write_context(
-            DatabaseOperationContext::new("database_maintenance", "wal_checkpoint_passive")
-                .maintenance(),
-        )?;
-        let result = database.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        });
-        match result {
-            Ok((busy, log_frames, checkpointed_frames)) => {
-                if let Some(permit) = database.permit.as_mut() {
-                    permit.outcome = if busy == 0 {
-                        "checkpoint_completed"
-                    } else {
-                        "checkpoint_busy"
-                    };
-                }
-                let receipt = WalCheckpointReceipt {
-                    mode: "passive".to_string(),
-                    busy,
-                    log_frames,
-                    checkpointed_frames,
-                    elapsed_ms: started.elapsed().as_millis().min(u64::MAX as u128) as u64,
-                };
-                *self
-                    .inner
-                    .last_checkpoint
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(receipt.clone());
-                Ok(receipt)
-            }
-            Err(error) => {
-                if let Some(permit) = database.permit.as_mut() {
-                    permit.outcome = "checkpoint_failed";
-                }
-                Err(error.into())
-            }
+        let shared=self.inner.maintenance_shared().ok_or_else(||EngineError::DatabaseRuntime("maintenance_unavailable".into()))?;
+        let (operation_id,started)=self.inner.register(&DatabaseOperationContext::new("database_maintenance","wal_checkpoint_passive").maintenance(),DatabaseMode::Maintenance);
+        let (reply,receive)=mpsc::sync_channel(1);
+        let mut requests=shared.requests.lock().unwrap_or_else(|p|p.into_inner());
+        let running=shared.state.lock().unwrap_or_else(|p|p.into_inner()).state=="running";
+        if shared.stop.load(Ordering::Acquire) || !running || requests.len()>=1 {
+            drop(requests);
+            self.inner.finish(operation_id,started,"maintenance_manual_unavailable_or_overload",0);
+            return Err(EngineError::DatabaseRuntime("maintenance_manual_unavailable_or_overload".into()));
+        }
+        requests.push_back(ManualCheckpoint{runtime:Arc::downgrade(&self.inner),operation_id,started,reply,replied:false});
+        drop(requests);
+        shared.wake.notify_all();
+        match receive.recv_timeout(SHUTDOWN_DRAIN_TIMEOUT) {
+            Ok(Ok(receipt))=>Ok(receipt),
+            Ok(Err(error))=>Err(EngineError::DatabaseRuntime(error)),
+            Err(_)=>Err(EngineError::DatabaseRuntime("maintenance_manual_wait_timeout_or_owner_exited; terminal_receipt_pending".into())),
         }
     }
-
     pub fn contention_receipt(&self, error: &EngineError) -> Option<DatabaseContentionReceipt> {
         if !is_busy_error(error) {
             return None;
@@ -1954,6 +2363,10 @@ impl AppDatabase {
     }
 
     pub fn shutdown_and_drain(&self, timeout: Duration) -> Result<()> {
+        if self.inner.maintenance.lock().unwrap_or_else(|p|p.into_inner()).as_ref()
+            .is_some_and(|owner|owner.handle.is_some()) {
+            return Err(EngineError::DatabaseRuntime("maintenance_owner_not_joined".into()));
+        }
         let shutdown_context =
             DatabaseOperationContext::new("database_shutdown", "shutdown_and_drain_reconcile")
                 .maintenance();
@@ -2049,6 +2462,124 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Barrier, MutexGuard};
+
+    #[test]
+    fn checkpoint_maintenance_manual_cycle_panic_reconciles_exact_terminal_and_reply() {
+        let _serial=serial_test_guard();
+        let (_directory,_paths,database)=fixture();
+        let mut owner=database.start_checkpoint_maintenance().unwrap();
+        database.inner.test_manual_checkpoint_panic.store(true,Ordering::Release);
+        let error=database.checkpoint_passive().expect_err("injected owner cycle panic");
+        assert!(error.to_string().contains("maintenance_owner_panicked"),"{error}");
+        let receipt=owner.stop_and_join(SHUTDOWN_DRAIN_TIMEOUT).unwrap();
+        assert!(receipt.joined);
+        assert!(receipt.owner_close_error.as_deref().unwrap().contains("maintenance_worker_panicked"));
+        let snapshot=database.snapshot();
+        assert!(snapshot.active_operations.iter().all(|operation|operation.mode!=DatabaseMode::Maintenance));
+        let terminals:Vec<_>=snapshot.recent_receipts.iter().filter(|receipt|receipt.operation=="wal_checkpoint_passive").collect();
+        assert_eq!(terminals.len(),1);
+        assert_eq!(terminals[0].outcome,"maintenance_owner_panicked");
+        assert!(terminals[0].admitted_at_ms.is_some());
+    }
+
+    #[test]
+    fn checkpoint_maintenance_policy_owner_manual_and_shutdown() {
+        let _serial=serial_test_guard();
+        let (_directory,_paths,database)=fixture();
+        let mut owner=database.start_checkpoint_maintenance().expect("owner");
+        let second=database.start_checkpoint_maintenance().expect("same owner");
+        assert!(Arc::ptr_eq(&owner.shared,&second.shared));
+        drop(second);
+        let writer=database.write_context(DatabaseOperationContext::new("test","full_policy")).expect("writer");
+        assert_eq!(writer.query_row("PRAGMA synchronous",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+        assert_eq!(writer.query_row("PRAGMA wal_autocheckpoint",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert!(writer.db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE).unwrap());
+        // Manual PASSIVE is independent of the application writer lane, even while held.
+        database.checkpoint_passive().expect("manual shared-owner request");
+        assert!(database.snapshot().writer_active);
+        drop(writer);
+        let receipt=owner.stop_and_join(SHUTDOWN_DRAIN_TIMEOUT).expect("join");
+        assert!(receipt.joined && receipt.stop_requested && receipt.owner_close_error.is_none());
+        database.shutdown_and_drain(SHUTDOWN_DRAIN_TIMEOUT).expect("drain after owner");
+    }
+
+    #[test]
+    fn checkpoint_maintenance_backlog_and_staleness_never_false_clear() {
+        assert_eq!(checkpoint_backlog(-1,-1,4096),Some(0));
+        assert_eq!(checkpoint_backlog(-2,0,4096),None);
+        assert_eq!(checkpoint_backlog(1,2,4096),None);
+        assert_eq!(checkpoint_backlog(i64::MAX,0,u64::MAX),Some(u64::MAX));
+        let mut state=MaintenanceState{ready:true,state:"running",last_cycle:Instant::now(),health:empty_maintenance_health(),final_receipt:None};
+        state.health.backlog_bytes=Some(CHECKPOINT_BACKLOG_LIMIT);
+        assert_eq!(maintenance_gate(&state),Some("maintenance_backlog_limit"));
+        state.health.consecutive_errors=3;
+        assert_eq!(maintenance_gate(&state),Some("maintenance_unavailable"));
+        state.health.consecutive_errors=0;
+        state.health.backlog_bytes=Some(0);
+        state.last_cycle=Instant::now()-CHECKPOINT_STALE_TIMEOUT;
+        assert_eq!(maintenance_gate(&state),Some("maintenance_unavailable"));
+    }
+
+    #[test]
+    fn checkpoint_maintenance_pinned_reader_partial_then_recovers() {
+        let _serial=serial_test_guard();
+        let (_directory,_paths,database)=fixture();
+        let mut owner=database.start_checkpoint_maintenance().expect("owner");
+        database.write_context(DatabaseOperationContext::new("test","seed"))
+            .unwrap().execute("INSERT INTO meta(key,value) VALUES('seed','0')",[]).unwrap();
+        let reader=database.read_context(DatabaseOperationContext::new("test","pin")).unwrap();
+        reader.execute_batch("BEGIN").unwrap();
+        reader.query_row("SELECT COUNT(*) FROM meta",[],|r|r.get::<_,i64>(0)).unwrap();
+        for index in 0..8 {
+            database.write_context(DatabaseOperationContext::new("test","write_while_pinned"))
+                .unwrap().execute("INSERT INTO meta(key,value) VALUES(?1,?2)",rusqlite::params![format!("pin{index}"),"x".repeat(8192)]).unwrap();
+        }
+        let partial=database.checkpoint_passive().unwrap();
+        assert!(partial.log_frames>partial.checkpointed_frames);
+        assert!(database.snapshot().checkpoint_maintenance.backlog_bytes.unwrap()>0);
+        reader.execute_batch("ROLLBACK").unwrap();
+        drop(reader);
+        let recovered=database.checkpoint_passive().unwrap();
+        assert_eq!(recovered.log_frames,recovered.checkpointed_frames);
+        assert_eq!(database.snapshot().checkpoint_maintenance.backlog_bytes,Some(0));
+        owner.stop_and_join(SHUTDOWN_DRAIN_TIMEOUT).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_maintenance_shutdown_timeout_retains_owned_worker_until_quiescent() {
+        let _serial=serial_test_guard();
+        let (_directory,_paths,database)=fixture();
+        let mut owner=database.start_checkpoint_maintenance().unwrap();
+        let writer=database.write_context(DatabaseOperationContext::new("test","held_atomic" )).unwrap();
+        let error=owner.stop_and_join(Duration::from_millis(2)).unwrap_err();
+        assert!(error.to_string().contains("quiesce_timeout_unjoined"));
+        assert!(database.shutdown_and_drain(Duration::from_millis(2)).unwrap_err().to_string().contains("owner_not_joined"));
+        writer.execute("INSERT INTO meta(key,value) VALUES('finish_after_deadline','yes')",[]).unwrap();
+        drop(writer);
+        assert!(owner.stop_and_join(SHUTDOWN_DRAIN_TIMEOUT).unwrap().joined);
+        database.shutdown_and_drain(SHUTDOWN_DRAIN_TIMEOUT).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_maintenance_rechecks_queued_writer_and_quiesces_without_force() {
+        let _serial=serial_test_guard();
+        let (_directory,_paths,database)=fixture();
+        let mut owner=database.start_checkpoint_maintenance().expect("owner");
+        let writer=database.write_context(DatabaseOperationContext::new("test","already_admitted")).expect("writer");
+        let queued_db=database.clone();
+        let queued=std::thread::spawn(move||queued_db.write_context(DatabaseOperationContext::new("test","queued_before_pressure")).map(|_|()));
+        let deadline=Instant::now()+Duration::from_secs(2);
+        while database.snapshot().waiting_writers==0 {assert!(Instant::now()<deadline);std::thread::yield_now();}
+        // Prevent background refresh during this exact permit-acquisition boundary.
+        owner.shared.signal_stop();
+        writer.execute("INSERT INTO meta(key,value) VALUES('atomic_survives','yes')",[]).expect("admitted write remains valid");
+        drop(writer);
+        assert!(queued.join().unwrap().unwrap_err().to_string().contains("maintenance_unavailable"));
+        owner.stop_and_join(SHUTDOWN_DRAIN_TIMEOUT).expect("quiesce and join");
+        let readonly=open_readonly_raw(database.database_path()).expect("independent read");
+        assert_eq!(readonly.query_row("SELECT value FROM meta WHERE key='atomic_survives'",[],|r|r.get::<_,String>(0)).unwrap(),"yes");
+        assert!(readonly.db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE).unwrap());
+    }
 
     fn serial_test_guard() -> MutexGuard<'static, ()> {
         static SERIAL: OnceLock<Mutex<()>> = OnceLock::new();
@@ -2921,6 +3452,7 @@ mod tests {
         assert!(health.oldest_reader_age_ms.is_some());
         assert!(health.last_checkpoint.is_none());
         drop(reader);
+        let mut owner=database.start_checkpoint_maintenance().expect("maintenance owner");
         let checkpoint = database.checkpoint_passive().expect("passive checkpoint");
         let health = database.wal_health();
         assert_eq!(
@@ -2930,6 +3462,7 @@ mod tests {
                 .map(|receipt| receipt.checkpointed_frames),
             Some(checkpoint.checkpointed_frames)
         );
+        owner.stop_and_join(SHUTDOWN_DRAIN_TIMEOUT).expect("owner joined");
     }
 
     #[test]

@@ -2,7 +2,8 @@
 
 Requires a completed standalone canonical backup and an already-built example.
 Independent Python SQLite read-only reopening must retain every stdout ACK.
-Process crash only: not power-failure, concurrent maintenance or live acceptance.
+Process crash only: not power-failure or live acceptance. production_owner
+exercises the runtime-owned maintenance lifecycle, without proving its cadence.
 Research: https://sqlite.org/wal.html (commit end-mark and retained WAL);
 https://sqlite.org/pragma.html#pragma_synchronous (FULL vs NORMAL durability).
 """
@@ -76,7 +77,7 @@ def main():
     parser.add_argument("--source-backup", type=Path, required=True)
     parser.add_argument("--expected-source-sha256", required=True)
     parser.add_argument("--root", type=Path, required=True)
-    parser.add_argument("--mode", choices=("baseline", "full_no_close_no_auto"), required=True)
+    parser.add_argument("--mode", choices=("baseline", "full_no_close_no_auto", "production_owner"), required=True)
     parser.add_argument("--writes", type=int, default=32)
     parser.add_argument("--event-timeout-seconds", type=int, default=60)
     args = parser.parse_args()
@@ -121,6 +122,7 @@ def main():
     acknowledgements = []
     transcript = []
     killed = False
+    production_owner_ready = False
     try:
         while True:
             line = events.get(timeout=args.event_timeout_seconds)
@@ -143,7 +145,14 @@ def main():
                 write_json(root / "protected_before.json", before)
                 child.stdin.write("start\n")
                 child.stdin.flush()
+            elif event["event"] == "production_owner_ready":
+                health = event["checkpoint_maintenance"]
+                if args.mode != "production_owner" or production_owner_ready or event["pid"] != owned_pid or event["mode"] != args.mode or health["enabled"] is not True or health["writer_backpressure"] or health["consecutive_errors"] != 0 or health["last_error"] is not None:
+                    raise RuntimeError("Production owner initialization evidence mismatch")
+                production_owner_ready = True
             elif event["event"] == "ack":
+                if args.mode == "production_owner" and not production_owner_ready:
+                    raise RuntimeError("ACK preceded production owner initialization")
                 if event["ordinal"] != len(acknowledgements):
                     raise RuntimeError("Missing/duplicate acknowledgement ordinal")
                 expected_policy = (1, 1000, False) if args.mode == "baseline" else (2, 0, True)
@@ -154,6 +163,8 @@ def main():
                 acknowledgements.append(event)
                 write_json(root / "acknowledgements.json", acknowledgements)
             elif event["event"] == "crash_ready":
+                if args.mode == "production_owner" and (not production_owner_ready or event["runtime"]["checkpoint_maintenance"]["enabled"] is not True):
+                    raise RuntimeError("Production owner absent at crash boundary")
                 wal = Path(str(database) + "-wal")
                 if event["pid"] != owned_pid or event["acknowledged"] != args.writes or len(acknowledgements) != args.writes or event["pending_transaction_open"] is not True or not wal.is_file() or wal.stat().st_size <= 32:
                     raise RuntimeError("Crash boundary/WAL/ACK proof incomplete")
@@ -174,7 +185,7 @@ def main():
         source_unchanged = sha(source) == source_hash and all(not Path(str(source) + suffix).exists() for suffix in ("-wal", "-shm", "-journal"))
         passed = quick_check == [("ok",)] and reopened_schema == schema == 61 and after == before and actual == expected and "wp0333_crash_uncommitted" not in actual and source_unchanged
         write_json(root / "protected_after.json", after)
-        write_json(root / "verdict.json", {"pass": passed, "owned_pid": owned_pid, "abrupt_exit_code": exit_code, "mode": args.mode, "acknowledgements": len(expected), "canonical_reopened_rows": len(actual), "exact_payloads_match": actual == expected, "uncommitted_absent": "wp0333_crash_uncommitted" not in actual, "protected_tables_equal": after == before, "quick_check": quick_check, "source_unchanged": source_unchanged, "source_sha256": source_hash, "source_job_count": density, "schema_after_startup": schema, "schema_after_reopen": reopened_schema, "external_ack_ledger_flush_fsync": True, "verifier_connections_closed_before_start": True, "wal_bytes_at_crash": wal_bytes, "actual_runtime_sqlite_identity": linked_identity, "independent_verifier_sqlite": sqlite3.sqlite_version, "limits": "Owned process crash only; no power-loss, maintenance concurrency, live runtime or whole-WP completion claim."})
+        write_json(root / "verdict.json", {"pass": passed, "owned_pid": owned_pid, "abrupt_exit_code": exit_code, "mode": args.mode, "production_owner_started": production_owner_ready, "acknowledgements": len(expected), "canonical_reopened_rows": len(actual), "exact_payloads_match": actual == expected, "uncommitted_absent": "wp0333_crash_uncommitted" not in actual, "protected_tables_equal": after == before, "quick_check": quick_check, "source_unchanged": source_unchanged, "source_sha256": source_hash, "source_job_count": density, "schema_after_startup": schema, "schema_after_reopen": reopened_schema, "external_ack_ledger_flush_fsync": True, "verifier_connections_closed_before_start": True, "wal_bytes_at_crash": wal_bytes, "actual_runtime_sqlite_identity": linked_identity, "independent_verifier_sqlite": sqlite3.sqlite_version, "limits": "Owned process crash only; production_owner uses the actual runtime owner without proving sustained maintenance cadence. No power-loss, live runtime or whole-WP completion claim."})
         if not passed:
             raise RuntimeError("Crash/reopen canonical proof failed")
         print(root / "verdict.json")

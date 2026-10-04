@@ -1,5 +1,6 @@
 //! Owned-process crash fixture. Controller supplies a fresh guarded database copy.
 //! No runner, production database, TLS filename adapter, or graceful shutdown.
+//! production_owner holds the actual runtime maintenance guard through the crash.
 use rusqlite::{config::DbConfig, Connection, TransactionBehavior};
 use serde_json::json;
 use std::{io::{self, Write}, path::PathBuf};
@@ -18,11 +19,11 @@ fn command(expected: &str) -> Result<(), Box<dyn std::error::Error>> {
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 4 { return Err("Usage: <fresh-root> baseline|full_no_close_no_auto <writes1..128>".into()); }
+    if args.len() != 4 { return Err("Usage: <fresh-root> baseline|full_no_close_no_auto|production_owner <writes1..128>".into()); }
     let root = PathBuf::from(&args[1]).canonicalize()?;
     let mode = &args[2];
     let writes: usize = args[3].parse()?;
-    if !["baseline", "full_no_close_no_auto"].contains(&mode.as_str()) || !(1..=128).contains(&writes) {
+    if !["baseline", "full_no_close_no_auto", "production_owner"].contains(&mode.as_str()) || !(1..=128).contains(&writes) {
         return Err("Invalid mode/write count".into());
     }
     if !root.join("wp0333_crash_fixture.json").is_file() { return Err("Missing guarded fixture marker".into()); }
@@ -44,6 +45,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     emit(json!({"event":"prepared","pid":std::process::id(),"root":root,"mode":mode,"sqlite_identity":sqlite_identity}))?;
     command("start")?;
     let database = db::AppDatabase::for_paths(&paths)?;
+    // Keep the guard alive until abrupt owned-child termination. Production mode
+    // sets no writer PRAGMAs: policy must come from the successfully started owner.
+    let _maintenance_guard = if mode == "production_owner" {
+        let guard = database.start_checkpoint_maintenance()?;
+        emit(json!({"event":"production_owner_ready","pid":std::process::id(),
+            "mode":mode,"checkpoint_maintenance":database.snapshot().checkpoint_maintenance}))?;
+        Some(guard)
+    } else { None };
     let keeper = database.read_context(db::DatabaseOperationContext::new("wp0333_crash", "pinned_reader"))?;
     keeper.execute_batch("BEGIN")?;
     let _: i64 = keeper.query_row("SELECT count(*) FROM meta", [], |r|r.get(0))?;
@@ -59,7 +68,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sync: i64 = writer.pragma_query_value(None,"synchronous",|r|r.get(0))?;
         let auto: i64 = writer.pragma_query_value(None,"wal_autocheckpoint",|r|r.get(0))?;
         let no_close = writer.db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE)?;
-        if mode == "full_no_close_no_auto" && (sync != 2 || auto != 0 || !no_close) { return Err("Policy readback mismatch".into()); }
+        if mode != "baseline" && (sync != 2 || auto != 0 || !no_close) { return Err("Policy readback mismatch".into()); }
         let tx = writer.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute("INSERT INTO meta(key,value) VALUES(?1,?2)", rusqlite::params![key,payload])?;
         tx.commit()?;

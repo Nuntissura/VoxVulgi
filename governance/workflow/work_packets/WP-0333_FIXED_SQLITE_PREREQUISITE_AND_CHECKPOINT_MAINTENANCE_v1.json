@@ -82,7 +82,8 @@
         "VV-CP-010": "Idempotent start and RAII cleanup cover normal/headless/SafeMode interactive sessions, concurrent starts, setup failures and shutdown; no ownership cycle or self-join. Accepted manual requests receive terminal outcomes including shutdown rejection",
         "VV-CP-011": "Maintenance raw access is limited to the explicitly reviewed db.rs counted factory with canonical filename adapter; update exact exception reason and owning registry regression, never add a broad runtime exemption",
         "VV-CP-012": "Require actual production-owner counterpart, fixed-version readbacks, pinned-reader recovery, growth/failure/backpressure/manual/shutdown and crash/reopen proofs plus exact packaged normal30minute successful-download/read/export acceptance before DONE",
-        "VV-CP-013": "Backlog arithmetic validates nonnegative frame differences with actual page size and saturation; SQLite negative/no-WAL results are truthful zero or unknown, never overflow or false recovery"
+        "VV-CP-013": "Backlog arithmetic validates nonnegative frame differences with actual page size and saturation; SQLite negative/no-WAL results are truthful zero or unknown, never overflow or false recovery",
+        "VV-CP-014": "Retain exact running job worker and completed publication while terminal/requeue persistence is refused before admission by maintenance safeguards; wait observably using memory-only health at250ms until recovery or explicit shutdown, then retry only the refused persistence. Preserve the existing five actually-admitted app-busy attempts, canonical original/attempt/output and startup recovery; no safeguard bypass or provider/publication replay."
       },
       "proof_limits": "Policy selection is not resolution proof; earlier RED variance and live lock remain retained; independent review and current-input counterpart are pending",
       "independent_amendment_review": {
@@ -90,8 +91,27 @@
         "date": "2026-10-04",
         "verdict": "PASS",
         "scope": "Exact five authority diffs; JSON parse, all13 units and all8 original acceptance criteria preserved; AGENTS/CLAUDE identical",
-        "current_schema_counterpart": "PENDING",
+        "current_schema_counterpart": "PASS; /root/open_wps independently inspected actual schema61 result and fresh source hash",
         "production_fix_proven": false
+      },
+      "current_schema_counterpart": {
+        "summary": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/schema61_churn_summary.json",
+        "independent": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/schema61_churn_independent.json",
+        "schema": 61,
+        "acknowledged_writes": 80,
+        "independently_persisted_writes": 80,
+        "reads": 389,
+        "failures": 0,
+        "panics": 0,
+        "final_frames": 1704,
+        "checkpointed_frames": 1704,
+        "final_checkpoint_ms": 18,
+        "max_observed_wal_bytes": 7020512,
+        "maintenance_join_ms": 33,
+        "drain_ms": 2,
+        "source_unchanged": true,
+        "production_owner_proven": false,
+        "limits": "Counterfactual fixture owner, not final production owner or live timeout resolution; previous RED variance retained"
       }
     }
   },
@@ -102,7 +122,15 @@
     "product/desktop/src-tauri/Cargo.lock",
     "product/engine/examples/wp0323_connection_churn.rs",
     "product/engine/src/database_runtime.rs",
-    "product/engine/src/db.rs"
+    "product/engine/src/db.rs",
+    "product/desktop/src-tauri/src/lib.rs",
+    "product/desktop/src/pages/DiagnosticsPage.tsx",
+    "product/desktop/src/lib/agentManual.json",
+    "product/desktop/src/lib/failureStates.ts",
+    "product/engine/src/jobs.rs",
+    "product/engine/examples/wp0333_production_maintenance.rs",
+    "product/engine/examples/wp0333_crash_reopen.rs",
+    "governance/scripts/wp0333_crash_reopen.py"
   ],
   "constraints": [
     "Retain desktop0.1.205; no version or release-changelog changes",
@@ -334,6 +362,11 @@
     {
       "risk": "Suppressed close checkpoint weakens durable completion",
       "control": "FULL readback per writer and independent crash/reopen recovery of acknowledged canonical commits; do not use graceful close alone as crash proof"
+    },
+    {
+      "id": "WP-0333-R-20261004-001",
+      "risk": "Midflight maintenance refusal also blocks terminal/requeue writes and can orphan a canonical running job",
+      "control": "VV-CP-014; retained exact worker waits for memory-only recovery or explicit shutdown without replaying publication or bypassing admission; owning midflight recovery/shutdown regression required"
     }
   ],
   "acceptance": [
@@ -1431,6 +1464,27 @@
         "Complete exact final packaged normal successful-download/read/export/active-shutdown acceptance with WP-0323/WP-0332",
         "Independent final acceptance review retaining unexplained prior RED variance and all eight authoritative criteria"
       ],
+      "status_retained": "IN_PROGRESS"
+    },
+    {
+      "date": "2026-10-04",
+      "record_id": "WP-0333-PRODUCTION-OWNER-RED-20261004-001",
+      "note": "Production checkpoint owner implemented with retained midflight job publication and lifecycle guards;38 engine/3 desktop/42 frontend focused checks passed. Actual canonical-density production owner trial FAILED two writer_admission_timeout;63stdoutACKs independently persisted63;193reads zero reader errors; partial137/0 recovered609/609; final1335/1335 ownerjoined842ms/drainok. Independent all-table reconciliation allows only exact63-insert-derived_projection_state trigger delta; source backup unchanged. Failed trial lacks timeout timestamps/open-use-close receipts; diagnostic-only harness enhancement and one distinct attribution trial required. No packaged build/Update or live resolution claim authorized by these local GREEN checks.",
+      "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_owned.json",
+      "status_retained": "IN_PROGRESS"
+    },
+    {
+      "date": "2026-10-04",
+      "record_id": "WP-0333-PRODUCTION-OWNER-ATTRIBUTION-20261004-001",
+      "note": "Diagnostic-only repeat retains exact production policy/workload while adding per-request timings,14native callback metrics and444terminal receipts. Current actual trial GREEN99stdoutACK/persisted99,304reads/no errors/partial+recovery/final2107framesfullycheckpointed/join13ms/drainok; independent coherent WAL-aware reconciliation passes every protected table plus exact99job-insert derived-trigger delta. First two-timeout RED remains unexplained; currentGREEN does not prove prior native cause or live resolution. Production-owner crash/reopen and exact managed installed normal30minute/download/export/active-shutdown remain open.",
+      "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_attribution_independent.json",
+      "status_retained": "IN_PROGRESS"
+    },
+    {
+      "date": "2026-10-04",
+      "record_id": "WP-0333-PRODUCTION-CRASH-20261004-001",
+      "note": "Actual production-owner crash proof PASS:32externally flushed ACKpayloads independently reopened32exact, uncommitted2MB sentinel absent, every protected table equal, schema61/quick_checkOK/source unchanged. Actual runtime SQLite3.53.2 fixedsourceID; controller killed only owned disposablechild231604. Processcrash is notpowerfailure proof. Current counterpart and independentsource review pass; prior two-writer-timeout variance retained. Proceed exactmanagedCoreOnly candidate/normalinstalled30minute/download/export/active-shutdown; WP staysIN_PROGRESS and live read_admission_timeout unresolved.",
+      "evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_crash/verdict.json",
       "status_retained": "IN_PROGRESS"
     }
   ],

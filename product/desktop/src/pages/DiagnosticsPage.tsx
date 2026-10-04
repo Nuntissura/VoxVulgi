@@ -829,6 +829,18 @@ type DatabaseOperationReceipt = {
 
 type DatabaseRuntimeStatus = {
   snapshot: {
+    checkpoint_maintenance?: {
+      enabled: boolean;
+      owner_state: string;
+      cycle_age_ms: number | null;
+      consecutive_errors: number;
+      last_error: string | null;
+      backlog_bytes: number | null;
+      backlog_warning: boolean;
+      writer_backpressure: string | null;
+      max_physical_wal_bytes: number;
+      cycles: number;
+    };
     database_path: string;
     writer_capacity: number;
     waiting_writers: number;
@@ -3466,6 +3478,21 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                 {` · ${databaseRuntime.contract.checkpoint_policy.replace(/_/g, " ")}`}
               </div>
             </div>
+            {databaseRuntime.snapshot.checkpoint_maintenance ? (
+              <div className="kv" data-testid="database-checkpoint-maintenance" role="status">
+                <div className="k">Background checkpoint</div>
+                <div className="v">
+                  {databaseRuntime.snapshot.checkpoint_maintenance.owner_state}
+                  {` · ${databaseRuntime.snapshot.checkpoint_maintenance.cycles} cycles`}
+                  {` · last cycle ${databaseRuntime.snapshot.checkpoint_maintenance.cycle_age_ms === null ? "not completed" : `${databaseRuntime.snapshot.checkpoint_maintenance.cycle_age_ms} ms ago`}`}
+                  {` · uncheckpointed ${databaseRuntime.snapshot.checkpoint_maintenance.backlog_bytes === null ? "unknown" : formatBytes(databaseRuntime.snapshot.checkpoint_maintenance.backlog_bytes)}`}
+                  {databaseRuntime.snapshot.checkpoint_maintenance.backlog_warning ? " · backlog warning" : ""}
+                  {` · observed peak WAL ${formatBytes(databaseRuntime.snapshot.checkpoint_maintenance.max_physical_wal_bytes)}`}
+                  {databaseRuntime.snapshot.checkpoint_maintenance.writer_backpressure ? ` · new writes blocked: ${databaseRuntime.snapshot.checkpoint_maintenance.writer_backpressure.replace(/_/g, " ")}` : ""}
+                  {databaseRuntime.snapshot.checkpoint_maintenance.last_error ? ` · ${databaseRuntime.snapshot.checkpoint_maintenance.consecutive_errors} consecutive errors: ${databaseRuntime.snapshot.checkpoint_maintenance.last_error}` : ""}
+                </div>
+              </div>
+            ) : null}
             <div className="kv">
               <div className="k">Shutdown and receipts</div>
               <div className="v">
@@ -3478,6 +3505,8 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
               <button
                 type="button"
                 data-testid="database-passive-checkpoint"
+                data-agent-action-id="database.passive-checkpoint"
+                data-agent-effect-class="reversible_state_change"
                 disabled={databaseCheckpointBusy || databaseRuntime.snapshot.shutting_down}
                 onClick={() => void runPassiveDatabaseCheckpoint()}
               >

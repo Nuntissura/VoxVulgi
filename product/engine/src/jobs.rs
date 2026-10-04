@@ -21241,8 +21241,59 @@ fn set_progress(paths: &AppPaths, job_id: &str, progress: f32) -> Result<()> {
     Ok(())
 }
 
+fn job_terminal_write_context(paths: &AppPaths, job_id: &str) -> Result<db::DatabaseWriteContext> {
+    job_terminal_write_context_with_shutdown(paths, job_id, job_runner_shutdown_requested)
+}
+
+// Retry admission only. SQL, provider work, publication and the bounded busy counter
+// execute once after admission; maintenance refusal cannot orphan a live worker.
+fn job_terminal_write_context_with_shutdown(
+    paths: &AppPaths,
+    job_id: &str,
+    shutdown_requested: impl Fn() -> bool,
+) -> Result<db::DatabaseWriteContext> {
+    let database = db::AppDatabase::for_paths(paths)?;
+    let mut waiting = false;
+    loop {
+        if shutdown_requested() {
+            if waiting {
+                append_engine_diagnostics_trace_row_best_effort(paths, "job_database_maintenance_wait_interrupted", "info",
+                    serde_json::json!({"job_id":job_id,"recovery":"original_running_job_on_startup"}));
+            }
+            return Err(EngineError::JobInterruptedByShutdown);
+        }
+        match db::write_context(paths) {
+            Ok(context) => return Ok(context),
+            Err(error) if matches!(&error, EngineError::DatabaseRuntime(message)
+                if matches!(message.split(';').next(), Some("maintenance_unavailable" | "maintenance_backlog_limit"))) => {
+                if !waiting {
+                    append_engine_diagnostics_trace_row_best_effort(paths, "job_database_maintenance_wait", "warn",
+                        serde_json::json!({"job_id":job_id,"reason":error.to_string(),"worker_retained":true,
+                            "recovery":"wait_for_maintenance_or_shutdown","busy_attempt_counted":false}));
+                    waiting = true;
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        while database.checkpoint_maintenance_health().writer_backpressure.is_some() {
+            if shutdown_requested() {
+                append_engine_diagnostics_trace_row_best_effort(paths, "job_database_maintenance_wait_interrupted", "info",
+                    serde_json::json!({"job_id":job_id,"recovery":"original_running_job_on_startup"}));
+                return Err(EngineError::JobInterruptedByShutdown);
+            }
+            thread::sleep(Duration::from_millis(250));
+        }
+        append_engine_diagnostics_trace_row_best_effort(paths, "job_database_maintenance_wait_retrying", "info",
+            serde_json::json!({"job_id":job_id,"retry_scope":"terminal_write_admission_only"}));
+    }
+}
+
 fn set_succeeded(paths: &AppPaths, job_id: &str) -> Result<()> {
-    let conn = db::write_context(paths)?;
+    set_succeeded_with_shutdown(paths, job_id, job_runner_shutdown_requested)
+}
+
+fn set_succeeded_with_shutdown(paths: &AppPaths, job_id: &str, shutdown_requested: impl Fn() -> bool) -> Result<()> {
+    let conn = job_terminal_write_context_with_shutdown(paths, job_id, shutdown_requested)?;
     conn.execute(
         "UPDATE job SET status=?1, progress=1.0, finished_at_ms=?2, error=NULL WHERE id=?3 AND status=?4",
         params![
@@ -21265,6 +21316,8 @@ fn set_succeeded(paths: &AppPaths, job_id: &str) -> Result<()> {
 pub(crate) fn is_app_busy_error(message: &str) -> bool {
     message.contains("writer_admission_timeout")
         || message.contains("read_admission_timeout")
+        || message.contains("maintenance_unavailable")
+        || message.contains("maintenance_backlog_limit")
         || message.contains("database is locked")
 }
 
@@ -21309,7 +21362,11 @@ fn job_app_busy_attempts(paths: &AppPaths, job_id: &str) -> i64 {
 /// and returns `Ok(true)`. If the bound has been exceeded, only stamps the counter and returns
 /// `Ok(false)` so the caller records a real `app busy: ...` failure instead.
 fn requeue_job_for_app_busy_or_exhausted(paths: &AppPaths, job_id: &str) -> Result<bool> {
-    let conn = db::write_context(paths)?;
+    requeue_job_for_app_busy_with_shutdown(paths, job_id, job_runner_shutdown_requested)
+}
+
+fn requeue_job_for_app_busy_with_shutdown(paths: &AppPaths, job_id: &str, shutdown_requested: impl Fn() -> bool) -> Result<bool> {
+    let conn = job_terminal_write_context_with_shutdown(paths, job_id, shutdown_requested)?;
     let attempts: i64 = conn
         .query_row(
             "SELECT app_busy_attempts FROM job WHERE id=?1",
@@ -21346,7 +21403,7 @@ fn requeue_job_for_app_busy_or_exhausted(paths: &AppPaths, job_id: &str) -> Resu
 }
 
 fn set_failed(paths: &AppPaths, job_id: &str, error: &str) -> Result<()> {
-    let conn = db::write_context(paths)?;
+    let conn = job_terminal_write_context(paths, job_id)?;
     let changed = conn.execute(
         "UPDATE job SET status=?1, finished_at_ms=?2, error=?3 WHERE id=?4 AND status=?5",
         params![
@@ -43471,6 +43528,8 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
 
     #[test]
     fn app_busy_classifier_matches_known_transient_errors_only() {
+        assert!(is_app_busy_error("database runtime error: maintenance_unavailable"));
+        assert!(is_app_busy_error("database runtime error: maintenance_backlog_limit"));
         assert!(is_app_busy_error(
             "database runtime error: writer_admission_timeout"
         ));
@@ -43541,6 +43600,104 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
     }
 
     // WP-0322 B2 tests: `plan_audio_language_retag` decision function.
+
+    fn maintenance_terminal_fixture(paths: &AppPaths, id: &str) -> db::AppDatabase {
+        seed_app_busy_job_row(paths, id);
+        let connection = db::write_context(paths).expect("fixture writer");
+        connection.execute("UPDATE job SET attempt_no=3,batch_id='maintenance-original-batch',params_json=?1 WHERE id=?2",
+            params![r#"{"url":"https://example.invalid/original","output":"retained.mkv"}"#,id]).expect("original identity");
+        drop(connection);
+        db::AppDatabase::for_paths(paths).expect("actual runtime")
+    }
+
+    fn maintenance_terminal_observe_refusal(database: &db::AppDatabase) {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if database.snapshot().recent_receipts.iter().any(|r|r.outcome == "maintenance_unavailable" && r.admitted_at_ms.is_none()) { return; }
+            assert!(Instant::now() < deadline, "actual pre-admission refusal missing");
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn maintenance_terminal_original_row(paths: &AppPaths, id: &str) -> (String, i64, String, i64, String) {
+        let connection = db::open_readonly(paths).expect("canonical reader");
+        connection.query_row("SELECT status,attempt_no,batch_id,app_busy_attempts,params_json FROM job WHERE id=?1",[id],
+            |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).expect("original row")
+    }
+
+    #[test]
+    fn maintenance_terminal_completed_publication_waits_then_succeeds_same_original() {
+        let dir = tempfile::tempdir().expect("fixture");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let id = "maintenance-completed-original";
+        let database = maintenance_terminal_fixture(&paths,id);
+        let original = maintenance_terminal_original_row(&paths,id);
+        let artifact = dir.path().join("retained.mkv");
+        std::fs::write(&artifact,b"already-published-once").expect("completed publication fixture");
+        let mut owner = database.start_checkpoint_maintenance().expect("actual owner");
+        database.set_test_maintenance_unavailable(true);
+        let worker_paths = paths.clone();
+        let worker = thread::spawn(move||set_succeeded_with_shutdown(&worker_paths,id,||false));
+        maintenance_terminal_observe_refusal(&database);
+        assert!(!worker.is_finished(), "live worker must retain terminal persistence");
+        assert_eq!(maintenance_terminal_original_row(&paths,id),original);
+        assert_eq!(std::fs::read(&artifact).unwrap(),b"already-published-once");
+        database.set_test_maintenance_unavailable(false);
+        worker.join().expect("worker join").expect("terminal persistence");
+        let after = maintenance_terminal_original_row(&paths,id);
+        assert_eq!(after.0,"succeeded");
+        assert_eq!((after.1,after.2,after.3,after.4),(original.1,original.2,original.3,original.4));
+        assert_eq!(std::fs::read(&artifact).unwrap(),b"already-published-once");
+        owner.stop_and_join(Duration::from_secs(5)).expect("owner join");
+        database.shutdown_and_drain(Duration::from_secs(5)).expect("drain");
+    }
+
+    #[test]
+    fn maintenance_terminal_requeue_counts_only_recovered_admission() {
+        let dir = tempfile::tempdir().expect("fixture");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let id = "maintenance-requeue-original";
+        let database = maintenance_terminal_fixture(&paths,id);
+        let original = maintenance_terminal_original_row(&paths,id);
+        let mut owner = database.start_checkpoint_maintenance().expect("actual owner");
+        database.set_test_maintenance_unavailable(true);
+        let worker_paths = paths.clone();
+        let worker = thread::spawn(move||requeue_job_for_app_busy_with_shutdown(&worker_paths,id,||false));
+        maintenance_terminal_observe_refusal(&database);
+        assert!(!worker.is_finished());
+        assert_eq!(maintenance_terminal_original_row(&paths,id),original);
+        database.set_test_maintenance_unavailable(false);
+        assert!(worker.join().expect("worker join").expect("requeue"));
+        let after = maintenance_terminal_original_row(&paths,id);
+        assert_eq!(after.0,"queued"); assert_eq!(after.3,1);
+        assert_eq!((after.1,after.2,after.4),(original.1,original.2,original.4));
+        owner.stop_and_join(Duration::from_secs(5)).expect("owner join");
+        database.shutdown_and_drain(Duration::from_secs(5)).expect("drain");
+    }
+
+    #[test]
+    fn maintenance_terminal_shutdown_retains_original_running_for_startup_recovery() {
+        let dir = tempfile::tempdir().expect("fixture");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let id = "maintenance-shutdown-original";
+        let database = maintenance_terminal_fixture(&paths,id);
+        let original = maintenance_terminal_original_row(&paths,id);
+        let mut owner = database.start_checkpoint_maintenance().expect("actual owner");
+        database.set_test_maintenance_unavailable(true);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker_shutdown = shutdown.clone(); let worker_paths = paths.clone();
+        let worker = thread::spawn(move||set_succeeded_with_shutdown(&worker_paths,id,||worker_shutdown.load(Ordering::Acquire)));
+        maintenance_terminal_observe_refusal(&database);
+        assert!(!worker.is_finished()); shutdown.store(true,Ordering::Release);
+        assert!(matches!(worker.join().expect("worker join"),Err(EngineError::JobInterruptedByShutdown)));
+        assert_eq!(maintenance_terminal_original_row(&paths,id),original);
+        database.set_test_maintenance_unavailable(false);
+        let connection = db::open_readonly(&paths).expect("canonical reader");
+        let count:i64=connection.query_row("SELECT COUNT(*) FROM job WHERE id LIKE 'maintenance-%'",[],|r|r.get(0)).unwrap();
+        assert_eq!(count,1); drop(connection);
+        owner.stop_and_join(Duration::from_secs(5)).expect("owner join");
+        database.shutdown_and_drain(Duration::from_secs(5)).expect("drain");
+    }
 
     fn expectation(language: Option<&str>, title: Option<&str>) -> StreamExpectation {
         StreamExpectation {

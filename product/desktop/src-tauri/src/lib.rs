@@ -3269,10 +3269,11 @@ struct ArtifactVoiceCloneMeta {
     voice_clone_standard_tts_segments: Option<usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct AppState {
     paths: AppPaths,
     database: db::AppDatabase,
+    checkpoint_maintenance: Mutex<Option<db::CheckpointMaintenanceGuard>>,
     runner: Option<jobs::JobRunnerHandle>,
     safe_mode_enabled: Arc<AtomicBool>,
     safe_mode_cli: bool,
@@ -8837,17 +8838,18 @@ mod tests {
     fn desktop_setup_keeps_database_gate_before_background_surfaces() {
         let source = include_str!("lib.rs");
         let run_source = source
-            .split_once("pub fn run()")
+            .split_once("\npub fn run() {")
             .expect("desktop run source")
             .1;
         let database_gate = run_source
             .find("let _database_ready = ensure_startup_database_ready")
             .expect("database-ready gate");
         for marker in [
+            "let checkpoint_maintenance = database.start_checkpoint_maintenance()?;",
             "spawn_agent_bridge(&AppPaths::normalize_base_dir(&base_dir))",
             "set_startup_phase(&startup, &paths, \"offline_bundle\", \"pending\"",
             "spawn_watcher_supervisor(&resource_dir, &base_dir)",
-            "jobs::JobRunner::start(paths.clone())",
+            "jobs::start_runner(paths.clone())",
         ] {
             let background_surface = run_source
                 .find(marker)
@@ -8857,6 +8859,32 @@ mod tests {
                 "database-ready gate must precede {marker}"
             );
         }
+    }
+
+    #[test]
+    fn desktop_checkpoint_owner_starts_before_bridge_for_headless_and_safe_mode() {
+        let run = include_str!("lib.rs").split_once("\npub fn run() {").unwrap().1;
+        let owner = run.find("let checkpoint_maintenance = database.start_checkpoint_maintenance()?;").unwrap();
+        let offline_exit = run.find("run_offline_update_preservation_seed_one_shot(").unwrap();
+        let bridge = run.find("spawn_agent_bridge(&AppPaths::normalize_base_dir(&base_dir))").unwrap();
+        let background_gate = run.find("let runtime_background_work =").unwrap();
+        assert!(offline_exit < owner && owner < bridge && bridge < background_gate);
+        assert!(run.contains("checkpoint_maintenance: Mutex::new(Some(checkpoint_maintenance))"));
+    }
+
+    #[test]
+    fn desktop_checkpoint_owner_joins_after_runners_before_shared_deadline_drain() {
+        let run = include_str!("lib.rs").split_once("\npub fn run() {").unwrap().1;
+        let shutdown = run.split_once("if let tauri::RunEvent::Exit = event").unwrap().1;
+        let explicit = shutdown.find("agent_control::stop_explicit_runner()").unwrap();
+        let runner = shutdown.find("runner.stop_and_join(jobs::JOB_RUNNER_SHUTDOWN_TIMEOUT)").unwrap();
+        let deadline = shutdown.find("let database_shutdown_deadline =").unwrap();
+        let maintenance = shutdown.find("owner.stop_and_join(database_shutdown_deadline.saturating_duration_since").unwrap();
+        let gate = shutdown.find("if runner_join_succeeded && maintenance_join_succeeded").unwrap();
+        let drain = shutdown.find(".shutdown_and_drain(database_shutdown_deadline.saturating_duration_since").unwrap();
+        assert!(explicit < runner && runner < deadline && deadline < maintenance && maintenance < gate && gate < drain);
+        assert!(shutdown.contains("skipped_maintenance_not_joined"));
+        assert!(shutdown.contains("poisoned.into_inner().take(), true"));
     }
 
     #[test]
@@ -18634,6 +18662,7 @@ pub fn run() {
                 );
                 std::process::exit(exit_code);
             }
+            let checkpoint_maintenance = database.start_checkpoint_maintenance()?;
             spawn_agent_bridge(&AppPaths::normalize_base_dir(&base_dir));
 
             let cli_safe_mode = cli_args.iter().any(|value| value.trim() == "--safe-mode");
@@ -19123,6 +19152,7 @@ pub fn run() {
             app.manage(AppState {
                 paths,
                 database,
+                checkpoint_maintenance: Mutex::new(Some(checkpoint_maintenance)),
                 runner,
                 safe_mode_enabled: Arc::new(AtomicBool::new(safe_mode_enabled)),
                 safe_mode_cli: cli_safe_mode,
@@ -19544,12 +19574,36 @@ pub fn run() {
                             true,
                         );
                     }
-                    if runner_join_succeeded {
+                    let database_shutdown_deadline = std::time::Instant::now() + db::SHUTDOWN_DRAIN_TIMEOUT;
+                    let (mut maintenance_guard, maintenance_lock_poisoned) = match state.checkpoint_maintenance.lock() {
+                        Ok(mut guard) => (guard.take(), false),
+                        Err(poisoned) => (poisoned.into_inner().take(), true),
+                    };
+                    let maintenance_join = maintenance_guard.as_mut().map(|owner| {
+                        owner.stop_and_join(database_shutdown_deadline.saturating_duration_since(std::time::Instant::now()))
+                    });
+                    let maintenance_join_succeeded = !maintenance_lock_poisoned && maintenance_join.as_ref()
+                        .is_some_and(|result| result.as_ref().is_ok_and(|receipt| receipt.stop_requested && receipt.joined && receipt.owner_close_error.is_none()));
+                    append_diagnostics_trace_row_with_ack(
+                        &state.paths,
+                        "database_maintenance_shutdown",
+                        serde_json::json!({
+                            "outcome": if maintenance_join_succeeded { "joined" } else { "join_failed" },
+                            "runner_join_succeeded": runner_join_succeeded,
+                            "owner_lock_poisoned": maintenance_lock_poisoned,
+                            "receipt": maintenance_join.as_ref().and_then(|result| result.as_ref().ok()),
+                            "error": maintenance_join.as_ref().and_then(|result| result.as_ref().err()).map(ToString::to_string),
+                        }),
+                        if maintenance_join_succeeded { "info" } else { "error" },
+                        true,
+                    );
+                    drop(maintenance_guard);
+                    if runner_join_succeeded && maintenance_join_succeeded {
                         let before = state.database.snapshot();
                         let started = std::time::Instant::now();
                         let drain = state
                             .database
-                            .shutdown_and_drain(db::SHUTDOWN_DRAIN_TIMEOUT);
+                            .shutdown_and_drain(database_shutdown_deadline.saturating_duration_since(std::time::Instant::now()));
                         append_diagnostics_trace_row_with_ack(
                             &state.paths,
                             "database_runtime_shutdown",
@@ -19573,12 +19627,12 @@ pub fn run() {
                             &state.paths,
                             "database_runtime_shutdown",
                             serde_json::json!({
-                                "outcome": "skipped_runner_not_joined",
+                                "outcome": if !runner_join_succeeded { "skipped_runner_not_joined" } else { "skipped_maintenance_not_joined" },
                                 "elapsed_ms": 0,
                                 "writer_active_before": snapshot.writer_active,
                                 "waiting_writers_before": snapshot.waiting_writers,
                                 "active_readers_before": snapshot.active_readers,
-                                "error": "job runner did not join before the bounded shutdown deadline",
+                                "error": "owned runner or maintenance owner did not join before the bounded shutdown deadline",
                             }),
                             "error",
                             true,

@@ -8,6 +8,7 @@ use std::time::Duration;
 mod database_runtime;
 
 pub use database_runtime::{
+    CheckpointMaintenanceGuard, CheckpointMaintenanceHealth, CheckpointMaintenanceShutdownReceipt,
     ActiveDatabaseOperation, AppDatabase, DatabaseCancellation, DatabaseContentionReceipt,
     DatabaseMode, DatabaseOperationContext, DatabaseOperationReceipt, DatabasePriority,
     DatabaseReadContext, DatabaseRuntime, DatabaseRuntimeSnapshot, DatabaseWriteContext,
@@ -34,7 +35,7 @@ const READ_ONLY_BUSY_TIMEOUT_MS: u64 = 4000;
 /// These paths either own startup schema authority, operate on an isolated replacement,
 /// or adapt a third-party SQLite source. They must not be expanded implicitly.
 pub const DIRECT_SQLITE_ACCESS_EXCEPTIONS: &[(&str, &str)] = &[
-    ("db.rs", "startup migrations and runtime connection factory"),
+    ("db.rs", "startup migrations, runtime connection factory, and canonical counted PASSIVE maintenance owner"),
     (
         "root_rebind.rs",
         "isolated replacement/backup construction and verification",
@@ -312,7 +313,45 @@ fn open_readonly_raw(db_path: &Path) -> Result<Connection> {
     )?;
 
     conn.busy_timeout(Duration::from_millis(READ_ONLY_BUSY_TIMEOUT_MS))?;
+    conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
     conn.pragma_update(None, "query_only", "ON")?;
+    Ok(conn)
+}
+
+fn configure_maintained_writer(conn: &Connection) -> Result<()> {
+    conn.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    conn.pragma_update(None, "wal_autocheckpoint", 0)?;
+    let sync: i64 = conn.pragma_query_value(None, "synchronous", |r| r.get(0))?;
+    let auto: i64 = conn.pragma_query_value(None, "wal_autocheckpoint", |r| r.get(0))?;
+    let no_close = conn.db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE)?;
+    let mode: String = conn.pragma_query_value(None, "journal_mode", |r|r.get(0))?;
+    if sync != 2 || auto != 0 || !no_close || !mode.eq_ignore_ascii_case("wal") {
+        return Err(crate::EngineError::DatabaseRuntime("maintenance_writer_policy_readback_failed".into()));
+    }
+    Ok(())
+}
+
+fn open_runtime_write_raw(db_path: &Path, maintained: bool) -> Result<Connection> {
+    if !maintained { return open_write_raw(db_path); }
+    let conn = database_runtime::open_counted_connection(db_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_FULL_MUTEX)?;
+    configure_maintained_writer(&conn)?;
+    conn.busy_timeout(Duration::from_secs(10))?;
+    conn.pragma_update(None,"foreign_keys","ON")?;
+    Ok(conn)
+}
+
+/// Reviewed owner-only exception: no CREATE, migration, application write or FIFO permit.
+fn open_checkpoint_maintenance_raw(db_path: &Path) -> Result<Connection> {
+    let conn = database_runtime::open_counted_connection(db_path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_FULL_MUTEX)?;
+    conn.busy_timeout(Duration::ZERO)?;
+    configure_maintained_writer(&conn)?;
+    let version = unsafe { rusqlite::ffi::sqlite3_libversion_number() };
+    if version < 3_051_003 {
+        return Err(crate::EngineError::DatabaseRuntime("maintenance_requires_fixed_sqlite".into()));
+    }
     Ok(conn)
 }
 
@@ -4621,7 +4660,7 @@ CREATE INDEX idx_media_availability_refresh
         assert_eq!(
             DIRECT_SQLITE_ACCESS_EXCEPTIONS,
             &[
-                ("db.rs", "startup migrations and runtime connection factory"),
+                ("db.rs", "startup migrations, runtime connection factory, and canonical counted PASSIVE maintenance owner"),
                 (
                     "root_rebind.rs",
                     "isolated replacement/backup construction and verification"
