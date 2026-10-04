@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 29
+generation: 31
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -50,3 +50,5 @@ steps:
 - {id: GP-034, role: any, at: before_round, do: verify helper future import remains first in separately compiled test module, check: {type: file, path: product/engine/src/tools.rs, contains: exec(compile(}, source: 'focused RED: test __name__ preceded helper futureimport', state: active}
 - {id: GP-035, role: any, at: before_round, do: require full helper fixture executed from owned file below Windows argv limit, check: {type: confirm}, source: 'focused RED: full embeddedhelper exceeded CreateProcess32KiB', state: active}
 - {id: GP-036, role: any, at: before_round, do: require extracted qualifier consumer executed from owned script with natural script root, check: {type: confirm}, source: 'freeze fixture RED: Command function PSScriptRoot empty', state: active}
+- {id: GP-037, role: any, at: before_round, do: require terminal archived artifact rebinding before installed engine probe launch, check: {type: confirm}, source: 'launch preflight RED: managedbuild archived prior Currentcandidate', state: active}
+- {id: GP-038, role: any, at: before_round, do: verify prepared input identity uses independently proven per-file SHA record algorithm, check: {type: confirm}, source: 'pre-freeze finding: rawbyte treehash differed from original prepared marker', state: active}

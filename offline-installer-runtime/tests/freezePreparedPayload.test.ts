@@ -4,6 +4,7 @@ import { readFileSync, writeFileSync, mkdirSync, mkdtempSync, readdirSync, rmSyn
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 
 const script = fileURLToPath(new URL("../../governance/scripts/freeze_prepared_payload.ps1", import.meta.url));
 const source = readFileSync(script, "utf8");
@@ -44,6 +45,11 @@ test("prepared freeze copies five exact trees, excludes nested Cosy, and refuses
       assert.equal(readFileSync(join(tree.root, "fixture.bin"), "utf8"), before[index]);
       assert.match(tree.tree_sha256, /^[A-F0-9]{64}$/);
       assert.equal(tree.expanded_bytes, Buffer.byteLength(before[index]));
+      // Independently reproduce the prepared marker contract, not the producer helper.
+      const fileSha = createHash("sha256").update(Buffer.from(before[index], "utf8")).digest("hex").toUpperCase();
+      const record = `fixture.bin\t${Buffer.byteLength(before[index])}\t${fileSha}`;
+      const expectedTreeSha = createHash("sha256").update(record, "utf8").digest("hex").toUpperCase();
+      assert.equal(tree.tree_sha256, expectedTreeSha);
     }
     assert.deepEqual(readdirSync(receipt.trees.cosyvoice_venv.root), ["fixture.bin"]);
     const qualifier = readFileSync(new URL("../scripts/qualify_offline_runtime.ps1", import.meta.url), "utf8");

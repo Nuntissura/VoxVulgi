@@ -38,22 +38,21 @@ function Get-FrozenTreeIdentity([string]$Root,[string[]]$Excludes=@()) {
   $sha=[Security.Cryptography.SHA256]::Create()
   try {
     [int64]$files=0; [int64]$bytes=0
+    $records=[Collections.Generic.List[string]]::new()
     foreach ($item in Get-ChildItem -LiteralPath $Root -Force -Recurse | Sort-Object FullName) {
       if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Source contains linked/reparse entry: $($item.FullName)" }
       $relative=[IO.Path]::GetRelativePath($Root,$item.FullName).Replace('\','/')
       if ($item.PSIsContainer -or (Test-Excluded $relative $Excludes)) { continue }
-      $header=[Text.Encoding]::UTF8.GetBytes("$relative`0$($item.Length)`0")
-      $null=$sha.TransformBlock($header,0,$header.Length,$header,0)
+      if ($relative.StartsWith('/') -or $relative -match '(^|/)\.\.(/|$)') { throw "Unsafe source relative path: $relative" }
       $stream=[IO.File]::Open($item.FullName,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::Read)
-      try {
-        $buffer=[byte[]]::new(4MB)
-        while (($read=$stream.Read($buffer,0,$buffer.Length)) -gt 0) { $null=$sha.TransformBlock($buffer,0,$read,$buffer,0) }
-      } finally { $stream.Dispose() }
+      try { $fileHash=[Convert]::ToHexString($sha.ComputeHash($stream)) }
+      finally { $stream.Dispose() }
+      $records.Add("$relative`t$($item.Length)`t$fileHash")
       $files++; $bytes+=$item.Length
     }
-    $null=$sha.TransformFinalBlock([byte[]]::new(0),0,0)
     if ($files -le 0 -or $bytes -le 0) { throw "Source tree is empty: $Root" }
-    return [ordered]@{tree_sha256=[Convert]::ToHexString($sha.Hash);file_count=$files;expanded_bytes=$bytes}
+    $contentBytes=[Text.Encoding]::UTF8.GetBytes(($records -join "`n"))
+    return [ordered]@{tree_sha256=[Convert]::ToHexString($sha.ComputeHash($contentBytes));file_count=$files;expanded_bytes=$bytes}
   } finally { $sha.Dispose() }
 }
 function Copy-FrozenTree([string]$Root,[string]$Destination,[string[]]$Excludes=@()) {
