@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 18
+generation: 19
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -39,3 +39,4 @@ steps:
 - {id: GP-023, role: any, at: before_round, do: require explicit unpackaged PowerShell7 path with observed identity, check: {type: confirm}, source: 'failure: bare pwsh resolved WindowsApps execution alias; PhaseA stopped before packaging', state: active}
 - {id: GP-024, role: any, at: before_round, do: require fresh native exact ISO mount inventory before update retry, check: {type: file, path: .local/proofVVRemaining/native_mount_inventory.json, contains: DriveLetter}, source: 'failure: native mount/root assertion stopped before installer; fresh inventory maps exact ISO H', state: active}
 - {id: GP-025, role: any, at: before_round, do: require frozen narrow metadata and qualification test controller before batch, check: {type: file, path: .local/vv_metadata_q_focused_tests.py, contains: assert gate.returncode==0}, source: new recorded META-Q defects require owning tests; prior unaffected green tests remain reused, state: active}
+- {id: GP-026, role: any, at: before_round, do: verify DLL selection uses filesystem wildcard and exact name predicate, check: {type: file, path: offline-installer-runtime/scripts/qualify_offline_runtime.ps1, contains: -Filter 'python*.dll'}, source: 'failure: filesystem Filter bracket pattern missed python311.dll; wrote wrong fallback path file', state: active}

@@ -214,7 +214,8 @@ function New-SelfContainedPythonRuntime([string]$PortableRoot, [string]$VenvRoot
   if ($pth) {
     $pthPath = $pth.FullName
   } else {
-    $sharedLibrary = Get-ChildItem -LiteralPath $Destination -Filter 'python[0-9][0-9][0-9].dll' -File |
+    $sharedLibrary = Get-ChildItem -LiteralPath $Destination -Filter 'python*.dll' -File |
+      Where-Object { $_.Name -match '^python[0-9]{3}\.dll$' } |
       Sort-Object Name |
       Select-Object -First 1
     $pthName = if ($sharedLibrary) {

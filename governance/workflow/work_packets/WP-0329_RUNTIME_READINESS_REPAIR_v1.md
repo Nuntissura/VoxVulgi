@@ -18,6 +18,14 @@ Verification root owns: focused engine probe/tools tests in one warm Cargo run; 
 
 </topic>
 
+<topic id="qualification-path-selector-remediation-20261004" status="IN_PROGRESS" wp="WP-0329" updated_at="2026-10-04">
+
+Focused batch at pushed f1c33c5 stopped before Cargo: `qualification_composition.log` under `.local/proofVVRemaining/metadata_q_f1c33c5c27ba` records missing `runtime/python311._pth`. Retained fixture `vv-runtime-package-layout-bsP4NB` contains python311.dll and generated python._pth. Direct selector inventory proved filesystem Filter bracket ranges returned no DLL; wildcard enumeration plus exact name predicate found python311.dll. Prepared portable input has no existing path file, so both real compositions enter this branch. The existing owning assertion remains unchanged; the selector now uses `python*.dll` then exact regex. GP-026 records the cause before retry.
+
+[Microsoft Get-ChildItem Filter](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/get-childitem?view=powershell-7.5#-filter) supports only star/question wildcards. [Python path initialization](https://docs.python.org/3.11/library/sys_path_init.html#pth-files) accepts executable- and DLL-named path files; previous successful import proof is not invalidated solely by its python._pth filename. Package-overlay and product metadata failures remain the actual readiness blockers. New focused GREEN and changed-recipe qualification remain required; no completion claim.
+
+</topic>
+
 <topic id="installed-runtime-failures-20261004" status="IN_PROGRESS" wp="WP-0329" updated_at="2026-10-04">
 
 Actual intermediate ISO4dc24f060c149446821c9fe3bd6f1e775254a54dc73a7ad41915b569ff5b7f78 Update succeeded; all14 protected tables unchanged, all11 required assets verified, core sourcec798a25 installed SHA f855b49f1dc5f28ccf50988c5b6d092cb6d2fb7c759f567a385c2e785bf50d29. Native receipts: `.local/proofVVRemaining/intermediate_iso_update_c798a25_02/`; independent review agrees intermediate activation only. Final ONE offline acceptance attempt remains unused.
