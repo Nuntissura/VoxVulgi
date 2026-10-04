@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: batch
 assignment: WP-0332-20261004-live
 parent: null
-generation: 17
+generation: 20
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -40,3 +40,6 @@ steps:
 - {id: GP-024, role: any, at: before_round, do: require native Update backup receipt quick_check backup and backup_sha256 fields before launch, check: {type: confirm}, source: 'infra: Update rejected churn receipt schema with KeyError quick_check before any installer', state: active}
 - {id: GP-025, role: any, at: before_submit, do: require bounded fresh same-request advancing transfer wait before active WM_CLOSE, check: {type: confirm}, source: 'infra: caseC refused close because immediate progress sample older than1500ms', state: active}
 - {id: GP-026, role: any, at: before_round, do: require observed startup auto-sync terminal before refreshing protected baseline; retain prior snapshot, check: {type: confirm}, source: 'infra: baseline snapshot overlapped startup subscription queue timestamp updates', state: active}
+- {id: GP-027, role: any, at: before_verdict, do: require staged verifier receipts and captured native process stdout stderr before retry, check: {type: confirm}, source: 'infra: independent after-close JSON parse failed without saved stage traceback', state: active}
+- {id: GP-028, role: any, at: before_verdict, do: require recovery observer accepts queued running succeeded on same original identity, check: {type: confirm}, source: 'infra: queued-only assertion refused autonomous persisted-grant recovery', state: active}
+- {id: GP-029, role: any, at: before_verdict, do: require samefile identity for canonical extended Windows media path, check: {type: confirm}, source: 'infra: extended path prefix failed lexical containment before ffprobe', state: active}
