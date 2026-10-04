@@ -122,3 +122,19 @@ See `summary.md` in the proof bundle for commands and logs.
 - WP-0324-C-20261003-003: Reuse unchanged focused proof; record final candidate/runtime identities and independent live result before DONE. Status remains NEEDS_VALIDATION.
 
 </topic>
+
+<topic id="root-process-read-io-measurement-20261004" status="NEEDS_VALIDATION" wp="WP-0324" updated_at="2026-10-04">
+
+The existing watcher lacked root-process read-transfer bytes; prior database-only30minute proof cannot satisfy this packet's provider-runner I/O gate. The operator-authorized remediation adds native `GetProcessIoCounters` accounting to both byte-identical watcher twins, preserving all existing probes and startup SQLite suppression.
+
+Research: [Microsoft GetProcessIoCounters](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getprocessiocounters) requires query or limited-query rights and exposes failure through GetLastError; [Microsoft IO_COUNTERS](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-io_counters) defines six unsigned64-bit counters, including ReadTransferCount bytes and ReadOperationCount operations. Selected implementation uses one limited-query handle per sample, reads creation time and counters on that handle, and closes it. No ETW, elevation, filesystem scan, hashing or SQLite is added by the counter.
+
+- WP-0324-IO-001: `samples.jsonl` root `io` records cumulative `read_transfer_bytes`, `read_operation_count`, attributable PID/creation FILETIME, monotonic interval delta/rate and sample UTC timestamp; accounting represents root logical I/O, not physical disk traffic, child I/O or provider/file attribution.
+- WP-0324-IO-002: Native failure is `ok=false`, explicit error and unknown/null metrics; first sample, identity change, counter decrease or prior failed sample cannot create a fabricated zero delta/rate.
+- WP-0324-IO-003: Optional `TargetProcessId`, `TargetStartedAtMs` and `TargetExecutablePath` must be supplied together; exact bound identity and bridge disagreement refuse process-name fallback. Default discovery behavior remains unchanged when all are omitted. `metadata.json` preserves the selected binding.
+- WP-0324-IO-004: Required component proof covers native API success/failure, unsigned counter arithmetic, identity reset and exact-target refusal, watcher syntax and existing owning watcher tests. Synchronize governance/shipped twins before their byte-equality test; root owns all execution.
+- WP-0324-IO-005: Final proof remains actual queued YouTube normal-runner30minutes, read-byte deltas correlated with candidate/gate polls, no per-tick/poll/candidate90–110MB provider rehash bursts, `jobs_track_runtime_get` p50<1second, exact VFS heavy-read callsite attribution and existing follow-up remediation. Preserve permitted execution full-byte verification and10minute reverification; bytes alone cannot identify a provider hash. Existing contract/status/version/changelog obligations remain unchanged.
+
+Run the watcher unpackaged through the verified quiet native launcher: MSIX tool processes can resolve operator paths to a virtualized old artifact. Independently bind installed physical hash/creation before the observer; the watcher does not claim a physical SHA from its process pathname. Root-selected output directory remains configurable; no30minute run or runtime acceptance is recorded by this amendment.
+
+</topic>

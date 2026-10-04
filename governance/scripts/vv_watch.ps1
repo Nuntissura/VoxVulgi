@@ -5,6 +5,9 @@ param(
     [string]$OutputRoot,
     [string]$AppDataDir,
     [string]$ProcessName = "desktop",
+    [int]$TargetProcessId = 0,
+    [int64]$TargetStartedAtMs = 0,
+    [string]$TargetExecutablePath,
     [switch]$SelfTest,
     [switch]$Quiet,
     [switch]$NoPathProbe,
@@ -364,6 +367,12 @@ function Invoke-BridgeProbe($BridgeInfo) {
 }
 
 function Find-AppProcess([string]$Name, $BridgeInfo) {
+    if ($TargetProcessId -gt 0) {
+        $target = Get-Process -Id $TargetProcessId -ErrorAction Stop
+        if ([Math]::Abs(([DateTimeOffset]$target.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds() - $TargetStartedAtMs) -gt 2000 -or $target.Path -ne $TargetExecutablePath) { throw "Bound target identity changed; no process-name fallback" }
+        if ($BridgeInfo.pid_alive -and $BridgeInfo.pid -ne $TargetProcessId) { throw "Bridge differs from bound target" }
+        return $target
+    }
     if ($BridgeInfo.pid_alive -and $BridgeInfo.pid -ne $null) {
         try {
             return Get-Process -Id $BridgeInfo.pid -ErrorAction Stop
@@ -376,6 +385,62 @@ function Find-AppProcess([string]$Name, $BridgeInfo) {
         return $matches[0]
     }
     return $null
+}
+
+function Get-RootProcessIo($RootProcess) {
+    # Process accounting includes cached/logical I/O; it is not physical disk or file attribution.
+    $row = [ordered]@{ ok = $false; pid = $null; creation_filetime = $null; sampled_at_ms = (Now-Ms); read_operation_count = $null; read_transfer_bytes = $null; read_transfer_delta_bytes = $null; interval_ms = $null; read_bytes_per_second = $null; identity_reset = $true; error = $null; scope = 'root_process_logical_io_not_physical_disk' }
+    try {
+        if ($null -eq $RootProcess) { throw 'Root process absent' }
+        $row.pid = [int]$RootProcess.Id
+        if (-not ('VoxVulgiWatchIo' -as [type])) {
+            Add-Type @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+public static class VoxVulgiWatchIo {
+ [StructLayout(LayoutKind.Sequential)] public struct Counters {
+  public ulong ReadOperationCount, WriteOperationCount, OtherOperationCount;
+  public ulong ReadTransferCount, WriteTransferCount, OtherTransferCount;
+ }
+ public struct Sample { public Counters Io; public ulong Created; }
+ [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,uint pid);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetProcessIoCounters(IntPtr h,out Counters io);
+ [DllImport("kernel32.dll",SetLastError=true)] static extern bool GetProcessTimes(IntPtr h,out ulong created,out ulong exited,out ulong kernel,out ulong user);
+ [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr h);
+ public static Sample Read(uint pid) {
+  var h=OpenProcess(0x1000,false,pid); if(h==IntPtr.Zero)throw new Win32Exception(Marshal.GetLastWin32Error());
+  try { Sample s; ulong exited,kernel,user;
+   if(!GetProcessTimes(h,out s.Created,out exited,out kernel,out user))throw new Win32Exception(Marshal.GetLastWin32Error());
+   if(!GetProcessIoCounters(h,out s.Io))throw new Win32Exception(Marshal.GetLastWin32Error());
+   return s;
+  } finally { CloseHandle(h); }
+ }
+}
+'@
+        }
+        $value = [VoxVulgiWatchIo]::Read([uint32]$RootProcess.Id)
+        $createdMs = [int64]($value.Created / 10000) - 11644473600000
+        if ([Math]::Abs($createdMs - ([DateTimeOffset]$RootProcess.StartTime.ToUniversalTime()).ToUnixTimeMilliseconds()) -gt 2) { throw 'PID changed between discovery and counter handle' }
+        $tick = [Diagnostics.Stopwatch]::GetTimestamp()
+        $key = "$($RootProcess.Id):$($value.Created)"
+        $row.pid = [int]$RootProcess.Id; $row.creation_filetime = $value.Created
+        $row.read_operation_count = $value.Io.ReadOperationCount; $row.read_transfer_bytes = $value.Io.ReadTransferCount
+        if ($null -ne $script:RootIoPrevious -and $script:RootIoPrevious.key -eq $key -and $value.Io.ReadTransferCount -ge $script:RootIoPrevious.bytes) {
+            $elapsed = ($tick - $script:RootIoPrevious.tick) * 1000.0 / [Diagnostics.Stopwatch]::Frequency
+            if ($elapsed -gt 0) {
+                $row.identity_reset = $false; $row.interval_ms = $elapsed
+                $row.read_transfer_delta_bytes = [decimal]$value.Io.ReadTransferCount - [decimal]$script:RootIoPrevious.bytes
+                $row.read_bytes_per_second = [double]$row.read_transfer_delta_bytes * 1000.0 / $elapsed
+            }
+        }
+        $script:RootIoPrevious = @{ key = $key; bytes = $value.Io.ReadTransferCount; tick = $tick }
+        $row.ok = $true
+    } catch {
+        $script:RootIoPrevious = $null
+        $row.error = $_.Exception.Message
+    }
+    return $row
 }
 
 function Get-ProcessTreeSnapshot($RootProcess) {
@@ -457,6 +522,7 @@ function Get-ProcessTreeSnapshot($RootProcess) {
             working_set_bytes = $rootWorkingSetBytes
             private_memory_bytes = $rootPrivateMemoryBytes
             handle_count = $rootHandleCount
+            io = (Get-RootProcessIo -RootProcess $RootProcess)
         }
         $snapshot.descendants = $processRows
         $snapshot.heavy_descendants = $heavy
@@ -506,6 +572,7 @@ function Get-LightweightProcessSnapshot($RootProcess) {
             working_set_bytes = $rootWorkingSetBytes
             private_memory_bytes = $rootPrivateMemoryBytes
             handle_count = $rootHandleCount
+            io = (Get-RootProcessIo -RootProcess $RootProcess)
         }
     } catch {
         $snapshot.error = $_.Exception.Message
@@ -1795,6 +1862,9 @@ if ($DurationSeconds -lt 1) {
 if ($IntervalSeconds -lt 1) {
     throw "-IntervalSeconds must be >= 1"
 }
+if ($TargetProcessId -lt 0 -or (($TargetProcessId -gt 0) -ne ($TargetStartedAtMs -gt 0)) -or (($TargetProcessId -gt 0) -ne (-not [string]::IsNullOrWhiteSpace($TargetExecutablePath)))) {
+    throw 'Bind TargetProcessId, TargetStartedAtMs and TargetExecutablePath together, or omit all three'
+}
 
 $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $appDir = Get-AppDataDir -Override $AppDataDir
@@ -1832,6 +1902,7 @@ $metadata = @{
     duration_seconds = $DurationSeconds
     interval_seconds = $IntervalSeconds
     process_name = $ProcessName
+    target_binding = @{ pid = $TargetProcessId; started_at_ms = $TargetStartedAtMs; executable_path = $TargetExecutablePath }
     self_test = [bool]$SelfTest
     no_path_probe = [bool]$NoPathProbe
     include_tooling_probe = [bool]$IncludeToolingProbe

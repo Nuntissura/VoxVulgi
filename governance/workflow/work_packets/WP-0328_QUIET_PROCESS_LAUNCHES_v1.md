@@ -39,3 +39,12 @@ Independent hidden parser probes proved cmd/start interprets unspaced ampersands
 - WP-0328-C-20261003-002: Verify relevant file/folder paths and generated helper descendants remain quiet and preserve argument fidelity/lifecycle; bind final executable identity and preserve existing intentional GUI behavior. No broad process termination permitted. Status remains IN_PROGRESS.
 
 </topic>
+
+<topic id="controlled-associated-opening-authority-20261004" status="IN_PROGRESS" wp="WP-0328" updated_at="2026-10-04">
+
+- WP-0328-A-20261004-001: The operator's AFK/full waiver authorizes completion and controlled associated-player GUI opening for the packaged proof. Keep native keyboard/mouse simulation out of this workflow; do not stop existing or foreign player processes.
+- WP-0328-F-20261004-002: Installed source 9e8fc893 exposes the actual single-video history Open/Reveal handlers but lacks declared semantic actions. Its bridge capabilities/manual have no corresponding backend open command; generic ordinary buttons are not safe semantic activation targets.
+- WP-0328-R-20261004-001: Add per-item `media.open.<item-id>` and `media.reveal.<item-id>` declarations with `reversible_state_change` to those existing history buttons, preserving handlers, busy behavior and layout. Reuse the established audited product-action mechanism and pinned associated-file opener; no raw IPC or generic selector bypass.
+- WP-0328-C-20261004-003: Root builds and installs the candidate, then activates the exact canonical video's declared Open action through a fresh authenticated audit. An independently running process/window event observer must establish the associated GUI outcome and absence of intermediate consoles, preserving candidate/file identity and existing processes. Source annotation alone does not satisfy runtime acceptance. Status remains IN_PROGRESS.
+
+</topic>

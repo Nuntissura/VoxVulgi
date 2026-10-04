@@ -7,6 +7,7 @@ $repoRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $governanceScriptPath = Join-Path $repoRoot "governance\scripts\vv_watch.ps1"
 $scriptPath = Join-Path $repoRoot "product\desktop\src-tauri\watcher\vv_watch.ps1"
 $tmpRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("voxvulgi_vvwatch_test_{0}" -f ([guid]::NewGuid().ToString("N")))
+$testPassed = $false
 
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) {
@@ -231,8 +232,16 @@ try {
     }
     $lifecycleRun = @(Get-ChildItem -LiteralPath $lifecycleWatchRoot -Directory)[0]
     $lifecycleSummary = Get-Content -LiteralPath (Join-Path $lifecycleRun.FullName "summary.json") -Raw | ConvertFrom-Json
+    $lifecycleSamples = @(Get-Content -LiteralPath (Join-Path $lifecycleRun.FullName 'samples.jsonl') | ForEach-Object { $_ | ConvertFrom-Json })
+    $lifecycleDiagnostic = @{
+        run_dir = $lifecycleRun.FullName
+        expected_pid = $PID
+        process_lifecycle = $lifecycleSummary.process_lifecycle
+        samples = @($lifecycleSamples | ForEach-Object { @{ sample_index = $_.sample_index; ts_ms = $_.ts_ms; process_pid = $_.process.root.pid; bridge_pid = $_.bridge.file.pid; bridge_stale = $_.bridge.file.stale; sample_elapsed_ms = $_.sample_elapsed_ms; probe_durations = $_.probe_durations } })
+    }
+    Write-Utf8NoBomFile -Path (Join-Path $lifecycleRun.FullName 'owning_lifecycle_diagnostic.json') -Content ($lifecycleDiagnostic | ConvertTo-Json -Depth 12)
     Assert-True (@($lifecycleSummary.process_lifecycle.observed_process_pids) -contains $PID) "lifecycle summary lost the observed process PID"
-    Assert-True (@($lifecycleSummary.process_lifecycle.exit_transitions | Where-Object { $_.pid -eq $PID }).Count -eq 1) "lifecycle summary did not retain the observed process exit"
+    Assert-True (@($lifecycleSummary.process_lifecycle.exit_transitions | Where-Object { $_.pid -eq $PID }).Count -eq 1) "lifecycle summary did not retain the observed process exit; retained diagnostic: $(Join-Path $lifecycleRun.FullName 'owning_lifecycle_diagnostic.json')"
 
     # Exact inverse ordering: watch begins unmatched, then the app arms while the chunk is live.
     $lateWatchRoot = Join-Path $tmpRoot "watch_before_arm"
@@ -286,9 +295,12 @@ try {
     }
 
     Write-Host "vvwatch self-test passed: $runDir"
+    $testPassed = $true
 }
 finally {
-    if (Test-Path -LiteralPath $tmpRoot) {
+    if ($testPassed -and (Test-Path -LiteralPath $tmpRoot)) {
         Remove-Item -LiteralPath $tmpRoot -Recurse -Force
+    } elseif (Test-Path -LiteralPath $tmpRoot) {
+        Write-Warning "Failed vvwatch owning proof preserved at: $tmpRoot"
     }
 }

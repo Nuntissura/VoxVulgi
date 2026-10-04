@@ -5399,10 +5399,10 @@ export function LibraryPage({ mode = "all", visible = true, onOpenOptions }: Lib
                       </td>
                       <td style={{ padding: "8px 6px", verticalAlign: "top" }}>
                         <div className="row" style={{ gap: 6 }}>
-                          <button type="button" disabled={busy} onClick={() => openMediaFile(item)}>
+                          <button type="button" data-agent-action-id={`media.open.${item.id}`} data-agent-effect-class="reversible_state_change" disabled={busy} onClick={() => openMediaFile(item)}>
                             Open
                           </button>
-                          <button type="button" disabled={busy} onClick={() => revealMediaFile(item)}>
+                          <button type="button" data-agent-action-id={`media.reveal.${item.id}`} data-agent-effect-class="reversible_state_change" disabled={busy} onClick={() => revealMediaFile(item)}>
                             Reveal
                           </button>
                         </div>
