@@ -235,9 +235,24 @@ function New-SelfContainedPythonRuntime([string]$PortableRoot, [string]$VenvRoot
   }
 }
 
-function Test-PythonRuntime([string]$PythonExe, [string[]]$Modules, [string]$Label, [int]$TimeoutMilliseconds = 180000) {
+function Get-CosyVoiceModelGraphProducer([string]$SourcePath) {
+  $text = [IO.File]::ReadAllText((Resolve-File $SourcePath 'CosyVoice graph producer'))
+  $declaration = "(?m)^fn cosyvoice_model_graph_code\(\) -> &'static str \{\r?$"
+  if ([regex]::Matches($text, $declaration).Count -ne 1) { throw 'Require one exact CosyVoice graph producer declaration.' }
+  $pattern = "(?ms)^fn cosyvoice_model_graph_code\(\) -> &'static str \{\r?\n    r#`"(.*?)`"#\r?\n\}"
+  $producerMatches = [regex]::Matches($text, $pattern)
+  if ($producerMatches.Count -ne 1 -or [string]::IsNullOrWhiteSpace($producerMatches[0].Groups[1].Value)) { throw 'CosyVoice graph producer raw block is missing or changed shape.' }
+  $code = $producerMatches[0].Groups[1].Value
+  return [ordered]@{
+    code = $code
+    code_sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($code))).ToLowerInvariant()
+    producer_sha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($producerMatches[0].Value))).ToLowerInvariant()
+  }
+}
+
+function Test-PythonRuntime([string]$PythonExe, [string[]]$Modules, [string]$Label, [int]$TimeoutMilliseconds = 180000, [string]$AdditionalCode = '', [string[]]$ProbeArguments = @()) {
   $moduleLiteral = ($Modules | ForEach-Object { "'" + $_.Replace("'", "''") + "'" }) -join ','
-  $probe = "import importlib,sys; mods=[$moduleLiteral]; [importlib.import_module(m) for m in mods]; print(sys.executable); print('QUALIFIED_IMPORTS_OK')"
+  $probe = "import importlib,sys; mods=[$moduleLiteral]; [importlib.import_module(m) for m in mods]`n$AdditionalCode`nprint(sys.executable); print('QUALIFIED_IMPORTS_OK')"
   $saved = @{}
   foreach ($name in @('HF_HUB_OFFLINE','TRANSFORMERS_OFFLINE','PIP_NO_INDEX','PYTHONNOUSERSITE')) {
     $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
@@ -249,7 +264,7 @@ function Test-PythonRuntime([string]$PythonExe, [string[]]$Modules, [string]$Lab
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
-    foreach ($argument in @('-I', '-c', $probe)) { $start.ArgumentList.Add($argument) }
+    foreach ($argument in (@('-I', '-c', $probe) + $ProbeArguments)) { $start.ArgumentList.Add($argument) }
     $child = [Diagnostics.Process]::new()
     $child.StartInfo = $start
     try {
@@ -347,6 +362,8 @@ $preparedIdentity = Import-PreparedPayloadIdentity $PreparedPayloadReceipt ([ord
   cosyvoice_venv = [ordered]@{ root = $cosyVenv; excludes = @() }
   voice_backends = [ordered]@{ root = $voice; excludes = @() }
 })
+$graphProducerPath = Join-Path $PSScriptRoot '..\..\product\engine\src\tools.rs'
+$graphProducer = Get-CosyVoiceModelGraphProducer $graphProducerPath
 $inputIdentity = [ordered]@{
   qualification_recipe_sha256 = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
   model_manifest_sha256 = (Get-FileHash -LiteralPath (Resolve-File $ModelManifestPath 'product model manifest') -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -358,6 +375,8 @@ $inputIdentity = [ordered]@{
   cosyvoice_venv = $preparedIdentity.trees.cosyvoice_venv
   voice_backends = $preparedIdentity.trees.voice_backends
   selected_ytdlp = $selectedYtDlpIdentity
+  cosyvoice_model_graph_code_sha256 = $graphProducer.code_sha256
+  cosyvoice_model_graph_producer_sha256 = $graphProducer.producer_sha256
 }
 $identityJson = $inputIdentity | ConvertTo-Json -Depth 20 -Compress
 $identityBytes = [Text.Encoding]::UTF8.GetBytes("$AppVersion`n$identityJson")
@@ -439,7 +458,11 @@ try {
   Copy-Tree $voice (Join-Path $generation 'voice_backends')
 
   Test-PythonRuntime (Join-Path $pythonRoot 'runtime_main\python.exe') $MainImportModules 'main Python runtime'
-  Test-PythonRuntime (Join-Path $pythonRoot 'runtime_cosyvoice\python.exe') $CosyImportModules 'CosyVoice Python runtime'
+  $currentGraphProducer = Get-CosyVoiceModelGraphProducer $graphProducerPath
+  if ($currentGraphProducer.producer_sha256 -ne $graphProducer.producer_sha256 -or $currentGraphProducer.code_sha256 -ne $graphProducer.code_sha256) { throw 'CosyVoice graph producer changed after qualification input binding.' }
+  Test-PythonRuntime (Join-Path $pythonRoot 'runtime_cosyvoice\python.exe') $CosyImportModules 'CosyVoice Python runtime and model import graph' 180000 $graphProducer.code @((Join-Path $pythonRoot 'runtime_cosyvoice'), '2.10.0+cpu', (Join-Path $generation 'voice_backends\cosyvoice'))
+  $completedGraphProducer = Get-CosyVoiceModelGraphProducer $graphProducerPath
+  if ($completedGraphProducer.producer_sha256 -ne $graphProducer.producer_sha256 -or $completedGraphProducer.code_sha256 -ne $graphProducer.code_sha256) { throw 'CosyVoice graph producer changed during qualification import flight.' }
 
   $qualifiedTrees = [ordered]@{
     tools = Get-TreeIdentity (Join-Path $generation 'tools')

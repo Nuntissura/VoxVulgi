@@ -383,6 +383,8 @@ def write_combined_requirements(
     expected_torch = [(name, version.split("+")[0]) for name, (version, _) in TORCH_WHEELS.items()]
     if torch_pins != expected_torch:
         raise ValueError(f"CPU torch requirement drift: {torch_pins!r}")
+    if dict(pypi_pins).get("setuptools") != "80.10.2":
+        raise ValueError("CosyVoice runtime requires governed setuptools==80.10.2 for Lightning pkg_resources")
     combined = [(name, TORCH_WHEELS[name][0]) for name, _ in torch_pins] + pypi_pins
     if len({name for name, _ in combined}) != len(combined):
         raise ValueError("combined CosyVoice requirements contain duplicate names")
@@ -413,6 +415,12 @@ def resolve_report(
         ],
         "CosyVoice all-wheel dependency resolution",
     )
+
+
+def verify_setuptools_runtime_identity(packages: list[dict[str, object]]) -> None:
+    setuptools = next((package for package in packages if package["name"] == "setuptools"), None)
+    if setuptools is None or setuptools["version"] != "80.10.2" or setuptools["sha256"] != SETUPTOOLS_WHEEL_SHA256:
+        raise ValueError("pip report rejected governed setuptools runtime identity")
 
 
 def verify_report(
@@ -485,6 +493,7 @@ def verify_report(
         row = next((package for package in packages if package["name"] == name), None)
         if row is None or row["version"] != version or row["sha256"] != expected_hash or row["source"] != "governed_local":
             raise ValueError(f"pip report rejected governed static {name} identity")
+    verify_setuptools_runtime_identity(packages)
     for governed in governed_source_wheels:
         row = next((package for package in packages if package["name"] == governed["name"]), None)
         if (

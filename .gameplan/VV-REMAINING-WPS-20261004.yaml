@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 19
+generation: 23
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -40,3 +40,7 @@ steps:
 - {id: GP-024, role: any, at: before_round, do: require fresh native exact ISO mount inventory before update retry, check: {type: file, path: .local/proofVVRemaining/native_mount_inventory.json, contains: DriveLetter}, source: 'failure: native mount/root assertion stopped before installer; fresh inventory maps exact ISO H', state: active}
 - {id: GP-025, role: any, at: before_round, do: require frozen narrow metadata and qualification test controller before batch, check: {type: file, path: .local/vv_metadata_q_focused_tests.py, contains: assert gate.returncode==0}, source: new recorded META-Q defects require owning tests; prior unaffected green tests remain reused, state: active}
 - {id: GP-026, role: any, at: before_round, do: verify DLL selection uses filesystem wildcard and exact name predicate, check: {type: file, path: offline-installer-runtime/scripts/qualify_offline_runtime.ps1, contains: -Filter 'python*.dll'}, source: 'failure: filesystem Filter bracket pattern missed python311.dll; wrote wrong fallback path file', state: active}
+- {id: GP-027, role: any, at: before_round, do: require validated case-normalized download-engine manifest hash comparison, check: {type: file, path: .local/wp0329_phase_q_native.py, contains: 'selection[''manifest_sha256''].lower()'}, source: 'failure: uppercase canonical manifest hash equaled lowercase bytes but controller rejected representation', state: active}
+- {id: GP-028, role: any, at: before_round, do: require terminal update binding before installed workflow launch, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261004/checkpoint_shutdown_batch_connection_owner/native_update_intermediate_80d19709/native_update_result.json, contains: '"completed": true'}, source: 'mistake: launch dispatched before adapter receipt; refused before app start', state: active}
+- {id: GP-029, role: any, at: before_round, do: confirm scoped formatter resolves installed binary from local evidence, check: {type: confirm}, source: 'infra: stable rustfmt proxy lacked component; use installed1.97.1', state: active}
+- {id: GP-030, role: any, at: before_round, do: require frozen source-bound Cosy graph test controller before batch, check: {type: file, path: .local/vv_cosy_graph_focused_tests.py, contains: assert gate.returncode == 0}, source: 'recorded RED: runtime84 omitted Lightning pkg_resources; targeted pin and model graph proof required', state: active}

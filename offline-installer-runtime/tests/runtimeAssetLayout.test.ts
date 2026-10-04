@@ -9,6 +9,45 @@ import { spawnSync } from "node:child_process";
 const source = readFileSync(new URL("../scripts/qualify_offline_runtime.ps1", import.meta.url), "utf8");
 const block = source.slice(source.indexOf("  # ModelStore resolves"), source.indexOf("  Copy-Tree $hfSource"));
 
+test("qualification extracts the actual CosyVoice graph producer and refuses missing or duplicate source", () => {
+  const tools = readFileSync(new URL("../../product/engine/src/tools.rs", import.meta.url), "utf8");
+  const expected = tools.match(/^fn cosyvoice_model_graph_code\(\) -> &'static str \{\r?\n    r#"([\s\S]*?)"#\r?\n\}/m);
+  assert.ok(expected, "actual product graph producer required");
+  const extractor = source.slice(source.indexOf("function Get-CosyVoiceModelGraphProducer("), source.indexOf("function Test-PythonRuntime("));
+  assert.ok(extractor.length > 0);
+  const root = mkdtempSync(join(tmpdir(), "vv-cosy-graph-source-"));
+  let passed = false;
+  try {
+    const fixture = join(root, "tools.rs");
+    const quote = (value: string) => `'${value.replaceAll("'", "''")}'`;
+    const command = `$ErrorActionPreference='Stop';function Resolve-File($p,$l){(Get-Item -LiteralPath $p -ErrorAction Stop).FullName};${extractor};Get-CosyVoiceModelGraphProducer ${quote(fixture)}|ConvertTo-Json -Compress`;
+    const run = () => spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", command], { encoding: "utf8", windowsHide: true });
+    writeFileSync(fixture, tools);
+    const valid = run();
+    assert.equal(valid.status, 0, valid.stderr);
+    const actual = JSON.parse(valid.stdout.trim());
+    assert.equal(actual.code, expected[1], "execute exact product Python, not a duplicate graph");
+    assert.equal(actual.code_sha256, createHash("sha256").update(expected[1]).digest("hex"));
+    assert.equal(actual.producer_sha256, createHash("sha256").update(expected[0]).digest("hex"));
+    writeFileSync(fixture, "// producer absent\n");
+    const missing = run();
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /Require one exact CosyVoice graph producer/);
+    writeFileSync(fixture, `${expected[0]}\n${expected[0]}\n`);
+    const duplicate = run();
+    assert.notEqual(duplicate.status, 0);
+    assert.match(duplicate.stderr, /Require one exact CosyVoice graph producer/);
+    writeFileSync(fixture, expected[0].replace('r#"', 'r##"'));
+    const changedShape = run();
+    assert.notEqual(changedShape.status, 0);
+    assert.match(changedShape.stderr, /raw block is missing or changed shape/);
+    passed = true;
+  } finally {
+    if (passed) rmSync(root, { recursive: true, force: true });
+    else console.error(`Retained CosyVoice source extraction fixture: ${root}`);
+  }
+});
+
 test("qualification resolves flat ASR inputs into manifest paths and refuses corrupt bytes", () => {
   assert.ok(block.includes("$modelRequired"));
   const root = mkdtempSync(join(tmpdir(), "vv-model-layout-"));

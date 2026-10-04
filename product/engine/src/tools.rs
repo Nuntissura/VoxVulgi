@@ -7919,6 +7919,7 @@ fn capability_probe_source_identity(paths: &AppPaths, semantic_key: &str) -> Str
 pub fn invalidate_capability_probe_cache() {
     performance_tier_probe_slot().invalidate();
     demucs_status_probe_slot().invalidate();
+    cosyvoice_dependency_probe_slot().invalidate();
 }
 
 struct CapabilityProbeInvalidationGuard;
@@ -9818,8 +9819,12 @@ pub fn cosyvoice_pack_status(paths: &AppPaths) -> CosyVoicePackStatus {
     let venv_dir = paths.python_cosyvoice_venv_dir();
     let venv_python = venv_python_path(&venv_dir);
     let venv_python_present = file_is_nonempty(&venv_python);
-    let dependency_identity_verified =
-        venv_python_present && cosyvoice_dependency_identity_valid(&venv_python, &venv_dir);
+    let dependency_identity_verified = venv_python_present
+        && cosyvoice_dependency_identity_valid(
+            &venv_python,
+            &venv_dir,
+            &paths.cosyvoice_backend_dir(),
+        );
 
     let model_dir = paths.cosyvoice_model_parent_dir().join("CosyVoice2-0.5B");
     let model_present = cosyvoice_model_complete(&model_dir);
@@ -9855,7 +9860,7 @@ pub fn cosyvoice_pack_status(paths: &AppPaths) -> CosyVoicePackStatus {
     } else if !venv_python_present {
         "CosyVoice isolated Python environment is not installed.".to_string()
     } else if !dependency_identity_verified {
-        "CosyVoice dependency identity is not the governed torch/torchaudio 2.10.0 CPU stack, or pip reports broken dependencies. Repair the managed pack."
+        "CosyVoice governed CPU dependencies, setuptools/pkg_resources model graph, or pip dependency check failed. Install a compatible governed pack."
             .to_string()
     } else if !model_present {
         "CosyVoice2-0.5B model files are missing from the local model directory.".to_string()
@@ -9923,7 +9928,7 @@ const GOVERNED_ENG_TO_IPA_WHEEL: &[u8] =
 const GOVERNED_JIEBA_WHEEL: &[u8] =
     include_bytes!("../resources/tooling/governed_wheels/jieba-0.42.1-py3-none-any.whl");
 const COSYVOICE_WHEELHOUSE_HELPER_SHA256: &str =
-    "b51f2d24978aa39560081146f3348587f146aba8891eccff5964edaf54ffd84c";
+    "0f5a56ab366ac14e86c150560e74dca345842b504a089559fa6dd22351d6379c";
 const COSYVOICE_GOVERNED_WHEEL_MANIFEST_SHA256: &str =
     "61518c921116d9fd4910660a10a698979417b5a7284803ccced7fa833fbbeb66";
 const COSYVOICE_GOVERNED_WHISPER_WHEEL_SHA256: &str =
@@ -10329,8 +10334,30 @@ fn verify_cosyvoice_wheelhouse_manifest(
     Ok(())
 }
 
-fn cosyvoice_dependency_identity_code() -> &'static str {
-    r#"import importlib.metadata as metadata
+fn cosyvoice_model_graph_code() -> &'static str {
+    r#"import importlib
+import importlib.util
+import os
+import pathlib
+import sys
+root = pathlib.Path(sys.argv[1]).resolve()
+backend = pathlib.Path(sys.argv[3]).resolve()
+# Match the render wrapper's app-local import roots; do not instantiate or warm models.
+sys.path.insert(0, str(backend))
+sys.path.insert(0, str(backend / 'third_party' / 'Matcha-TTS'))
+spec = importlib.util.find_spec('pkg_resources')
+assert spec is not None and spec.origin, 'governed pkg_resources is missing'
+origin = pathlib.Path(spec.origin).resolve()
+assert os.path.commonpath([str(root), str(origin)]) == str(root), 'pkg_resources escaped the governed runtime'
+importlib.import_module('pkg_resources')
+importlib.import_module('lightning.fabric')
+flow = importlib.import_module('cosyvoice.flow.flow_matching')
+assert os.path.commonpath([str(backend), str(pathlib.Path(flow.__file__).resolve())]) == str(backend)
+"#
+}
+
+fn cosyvoice_dependency_identity_code() -> String {
+    let identity = r#"import importlib.metadata as metadata
 import importlib.util
 import os
 import pathlib
@@ -10355,12 +10382,8 @@ version_text = torch_version_py.read_text(encoding='utf-8')
 assert re.search(r"__version__\s*=\s*['\"]" + re.escape(torch_version) + r"['\"]", version_text)
 assert re.search(r"cuda(?:\s*:\s*[^=]+)?\s*=\s*None", version_text)
 setuptools_dist = metadata.distribution('setuptools')
-# Python 3.11's current ensurepip bootstrap can materialize setuptools 84.0.0
-# even when the governed build constraint is 80.10.2; both are pure bootstrap
-# tooling and the wheelhouse/pip hash lock remains authoritative for runtime deps.
-# Setuptools 82+ intentionally no longer ships pkg_resources, so readiness must
-# not require that removed compatibility module.
-assert setuptools_dist.version in {'80.10.2', '84.0.0'}, setuptools_dist.version
+# Pinned Lightning 2.2.4 still imports pkg_resources during the model graph load.
+assert setuptools_dist.version == '80.10.2', setuptools_dist.version
 vendored_wheel = pathlib.Path(setuptools_dist.locate_file('setuptools/_vendor/wheel/__init__.py')).resolve()
 assert os.path.commonpath([str(root), str(vendored_wheel)]) == str(root)
 assert re.search(r"__version__\s*=\s*['\"]0\.46\.3['\"]", vendored_wheel.read_text(encoding='utf-8'))
@@ -10371,18 +10394,65 @@ assert os.path.commonpath([str(root), str(wheel_root)]) == str(root)
 for dist in metadata.distributions():
     canonical = re.sub(r'[-_.]+', '-', (dist.metadata.get('Name') or '').lower())
     assert canonical != 'triton' and not canonical.startswith('nvidia-'), canonical
-"#
+"#;
+    format!("{identity}\n{}", cosyvoice_model_graph_code())
+}
+
+fn cosyvoice_dependency_probe_slot() -> &'static SemanticProbeSlot<bool> {
+    static SLOT: OnceLock<SemanticProbeSlot<bool>> = OnceLock::new();
+    SLOT.get_or_init(SemanticProbeSlot::new)
 }
 
 fn cosyvoice_dependency_identity_valid(
-    python: &std::path::Path,
-    expected_venv: &std::path::Path,
+    python: &Path,
+    expected_venv: &Path,
+    backend: &Path,
+) -> bool {
+    let key = tool_probe_cache_key(
+        "cosyvoice_model_graph",
+        &[
+            python,
+            &expected_venv.join("Lib/site-packages"),
+            &expected_venv.join("Lib/site-packages/pkg_resources/__init__.py"),
+            &expected_venv.join("Lib/site-packages/lightning/fabric/__init__.py"),
+            &expected_venv.join("Lib/site-packages/setuptools-80.10.2.dist-info/METADATA"),
+            &expected_venv.join("Lib/site-packages/setuptools-84.0.0.dist-info/METADATA"),
+            &backend.join("cosyvoice/flow/flow_matching.py"),
+            &backend.join("third_party/Matcha-TTS/matcha/models/components/flow_matching.py"),
+        ],
+    );
+    cosyvoice_dependency_probe_slot()
+        .run(key, || {
+            Ok(cosyvoice_dependency_identity_valid_uncached(
+                python,
+                expected_venv,
+                backend,
+            ))
+        })
+        .value
+        .unwrap_or(false)
+}
+
+fn cosyvoice_dependency_identity_valid_uncached(
+    python: &Path,
+    expected_venv: &Path,
+    backend: &Path,
 ) -> bool {
     let code = cosyvoice_dependency_identity_code();
     let expected = expected_venv.to_string_lossy().to_string();
     let mut command = crate::cmd::command(python);
-    command.args(["-I", "-c", code, &expected, COSYVOICE_TORCH_VERSION]);
+    command.args([
+        "-I",
+        "-c",
+        &code,
+        &expected,
+        COSYVOICE_TORCH_VERSION,
+        &backend.to_string_lossy(),
+    ]);
     command.env("PYTHONNOUSERSITE", "1");
+    command
+        .env("HF_HUB_OFFLINE", "1")
+        .env("TRANSFORMERS_OFFLINE", "1");
     let identity_output = crate::cmd::run_owned_output(
         &mut command,
         std::time::Duration::from_secs(60),
@@ -12944,6 +13014,91 @@ fn run_python_checked_with_retries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wp0329_cosy_runtime_requirement_is_enforced_before_acquisition() {
+        let code = format!("__name__ = 'wp0329_fixture'\n{}\nimport tempfile\nwith tempfile.TemporaryDirectory() as directory:\n    target = pathlib.Path(directory) / 'combined.txt'\n    torch = [(n, v[0].split('+')[0]) for n, v in TORCH_WHEELS.items()]\n    valid = write_combined_requirements(target, torch, [('setuptools', '80.10.2')])\n    assert ('setuptools', '80.10.2') in valid\n    exact = {'name': 'setuptools', 'version': '80.10.2', 'sha256': SETUPTOOLS_WHEEL_SHA256}\n    verify_setuptools_runtime_identity([exact])\n    for invalid in ([], [dict(exact, version='84.0.0')], [dict(exact, sha256='0' * 64)]):\n        try:\n            verify_setuptools_runtime_identity(invalid)\n        except ValueError:\n            pass\n        else:\n            raise AssertionError('incompatible setuptools wheel identity admitted')\n    for bad in ([], [('setuptools', '84.0.0')]):\n        try:\n            write_combined_requirements(target, torch, bad)\n        except ValueError:\n            pass\n        else:\n            raise AssertionError('incompatible runtime pin admitted')\n", COSYVOICE_WHEELHOUSE_HELPER);
+        let python = std::env::var_os("VOXVULGI_TEST_PYTHON").unwrap_or_else(|| "python".into());
+        let mut command = crate::cmd::command(python);
+        command.args(["-c", &code]);
+        let output =
+            crate::cmd::run_owned_output(&mut command, std::time::Duration::from_secs(15), || {
+                false
+            })
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(COSYVOICE_REQUIREMENTS
+            .lines()
+            .any(|line| line == COSYVOICE_SETUPTOOLS_REQUIREMENT));
+        assert!(
+            cosyvoice_dependency_identity_code().contains("setuptools_dist.version == '80.10.2'")
+        );
+        assert!(!cosyvoice_dependency_identity_code().contains("'84.0.0'"));
+    }
+
+    #[test]
+    fn wp0329_cosy_actual_graph_producer_rejects_missing_or_foreign_pkg_resources() {
+        let base = tempfile::tempdir().unwrap();
+        let runtime = base.path().join("runtime");
+        let site = runtime.join("Lib/site-packages");
+        let backend = base.path().join("backend");
+        for (path, content) in [
+            (
+                site.join("pkg_resources/__init__.py"),
+                "def declare_namespace(name): pass\n",
+            ),
+            (site.join("lightning/__init__.py"), ""),
+            (
+                site.join("lightning/fabric/__init__.py"),
+                "__import__('pkg_resources').declare_namespace(__name__)\n",
+            ),
+            (backend.join("cosyvoice/__init__.py"), ""),
+            (backend.join("cosyvoice/flow/__init__.py"), ""),
+            (
+                backend.join("cosyvoice/flow/flow_matching.py"),
+                "import lightning.fabric\n",
+            ),
+        ] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        }
+        let probe = |search: &Path| {
+            let code = format!(
+                "import sys\nsys.path.insert(0, {})\n{}",
+                serde_json::to_string(&search.to_string_lossy()).unwrap(),
+                cosyvoice_model_graph_code()
+            );
+            let python =
+                std::env::var_os("VOXVULGI_TEST_PYTHON").unwrap_or_else(|| "python".into());
+            let mut command = crate::cmd::command(python);
+            command.args([
+                "-I",
+                "-S",
+                "-c",
+                &code,
+                &runtime.to_string_lossy(),
+                "unused",
+                &backend.to_string_lossy(),
+            ]);
+            crate::cmd::run_owned_output(&mut command, std::time::Duration::from_secs(15), || false)
+                .unwrap()
+        };
+        assert!(probe(&site).status.success());
+        std::fs::remove_dir_all(site.join("pkg_resources")).unwrap();
+        let missing = probe(&site);
+        assert!(!missing.status.success());
+        assert!(String::from_utf8_lossy(&missing.stderr).contains("pkg_resources is missing"));
+        let foreign = base.path().join("foreign");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("pkg_resources.py"), "").unwrap();
+        let escaped = probe(&foreign);
+        assert!(!escaped.status.success());
+        assert!(String::from_utf8_lossy(&escaped.stderr).contains("escaped the governed runtime"));
+    }
 
     #[test]
     fn wp0329_metadata_real_producer_preserves_indentation_and_versions() {

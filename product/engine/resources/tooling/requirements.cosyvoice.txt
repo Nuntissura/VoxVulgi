@@ -10,6 +10,7 @@ HyperPyYAML==1.2.3
 omegaconf==2.3.0
 conformer==0.3.2
 lightning==2.2.4
+setuptools==80.10.2
 librosa==0.10.2
 soundfile==0.12.1
 inflect==7.3.1

@@ -1,7 +1,7 @@
 ---
 file_id: WP-0329-v1
 file_kind: work_packet
-updated_at: 2026-10-03
+updated_at: 2026-10-04
 ---
 
 <topic id="contract" status="IN_PROGRESS" version="v1" wp="WP-0329" updated_at="2026-10-03">
@@ -18,11 +18,11 @@ Verification root owns: focused engine probe/tools tests in one warm Cargo run; 
 
 </topic>
 
-<topic id="qualification-path-selector-remediation-20261004" status="IN_PROGRESS" wp="WP-0329" updated_at="2026-10-04">
+<topic id="qualification-path-selector-remediation-20261004" status="DONE" wp="WP-0329" updated_at="2026-10-04">
 
 Focused batch at pushed f1c33c5 stopped before Cargo: `qualification_composition.log` under `.local/proofVVRemaining/metadata_q_f1c33c5c27ba` records missing `runtime/python311._pth`. Retained fixture `vv-runtime-package-layout-bsP4NB` contains python311.dll and generated python._pth. Direct selector inventory proved filesystem Filter bracket ranges returned no DLL; wildcard enumeration plus exact name predicate found python311.dll. Prepared portable input has no existing path file, so both real compositions enter this branch. The existing owning assertion remains unchanged; the selector now uses `python*.dll` then exact regex. GP-026 records the cause before retry.
 
-[Microsoft Get-ChildItem Filter](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/get-childitem?view=powershell-7.5#-filter) supports only star/question wildcards. [Python path initialization](https://docs.python.org/3.11/library/sys_path_init.html#pth-files) accepts executable- and DLL-named path files; previous successful import proof is not invalidated solely by its python._pth filename. Package-overlay and product metadata failures remain the actual readiness blockers. New focused GREEN and changed-recipe qualification remain required; no completion claim.
+[Microsoft Get-ChildItem Filter](https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.management/get-childitem?view=powershell-7.5#-filter) supports only star/question wildcards. [Python path initialization](https://docs.python.org/3.11/library/sys_path_init.html#pth-files) accepts executable- and DLL-named path files; previous successful import proof is not invalidated solely by its python._pth filename. The later actual focused composition1/1 and metadata2/2 GREEN at source80d19709, plus fresh changed-recipe qualification and independent metadata PASS, close this selector remediation only; see new-qualified-runtime-80d19709-20261004. Installed workflow and final ISO gates remain open.
 
 </topic>
 
@@ -142,5 +142,27 @@ Narrow authorized bridge implementation: [WP-0329-BRIDGE-001] expose `media.impo
 Controls: check Safe Mode in the mutation worker; preserve global pause and unrelated queued jobs; admission receipt retains original IDs if explicit headless runner start fails, with held/queue/error state. No automatic queue resume, input deletion, new engine policy or user-facing layout. Built-in manual/catalog must expose exact schemas and effects. Existing item/path/reference checks remain execution authority. Import/run requests acknowledge queued work only, never claim completed inference/output.
 
 Red team and proof: malformed/undeclared fields, missing canonical IDs and absent startup state fail closed; paused admission must remain held; repeat operation IDs must not duplicate jobs; runner failure cannot hide queued original IDs. Root batches owning bridge schema/receipt tests with existing quiet-tool changes, then independently reconciles actual import job/item/ASR/translation/diarization/separation/voice/mix/MKV/export artifacts. Bound external runtime inputs and selected generation; real workflow and final exact ISO acceptance remain mandatory. Packet stays IN_PROGRESS.
+
+</topic>
+
+<topic id="new-qualified-runtime-80d19709-20261004" status="IN_PROGRESS" wp="WP-0329" updated_at="2026-10-04">
+
+Actual source80d19709e6d7da9d9367d4e7827d05be0a53a1d1 focused results: composition1/1 and real metadata producer/layout2/2 GREEN; engine compile19.35s. Changed loaded recipeSHAacdad310c8e09b91fe44e9392a5c8f9c1a58730b637cc5c2fcb3029e82e0591a produced runtime_cfc7cae7a877fe774e13a6a2; Phase Q terminal exit0 with bounded main/Cosy import probes. Independent verifier PASS binds manifestSHA0681cd5eb37f32b4fe184212c9f05cf35b4538f53376dc44c6c02642cfec8830, all four archive identities and169/135 unique main/Cosy distribution metadata entries equal authoritative prepared sources. Main diarization pins match; Cosy setuptools84.0.0 replaces the stale65.5 collision and CPU Torch/torchaudio2.10.0+cpu match current constraints. No input repair, old-generation mutation or acceptance weakening occurred.
+
+Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0329/20261004/new_qualified_runtime_80d19709/summary.md` and `evidence.json` bind original raw receipts/logs by exact paths/hashes. This closes the recorded component/qualification failures, not the packet. New packaged activation, active model/Kokoro and full actual localization/clone-preserved dub/MKV/export output proof remain required; main import set excludes torchaudio, so separation compatibility is established only at its actual job boundary. Original exact final ISO clean-profile/isolation acceptance remains a dependency and the ONE final attempt remains unused. WP/board remain IN_PROGRESS; all earlier failures/history are retained.
+
+</topic>
+
+<topic id="cosyvoice-lightning-pkg-resources-runtime-red-20261004" status="IN_PROGRESS" wp="WP-0329" updated_at="2026-10-04">
+
+Actual installed source80d19709e6d7da9d9367d4e7827d05be0a53a1d1, physicaldesktop SHA1fa90827de080ee2490ddb412a01a1213337325c320f4421786db6dc24bf2bc4 and activated runtime_cfc7cae7a877fe774e13a6a2 are bound by `.local/proofVVRemaining/wp0329_headless_workflow_03/launch_preflight.json`. Canonical `.local/proofVVRemaining/wp0329_headless_workflow_03/canonical_after_dub_failure.json` and `product/desktop/build_target/tool_artifacts/wp_runs/WP-0329/20261004/actual_localization_80d19709/run_458456d5456c4ffb99ddf2dea6661c5b_canonical_latest.json` were opened independently and agree on item941dc5a9-4dc4-46c3-b7fd-612ab9879f6c:
+
+- Import9b5e97cc-689a-4155-a09e-f17cd36428fb, ASR0319f7d5-b3f3-44ec-b78c-3f25470cadb5, translation1ec8387f-c838-48c0-ba4e-9a8d713660c4 and diarization6d3620b9-a5ce-41c8-a75a-22f6b2bcd54c succeeded, errornull.
+- Dub28c98f8f-8a26-4928-9d4f-deb1fa161063 attempt1/batchd0a7ec6f-58da-4789-8554-4e8250b27e19 failed: Matcha imports Lightning, whose fabric initialization line41 imports missing `pkg_resources`. No successful cloned-dub/mix/export acceptance follows from the four preceding stages.
+- Actual generated S1 reference bundle JSON `isolated_app/derived/items/941dc5a9-4dc4-46c3-b7fd-612ab9879f6c/voice/reference_candidates/s1__0945ff07b5d5a329/candidate_bundle_v1.json` was opened: one subtitle-aligned6500ms clip, warningsnone; companion WAV exists208078bytes. This records generated reference availability, not clone-quality acceptance.
+
+Research `.local/wp0329_pkg_resources_research.json` compares actual qualified Lightning/Matcha source with [Setuptools82 removal notes](https://setuptools.pypa.io/en/stable/history.html#v82-0-0), [exact80.10.2 pkg_resources source](https://raw.githubusercontent.com/pypa/setuptools/v80.10.2/pkg_resources/__init__.py), and [pinned Lightning2.2.4 fabric source](https://raw.githubusercontent.com/Lightning-AI/pytorch-lightning/2.2.4/src/lightning/fabric/__init__.py). Governed `constraints.cosyvoice.txt` already selects80.10.2; tools.rs readiness allowance for84 contradicts this retained inference dependency. Minimal remediation restores exact governed dependency identity in fresh mutable working inputs through approved preparation, verifies the real Lightning/Matcha import, and qualifies a new generation. It does not upgrade models/Lightning/Torch, weaken readiness, or repair existing immutable prepared/qualified/operator generations. Later failures require their own recorded evidence.
+
+This topic records RED/research only. Original acceptance is unchanged; WP/board remain IN_PROGRESS and the final single-use acceptance attempt remains unused.
 
 </topic>
