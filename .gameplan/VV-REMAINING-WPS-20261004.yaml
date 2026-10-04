@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 23
+generation: 25
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -44,3 +44,5 @@ steps:
 - {id: GP-028, role: any, at: before_round, do: require terminal update binding before installed workflow launch, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261004/checkpoint_shutdown_batch_connection_owner/native_update_intermediate_80d19709/native_update_result.json, contains: '"completed": true'}, source: 'mistake: launch dispatched before adapter receipt; refused before app start', state: active}
 - {id: GP-029, role: any, at: before_round, do: confirm scoped formatter resolves installed binary from local evidence, check: {type: confirm}, source: 'infra: stable rustfmt proxy lacked component; use installed1.97.1', state: active}
 - {id: GP-030, role: any, at: before_round, do: require frozen source-bound Cosy graph test controller before batch, check: {type: file, path: .local/vv_cosy_graph_focused_tests.py, contains: assert gate.returncode == 0}, source: 'recorded RED: runtime84 omitted Lightning pkg_resources; targeted pin and model graph proof required', state: active}
+- {id: GP-031, role: any, at: before_round, do: require observed full Git HEAD passed unchanged to focused controller, check: {type: confirm}, source: 'mistake: wrong fullSHA dispatch refused before tests', state: active}
+- {id: GP-032, role: any, at: before_round, do: verify embedded Python dict braces escaped in Rust format string, check: {type: confirm}, source: 'compile RED: unescaped Python dict in focused Rust test', state: active}

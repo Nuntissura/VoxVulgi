@@ -6080,7 +6080,7 @@ fn pip_install_args<'a>(prefix: &[&'a str], packages: &'a [String]) -> Vec<&'a s
 /// The lockfile JSON is baked into the engine binary at compile time via
 /// `include_str!` in `python_lockfile.rs`, so this works on every end-user install
 /// regardless of where the exe lives or whether the source tree exists. Returns
-/// `None` for packs without a bundled lockfile (currently only spleeter — its pin set
+/// `None` for packs without a bundled lockfile (currently only spleeter â€” its pin set
 /// is unbuildable on Py 3.11 per the WP-0232 manifest-defect note).
 fn locate_pack_lockfile(pack_name: &str) -> Option<&'static str> {
     python_lockfile::bundled_lockfile_for_pack(pack_name)
@@ -13017,7 +13017,7 @@ mod tests {
 
     #[test]
     fn wp0329_cosy_runtime_requirement_is_enforced_before_acquisition() {
-        let code = format!("__name__ = 'wp0329_fixture'\n{}\nimport tempfile\nwith tempfile.TemporaryDirectory() as directory:\n    target = pathlib.Path(directory) / 'combined.txt'\n    torch = [(n, v[0].split('+')[0]) for n, v in TORCH_WHEELS.items()]\n    valid = write_combined_requirements(target, torch, [('setuptools', '80.10.2')])\n    assert ('setuptools', '80.10.2') in valid\n    exact = {'name': 'setuptools', 'version': '80.10.2', 'sha256': SETUPTOOLS_WHEEL_SHA256}\n    verify_setuptools_runtime_identity([exact])\n    for invalid in ([], [dict(exact, version='84.0.0')], [dict(exact, sha256='0' * 64)]):\n        try:\n            verify_setuptools_runtime_identity(invalid)\n        except ValueError:\n            pass\n        else:\n            raise AssertionError('incompatible setuptools wheel identity admitted')\n    for bad in ([], [('setuptools', '84.0.0')]):\n        try:\n            write_combined_requirements(target, torch, bad)\n        except ValueError:\n            pass\n        else:\n            raise AssertionError('incompatible runtime pin admitted')\n", COSYVOICE_WHEELHOUSE_HELPER);
+        let code = format!("__name__ = 'wp0329_fixture'\n{}\nimport tempfile\nwith tempfile.TemporaryDirectory() as directory:\n    target = pathlib.Path(directory) / 'combined.txt'\n    torch = [(n, v[0].split('+')[0]) for n, v in TORCH_WHEELS.items()]\n    valid = write_combined_requirements(target, torch, [('setuptools', '80.10.2')])\n    assert ('setuptools', '80.10.2') in valid\n    exact = {{'name': 'setuptools', 'version': '80.10.2', 'sha256': SETUPTOOLS_WHEEL_SHA256}}\n    verify_setuptools_runtime_identity([exact])\n    for invalid in ([], [dict(exact, version='84.0.0')], [dict(exact, sha256='0' * 64)]):\n        try:\n            verify_setuptools_runtime_identity(invalid)\n        except ValueError:\n            pass\n        else:\n            raise AssertionError('incompatible setuptools wheel identity admitted')\n    for bad in ([], [('setuptools', '84.0.0')]):\n        try:\n            write_combined_requirements(target, torch, bad)\n        except ValueError:\n            pass\n        else:\n            raise AssertionError('incompatible runtime pin admitted')\n", COSYVOICE_WHEELHOUSE_HELPER);
         let python = std::env::var_os("VOXVULGI_TEST_PYTHON").unwrap_or_else(|| "python".into());
         let mut command = crate::cmd::command(python);
         command.args(["-c", &code]);
@@ -13921,7 +13921,7 @@ mod tests {
             "folder/trailing.",
             "folder/trailing ",
             "folder//empty",
-            "non_ascii_é",
+            "non_ascii_Ã©",
         ] {
             assert!(
                 cosyvoice_manifest_path_components(unsafe_path).is_err(),
