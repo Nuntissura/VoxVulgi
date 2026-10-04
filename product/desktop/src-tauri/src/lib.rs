@@ -3274,6 +3274,7 @@ struct AppState {
     paths: AppPaths,
     database: db::AppDatabase,
     checkpoint_maintenance: Mutex<Option<db::CheckpointMaintenanceGuard>>,
+    connection_reuse: Mutex<Option<db::ConnectionReuseGuard>>,
     runner: Option<jobs::JobRunnerHandle>,
     safe_mode_enabled: Arc<AtomicBool>,
     safe_mode_cli: bool,
@@ -8865,24 +8866,28 @@ mod tests {
     fn desktop_checkpoint_owner_starts_before_bridge_for_headless_and_safe_mode() {
         let run = include_str!("lib.rs").split_once("\npub fn run() {").unwrap().1;
         let owner = run.find("let checkpoint_maintenance = database.start_checkpoint_maintenance()?;").unwrap();
+        let reuse = run.find("let connection_reuse = database.start_connection_reuse()?;").unwrap();
         let offline_exit = run.find("run_offline_update_preservation_seed_one_shot(").unwrap();
         let bridge = run.find("spawn_agent_bridge(&AppPaths::normalize_base_dir(&base_dir))").unwrap();
         let background_gate = run.find("let runtime_background_work =").unwrap();
-        assert!(offline_exit < owner && owner < bridge && bridge < background_gate);
+        assert!(offline_exit < owner && owner < reuse && reuse < bridge && bridge < background_gate);
         assert!(run.contains("checkpoint_maintenance: Mutex::new(Some(checkpoint_maintenance))"));
+        assert!(run.contains("connection_reuse: Mutex::new(Some(connection_reuse))"));
     }
 
     #[test]
     fn desktop_checkpoint_owner_joins_after_runners_before_shared_deadline_drain() {
         let run = include_str!("lib.rs").split_once("\npub fn run() {").unwrap().1;
         let shutdown = run.split_once("if let tauri::RunEvent::Exit = event").unwrap().1;
+        let reuse_explicit = shutdown.find("owner.begin_explicit_shutdown()").unwrap();
         let explicit = shutdown.find("agent_control::stop_explicit_runner()").unwrap();
         let runner = shutdown.find("runner.stop_and_join(jobs::JOB_RUNNER_SHUTDOWN_TIMEOUT)").unwrap();
         let deadline = shutdown.find("let database_shutdown_deadline =").unwrap();
         let maintenance = shutdown.find("owner.stop_and_join(database_shutdown_deadline.saturating_duration_since").unwrap();
         let gate = shutdown.find("if runner_join_succeeded && maintenance_join_succeeded").unwrap();
         let drain = shutdown.find(".shutdown_and_drain(database_shutdown_deadline.saturating_duration_since").unwrap();
-        assert!(explicit < runner && runner < deadline && deadline < maintenance && maintenance < gate && gate < drain);
+        let release_guard = shutdown.find("drop(reuse_guard)").unwrap();
+        assert!(reuse_explicit < explicit && explicit < runner && runner < deadline && deadline < maintenance && maintenance < gate && gate < drain && drain < release_guard);
         assert!(shutdown.contains("skipped_maintenance_not_joined"));
         assert!(shutdown.contains("poisoned.into_inner().take(), true"));
     }
@@ -18663,6 +18668,7 @@ pub fn run() {
                 std::process::exit(exit_code);
             }
             let checkpoint_maintenance = database.start_checkpoint_maintenance()?;
+            let connection_reuse = database.start_connection_reuse()?;
             spawn_agent_bridge(&AppPaths::normalize_base_dir(&base_dir));
 
             let cli_safe_mode = cli_args.iter().any(|value| value.trim() == "--safe-mode");
@@ -19153,6 +19159,7 @@ pub fn run() {
                 paths,
                 database,
                 checkpoint_maintenance: Mutex::new(Some(checkpoint_maintenance)),
+                connection_reuse: Mutex::new(Some(connection_reuse)),
                 runner,
                 safe_mode_enabled: Arc::new(AtomicBool::new(safe_mode_enabled)),
                 safe_mode_cli: cli_safe_mode,
@@ -19532,6 +19539,12 @@ pub fn run() {
         .expect("error while building tauri application")
         .run(|app_handle, event| {
             if let tauri::RunEvent::Exit = event {
+                if let Some(state) = app_handle.try_state::<AppState>() {
+                    let mut guard = state.connection_reuse.lock().unwrap_or_else(|p| p.into_inner());
+                    if let Some(owner) = guard.as_mut() {
+                        owner.begin_explicit_shutdown();
+                    }
+                }
                 voxvulgi_engine::jobs::request_job_runner_shutdown();
                 if let Some(state) = app_handle.try_state::<AppState>() {
                     if let Some(runner) = &state.runner {
@@ -19599,6 +19612,8 @@ pub fn run() {
                     );
                     drop(maintenance_guard);
                     if runner_join_succeeded && maintenance_join_succeeded {
+                        let reuse_guard = state.connection_reuse.lock()
+                            .unwrap_or_else(|p| p.into_inner()).take();
                         let before = state.database.snapshot();
                         let started = std::time::Instant::now();
                         let drain = state
@@ -19613,11 +19628,13 @@ pub fn run() {
                                 "writer_active_before": before.writer_active,
                                 "waiting_writers_before": before.waiting_writers,
                                 "active_readers_before": before.active_readers,
+                                "connection_reuse": state.database.connection_reuse_proof(),
                                 "error": drain.as_ref().err().map(ToString::to_string),
                             }),
                             if drain.is_ok() { "info" } else { "error" },
                             true,
                         );
+                        drop(reuse_guard);
                     } else {
                         // A timed-out runner may still own or request database work. Do not drain
                         // underneath it; record the bounded failure while process exit remains the
@@ -19632,6 +19649,7 @@ pub fn run() {
                                 "writer_active_before": snapshot.writer_active,
                                 "waiting_writers_before": snapshot.waiting_writers,
                                 "active_readers_before": snapshot.active_readers,
+                                "connection_reuse": state.database.connection_reuse_proof(),
                                 "error": "owned runner or maintenance owner did not join before the bounded shutdown deadline",
                             }),
                             "error",

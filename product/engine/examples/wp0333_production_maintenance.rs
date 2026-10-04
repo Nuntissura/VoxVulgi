@@ -37,9 +37,10 @@ fn main()->ProofResult<()> {
     let args:Vec<_>=std::env::args_os().collect();
     if args.len()!=4 && args.len()!=6 && args.len()!=7{return Err("Usage: <absent-absolute-root> <standalone-schema61-backup> <expected-source-sha256> [count|pk seconds30..180 [connection_reuse]]".into())}
     let reuse=args.len()==7;
-    if reuse && args[6]!="connection_reuse" {return Err("Require exact diagnostic connection_reuse mode".into())}
+    let production_reuse=reuse&&args[6]=="production_connection_reuse";
+    if reuse && !production_reuse && args[6]!="connection_reuse" {return Err("Require connection_reuse or production_connection_reuse mode".into())}
     #[cfg(not(feature="wp0333_connection_reuse_proof"))]
-    if reuse {return Err("Diagnostic connection reuse feature is not enabled".into())}
+    if reuse&&!production_reuse {return Err("Diagnostic connection reuse feature is not enabled".into())}
     let workload=if args.len()>=6 {args[4].to_str().ok_or("Invalid workload")?}else{"count"};
     if !matches!(workload,"count"|"pk"){return Err("Require count or pk workload".into())}
     let seconds=if args.len()>=6 {args[5].to_str().ok_or("Invalid seconds")?.parse::<u64>()?}else{30};
@@ -68,8 +69,9 @@ fn main()->ProofResult<()> {
     fs::write(root.join("wp0333_production_fixture.json"),serde_json::to_vec_pretty(&json!({"root":root,"source":source,"source_sha256":source_hash,"schema":schema,"job_density":density,"pid":std::process::id(),"read_workload":workload,"seconds":seconds,"read_job":read_job,"read_meta_key":read_meta}))?)?;
     let database=db::AppDatabase::for_paths(&AppPaths::new(root.clone()))?;
     #[cfg(feature="wp0333_connection_reuse_proof")]
-    let _reuse_guard=if reuse {Some(database.enable_disposable_connection_reuse(&root,&source_hash)?)} else {None};
+    let _reuse_guard=if reuse&&!production_reuse {Some(database.enable_disposable_connection_reuse(&root,&source_hash)?)} else {None};
     let mut maintenance=database.start_checkpoint_maintenance()?;
+    let mut production_guard=if production_reuse {Some(database.start_connection_reuse()?)} else {None};
     let (pin_ready_tx,pin_ready_rx)=mpsc::channel();
     let pinned_database=database.clone();
     let pin=thread::spawn(move||->Result<(),String>{
@@ -141,6 +143,7 @@ fn main()->ProofResult<()> {
     let reports:Vec<_>=workers.into_iter().map(|w|w.join().map_err(|_|"Worker panicked")).collect::<Result<_,_>>()?;
     pin.join().map_err(|_|"Pinned reader panicked")?.map_err(|e|format!("Pinned reader failed: {e}"))?;
     let shutdown_deadline=Instant::now()+db::SHUTDOWN_DRAIN_TIMEOUT;
+    if let Some(guard)=production_guard.as_mut() {guard.begin_explicit_shutdown();}
     let owner_shutdown=maintenance.stop_and_join(shutdown_deadline.saturating_duration_since(Instant::now()))?;
     if !owner_shutdown.stop_requested||!owner_shutdown.joined||owner_shutdown.owner_close_error.is_some(){return Err("Maintenance did not join/close".into())}
     let drain=database.shutdown_and_drain(shutdown_deadline.saturating_duration_since(Instant::now()));
@@ -150,10 +153,7 @@ fn main()->ProofResult<()> {
     let recovery=manual.iter().any(|r|r["phase"]=="after_pin"&&r["receipt"]["busy"]==0&&r["receipt"]["log_frames"].as_i64().is_some_and(|n|n>=0)&&r["receipt"]["log_frames"]==r["receipt"]["checkpointed_frames"]);
     let final_complete=owner_shutdown.final_checkpoint.as_ref().is_some_and(|r|r.busy==0&&r.log_frames>=0&&r.log_frames==r.checkpointed_frames);
     let source_unchanged=hash(&source)?==source_hash;
-    #[cfg(feature="wp0333_connection_reuse_proof")]
     let reuse_proof=database.connection_reuse_proof();
-    #[cfg(not(feature="wp0333_connection_reuse_proof"))]
-    let reuse_proof: Option<Value>=None;
     let summary=json!({"root":root,"source_backup":source,"source_sha256":source_hash,"read_workload":workload,"seconds":seconds,"reader_interval_ms":100,"writer_interval_ms":100,"writer_count":3,"reader_count":3,"pin_seconds":5,"read_job":read_job,"read_meta_key":read_meta,"workers":reports,"acknowledged_ids":ack_ids,"errors":errors,"manual":manual,"observed_partial":partial,"observed_recovery":recovery,"health_observations":observations,"owner_shutdown":owner_shutdown,"drain_error":drain.as_ref().err().map(ToString::to_string),"source_unchanged":source_unchanged,"final_runtime":database.snapshot(),"diagnostic_connection_reuse":reuse_proof});
     fs::write(root.join("production_maintenance_summary.json"),serde_json::to_vec_pretty(&summary)?)?;
     emit(json!({"event":"terminal","summary":root.join("production_maintenance_summary.json"),"errors":errors,"acknowledged":ack_ids.len()}));

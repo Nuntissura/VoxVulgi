@@ -829,6 +829,16 @@ type DatabaseOperationReceipt = {
 
 type DatabaseRuntimeStatus = {
   snapshot: {
+    connection_reuse?: {
+      enabled: boolean;
+      writer_owners: number;
+      reader_owners: number;
+      lease_returns: number;
+      quarantines: number;
+      close_errors: number;
+      remaining_owners: number;
+      shutdown_joined: boolean;
+    } | null;
     checkpoint_maintenance?: {
       enabled: boolean;
       owner_state: string;
@@ -3478,6 +3488,19 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                 {` · ${databaseRuntime.contract.checkpoint_policy.replace(/_/g, " ")}`}
               </div>
             </div>
+            {databaseRuntime.snapshot.connection_reuse ? (
+              <div className="kv" data-testid="database-connection-reuse" role="status">
+                <div className="k">Database connections</div>
+                <div className="v">
+                  {`${databaseRuntime.snapshot.connection_reuse.writer_owners} writer · ${databaseRuntime.snapshot.connection_reuse.reader_owners} readers`}
+                  {` · ${databaseRuntime.snapshot.connection_reuse.lease_returns} lease returns`}
+                  {` · ${databaseRuntime.snapshot.connection_reuse.quarantines} quarantined · ${databaseRuntime.snapshot.connection_reuse.close_errors} close errors`}
+                  {databaseRuntime.snapshot.shutting_down
+                    ? ` · ${databaseRuntime.snapshot.connection_reuse.shutdown_joined ? "closed and joined" : `${databaseRuntime.snapshot.connection_reuse.remaining_owners} owners awaiting close`}`
+                    : " · connections reused"}
+                </div>
+              </div>
+            ) : null}
             {databaseRuntime.snapshot.checkpoint_maintenance ? (
               <div className="kv" data-testid="database-checkpoint-maintenance" role="status">
                 <div className="k">Background checkpoint</div>

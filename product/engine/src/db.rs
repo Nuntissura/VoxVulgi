@@ -8,6 +8,7 @@ use std::time::Duration;
 mod database_runtime;
 
 pub use database_runtime::{
+    ConnectionReuseGuard, ConnectionReuseProof,
     CheckpointMaintenanceGuard, CheckpointMaintenanceHealth, CheckpointMaintenanceShutdownReceipt,
     ActiveDatabaseOperation, AppDatabase, DatabaseCancellation, DatabaseContentionReceipt,
     DatabaseMode, DatabaseOperationContext, DatabaseOperationReceipt, DatabasePriority,

@@ -73,3 +73,25 @@ Remaining: Independent current-input diagnostic counterpart acceptance review; S
 Independent /root/open_wps acceptance PASS:1392 unique external ACKs equal canonical,69-table preservation/exact dirty-trigger+1392, partial222/0 -> recovery915/915 -> final1309/1309 and5 distinct owned close receipts. Cross-thread native close kind is `xCloseUnknown`; no MainDB close-kind claim. Production authorization remains absent.
 
 </topic>
+
+
+<topic id="production-connection-lifetime" status="pending-review" wp="WP-0333" updated_at="2026-10-04">
+
+Operator2026-10-04 explicitly approved production integration and verification. Canonical amendment `phase_authority.production_connection_lifetime_policy`, WP-0333-AMD-PRODUCTION-LIFETIME-20261004-001, requires independent review PASS before code. This changes the diagnostic-only production restriction for the newly approved production scope; historical diagnostic authority and prior results remain unchanged.
+
+Select one counted reusable writer/up to four counted read-only owners within existing canonical AppDatabase, after database readiness before bridge/runners, with unchanged admission/execution/durability/maintenance safeguards. Reuse existing rusqlite/common factory; no pool dependency/raw-open exception and no desktop diagnostic feature. Restore transaction/session policies at lease return; manual rollback cannot claim durable ACK, panic/reset failure quarantines exact tracked owners, and committed outcomes survive later cleanup errors. Distinguish logical returns from physical close. Runner -> maintenance -> reusable checked close -> database drain retains one shared10second post-runner budget and truthful late/unjoined ownership.
+
+Research/risks reuse the existing diagnostic refinement and primary SQLite sources; proven PK1801392exactACK/5291reads/0errors/all69tables is a scoped counterpart, not full live acceptance. Minimum controls remain owning reset/quarantine/shutdown tests, independent canonical preservation/crash proof and exact packaged30minute running downloads/history/first export/recovery. Preserve all original criteria, priorREDs, fixedSQLite/FULL/no-close/auto0/500ms/bounds and unchanged0.1.205. WP remains IN_PROGRESS.
+
+</topic>
+
+
+<topic id="production-reuse-pk180-scoped-result" status="IN_PROGRESS" wp="WP-0333" updated_at="2026-10-04">
+
+Operator-approved/reviewed production ordinaryAPI connection lifetime implemented; current owning validation actualGREEN39 default runtime+9 feature reuse+3 desktop ordering tests and nonfeature production example build. Fresh ordinaryAPI PK180 counterpart child0/verifier0/driverPASS:1432 exact external stdout ACK independently retained1432,5272 reads,0errors; schema61/all69protected tables+only exact fixture dirty-trigger1432/sourcebackupSHA unchanged. Actual1writer4readers/max1/4,6705lease returns,5checked physical closes,0quarantine/closeerrors/remainingowners,joined. Maintenance finalPASSIVE1846/1846 busy0/ownerjoined756ms/drainerrornull/pinnedpartial+recovery observed. Final independent counterpart acceptance review currently running; verifier results are actual inspected scoped proof. All prior REDs/diagnosticPK1392 preserved; no OS-rootcause or installed/live30minute timeout-resolution claim. WP remainsIN_PROGRESS; production authority REVIEWED_APPROVED/operatorwaiver preserved exactly; next managedCoreOnly/nativeUpdate/preservation/originalrecovery/final30minrunning/visual/export/activeclose required.
+
+Exact counterpart EXE SHA `d2c1cb891cd9cdd13003445baa315632536b633e66f1d6ba36f3e96e9a93252f`; runtime SHA `12676258f3af991617892d63e8ef0cc19c077b885c07322b6bb3590fc109724f`; factory SHA `bab5963e446f46b97c3fc40dd82d301b7e5792c2dbec311eabf5cc9bb40a381b`.
+
+Evidence: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_production_reuse_pk_driver.json`, `product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_production_reuse_pk_summary.json`, `product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_production_reuse_pk_independent.json`, `product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_production_reuse_pk_stdout.log`, `.local/proofWP333/production_validation_01/receipt.json`, `.local/proofWP333/production_validation_01/00_default_runtime.log`, `.local/proofWP333/production_validation_01/01_feature_reuse.log`, `.local/proofWP333/production_validation_01/02_desktop_ordering.log`, `.local/proofWP333/production_validation_01/03_production_example.log`.
+
+</topic>

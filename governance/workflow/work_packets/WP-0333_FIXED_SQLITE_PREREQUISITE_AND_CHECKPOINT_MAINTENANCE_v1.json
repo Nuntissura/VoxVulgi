@@ -168,6 +168,39 @@
         ],
         "production_authorized": false
       }
+    },
+    "production_connection_lifetime_policy": {
+      "amendment_id": "WP-0333-AMD-PRODUCTION-LIFETIME-20261004-001",
+      "decision_id": "WP-0333-DEC-PRODUCTION-LIFETIME-20261004-001",
+      "operator_authorization": "2026-10-04: ALL APPROVED production integration and verification (explicit operator approval relayed by root)",
+      "status": "REVIEWED_APPROVED",
+      "production_authorized": true,
+      "implementation_gate": "Independent amendment review PASS before product edits; approval does not waive original runtime acceptance",
+      "units": {
+        "VV-CR-001": "After independent review of this amendment, implement the explicitly operator-approved bounded connection lifetime in the canonical AppDatabase runtime: one reusable counted writer and at most four reusable read-only owners, with exclusive leases and no new pool library, raw-open exception or alternate admission system.",
+        "VV-CR-002": "Production activation follows schema/default-library readiness before bridge/runners; common factory verifies fixed SQLite/canonical filename identity and role policy. Preserve startup-only migration and existing schema factory authority. Normal/headless/SafeMode and setup-error paths retain attributable ownership; diagnostic feature and disposable guard remain separate and never authorize user-root test execution. Activation is explicit after both offline one-shot exits; AppDatabase::for_paths never activates owners universally, and standalone no-owner contexts retain fresh connection behavior. Hold an attributable guard through every interactive/setup-failure path; take it out under a short AppState lock before checked close/join.",
+        "VV-CR-003": "Keep four read executors,64-entry queues,4second read/5second strict-FIFO writer admission, cancellation-before-admission, atomic batches and all admitted terminal outcomes. Reuse changes physical connection lifetime only; no lease sharing/concurrent handle use or control mutex held across SQLite I/O.",
+        "VV-CR-004": "Retain fixed SQLite, WAL, synchronous FULL, NO_CKPT_ON_CLOSE,auto-checkpoint0,500ms PASSIVE owner/manual route, busy policies and all approved maintenance liveness/backlog safeguards. Do not widen timeouts, weaken durability, change checkpoint cadence or bypass failure gating.",
+        "VV-CR-005": "Before returning every lease, verify autocommit and explicitly roll back any remaining manual transaction, then verify clean transaction state. Restore/read back role query_only,foreign_keys,busy policy and required WAL/FULL/no-close/auto0/session baseline; statements/blobs/backups and unauthorized attachments/session state cannot escape a lease.",
+        "VV-CR-006": "Manual-transaction rollback is not durable success: return an attributed error instead of a false committed ACK. Preserve actually committed outcomes when later cleanup fails; never rerun non-idempotent admitted work or silently lose an acknowledged result.",
+        "VV-CR-007": "Panic, reset/rollback failure or unverifiable session policy quarantines the exact owner and prevents reuse. Track quarantined/pending/late-close owners, terminal cleanup errors and replacement bounds; refuse healthy drain or replacement when ownership cannot be reconciled. No silently deferred/forgotten physical owner.",
+        "VV-CR-008": "Record logical lease return separately from checked physical close, including actual owner/operation identities and native callback phase evidence. Healthy ordinary admission returns the lease without physical destruction; quarantine teardown is attributed and fail-closed, not an unrecorded healthy close.",
+        "VV-CR-009": "Shutdown preserves existing runner join bound and order: join owned runners, close new admission/reconcile admitted operations, join maintenance/final PASSIVE/checked maintenance close, then check/join reusable-owner closes before database drain. Maintenance/reuse/drain share one actual10second budget; late/unjoined nonpreemptible I/O reports failure and cannot claim healthy drain. Drop signals/retains ownership truthfully without force or self-join.",
+        "VV-CR-010": "Use existing common counted factory and canonical registry; no new direct SQLite open or broad exception. Keep exact exception-registry regression and default runtime/startup tests; production activation must not enable the diagnostic Cargo feature in desktop.",
+        "VV-CR-011": "Require owning production lifecycle/reset/panic/quarantine/manual-transaction/committed-outcome/shutdown regressions and independent current canonical counterpart matching exact artifact/source/policy. Retain diagnostic PK1801392ACK/69tables PASS and all earlier REDs as scoped evidence, not final product acceptance.",
+        "VV-CR-012": "Complete original exact packaged normal30minute successful running-download/read/history/first-export, crash/reopen, active-runner/maintenance/reuse/database shutdown and independent user-data preservation/recovery acceptance before DONE. No version/release-changelog change or timeout-resolution claim follows from approval or source implementation."
+      },
+      "research_basis_reference": "phase_authority.diagnostic_connection_reuse_counterpart_20261004.research_basis",
+      "counterpart_reference": "status_updates.WP-0333-DIAGNOSTIC-REUSE-PK-GREEN-20261004-001",
+      "raw_open_exception_required": false,
+      "limits": "Production lifetime approved, implementation not yet reviewed/implemented/proven by this record; WP remains IN_PROGRESS. Earlier diagnostic production_authorized=false records are historical scope, preserved unchanged.",
+      "independent_review": {
+        "reviewer": "/root/open_wps",
+        "date": "2026-10-04",
+        "verdict": "PASS",
+        "scope": "Actual frozen WP/refinement/TechnicalDesign amendment; product runtime acceptance remains mandatory"
+      },
+      "operator_session_waiver": "2026-10-04: run this session under full operator approval waiver; production integration/build/verification/commit/push authorized"
     }
   },
   "files": [
@@ -1660,6 +1693,44 @@
         "date": "2026-10-04",
         "verified": "1392 unique external stdoutACK=canonical;69tables only exactderivedtrigger+1392; partial222/0 to recovery915/915 to final1309/1309;5distinctownedclose receipts",
         "limit": "Cross-thread native close classification reports xCloseUnknown; no MainDB close-kind claim. Production approval remains absent."
+      }
+    },
+    {
+      "record_id": "WP-0333-PRODUCTION-LIFETIME-AUTHORITY-20261004-001",
+      "date": "2026-10-04",
+      "status_retained": "IN_PROGRESS",
+      "note": "Operator explicitly approved production lifetime integration and verification. Amendment WP-0333-AMD-PRODUCTION-LIFETIME-20261004-001 pending independent review; product edits wait for PASS. Preserve all original criteria/policies/history; no new raw-open exception or desktop diagnostic feature. No production-runtime/DONE/timeout-resolution claim."
+    },
+    {
+      "record_id": "WP-0333-PRODUCTION-REUSE-PK-SCOPED-GREEN-20261004-001",
+      "date": "2026-10-04",
+      "status_retained": "IN_PROGRESS",
+      "note": "Operator-approved/reviewed production ordinaryAPI connection lifetime implemented; current owning validation actualGREEN39 default runtime+9 feature reuse+3 desktop ordering tests and nonfeature production example build. Fresh ordinaryAPI PK180 counterpart child0/verifier0/driverPASS:1432 exact external stdout ACK independently retained1432,5272 reads,0errors; schema61/all69protected tables+only exact fixture dirty-trigger1432/sourcebackupSHA unchanged. Actual1writer4readers/max1/4,6705lease returns,5checked physical closes,0quarantine/closeerrors/remainingowners,joined. Maintenance finalPASSIVE1846/1846 busy0/ownerjoined756ms/drainerrornull/pinnedpartial+recovery observed. Final independent counterpart acceptance review currently running; verifier results are actual inspected scoped proof. All prior REDs/diagnosticPK1392 preserved; no OS-rootcause or installed/live30minute timeout-resolution claim. WP remainsIN_PROGRESS; production authority REVIEWED_APPROVED/operatorwaiver preserved exactly; next managedCoreOnly/nativeUpdate/preservation/originalrecovery/final30minrunning/visual/export/activeclose required.",
+      "identity": {
+        "executable_sha256": "d2c1cb891cd9cdd13003445baa315632536b633e66f1d6ba36f3e96e9a93252f",
+        "source_example_sha256": "fe4f5033db0a18988b11bc6d7a53d8698b44d6ac6ae822374bcd8e04e6ac7daa",
+        "source_runtime_sha256": "12676258f3af991617892d63e8ef0cc19c077b885c07322b6bb3590fc109724f",
+        "source_factory_sha256": "bab5963e446f46b97c3fc40dd82d301b7e5792c2dbec311eabf5cc9bb40a381b",
+        "controller_sha256": "2a7c70d1985f7818dc3b27eef2438aebd47f241ab48ba31c6b508e2879494855",
+        "verifier_sha256": "049d6a010564f5a18c146d0dd52797c664a0f775c2c485763c285b79d6940d25"
+      },
+      "evidence": {
+        "driver": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_production_reuse_pk_driver.json",
+        "summary": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_production_reuse_pk_summary.json",
+        "independent": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_production_reuse_pk_independent.json",
+        "external_ack": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_production_reuse_pk_stdout.log",
+        "owning_receipt": ".local/proofWP333/production_validation_01/receipt.json",
+        "default39": ".local/proofWP333/production_validation_01/00_default_runtime.log",
+        "feature9": ".local/proofWP333/production_validation_01/01_feature_reuse.log",
+        "desktop3": ".local/proofWP333/production_validation_01/02_desktop_ordering.log",
+        "production_example": ".local/proofWP333/production_validation_01/03_production_example.log"
+      },
+      "independent_acceptance": {
+        "reviewer": "/root/open_wps",
+        "verdict": "PASS",
+        "date": "2026-10-04",
+        "observed": "1432 unique stdout ACKs match canonical IDs;69 tables exact fixture trigger delta;default artifact/source identity;pin200/0 to1420/1420 recovery;allfive owners closed",
+        "remaining": "Exact packaged normal30minute running downloads/history/export/crash/reopen and active shutdown preservation"
       }
     }
   ],
