@@ -51,7 +51,9 @@ test("prepared freeze copies five exact trees, excludes nested Cosy, and refuses
     const consumer = qualifier.slice(qualifier.indexOf("function Import-PreparedPayloadIdentity("), qualifier.indexOf("function Copy-Tree("));
     const fixtureScripts = join(root, "offline-installer-runtime", "scripts"); mkdirSync(fixtureScripts, { recursive: true });
     const expectedTrees = Object.entries(receipt.trees).map(([name, tree]: [string, any]) => `${name}=@{root=${quote(tree.root)};excludes=@(${tree.excluded_prefixes.map(quote).join(",")})}`).join(";");
-    const consumed = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", `$ErrorActionPreference='Stop';$PSScriptRoot=${quote(fixtureScripts)};${resolveFile};${consumer};Import-PreparedPayloadIdentity ${quote(receiptPath)} @{${expectedTrees}} | ConvertTo-Json -Depth 8 -Compress`], { encoding: "utf8", windowsHide: true });
+    const consumerScript = join(fixtureScripts, "consume_prepared_fixture.ps1");
+    writeFileSync(consumerScript, `$ErrorActionPreference='Stop';${resolveFile};${consumer};Import-PreparedPayloadIdentity ${quote(receiptPath)} @{${expectedTrees}} | ConvertTo-Json -Depth 8 -Compress`);
+    const consumed = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-File", consumerScript], { encoding: "utf8", windowsHide: true });
     assert.equal(consumed.status, 0, consumed.stderr);
     const actualConsumer = JSON.parse(consumed.stdout.trim());
     assert.equal(actualConsumer.contract_sha256, receipt.contract_sha256.toLowerCase());
