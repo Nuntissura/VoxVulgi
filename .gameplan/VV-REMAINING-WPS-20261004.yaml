@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 37
+generation: 38
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -58,3 +58,4 @@ steps:
 - {id: GP-042, role: any, at: before_round, do: require successful preparation mutation before subsequent dispatch, check: {type: confirm}, source: 'mistake: add refused verb bind but command sequence continued to check and replay', state: active}
 - {id: GP-043, role: any, at: before_round, do: require exact qualified model copy before retained inference replay, check: {type: file, path: .local/wp0329_cosy_exact_replay.py, contains: qualified_model_before}, source: 'replay RED: first model run wrote bytecode; preserve installed generation and exact-check fresh qualified copy', state: active}
 - {id: GP-044, role: any, at: before_round, do: require governed WAV writer before genuine cloned output retry, check: {type: file, path: product/engine/resources/tooling/voxvulgi_cosyvoice_render.py, contains: def save_generated_wav}, source: 'actual dtype replay RED: Torchaudio save requires missing TorchCodec after genuine synthesis', state: active}
+- {id: GP-045, role: any, at: before_round, do: verify scoped Rust changes exclude unrelated formatter churn, check: {type: confirm}, source: 'mistake: whole-file rustfmt expanded existing unrelated jobs formatting; transplant only DIAG changes', state: active}
