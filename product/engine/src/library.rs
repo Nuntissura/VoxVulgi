@@ -3221,10 +3221,15 @@ fn download_lineage_backfill_state(
         r#"
 SELECT COUNT(*)
 FROM job
-WHERE rowid > ?1
-  AND type='download_direct_url'
-  AND status='succeeded'
-  AND item_id IS NOT NULL
+JOIN library_item ON library_item.id = job.item_id
+WHERE job.rowid > ?1
+  AND job.type='download_direct_url'
+  AND job.status='succeeded'
+  AND job.item_id IS NOT NULL
+  AND NOT EXISTS (
+    SELECT 1 FROM library_download_lineage
+    WHERE library_download_lineage.item_id = job.item_id
+  )
 "#,
         params![cursor_job_rowid],
         |row| row.get(0),
@@ -4692,6 +4697,61 @@ INSERT INTO job (
         assert_eq!(first.media_id, "post:ABC123:asset:0");
         assert_eq!(second.media_id, "post:ABC123:asset:1");
         assert_ne!(first.media_id, second.media_id);
+    }
+
+    #[test]
+    fn lineage_backfill_pending_excludes_already_classified_new_success() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        let initial = backfill_download_lineage_batch(&paths, 10).expect("initial completion");
+        assert!(initial.complete);
+        let url = "http://127.0.0.1:53192/owned-history-fixture.mkv";
+        seed_lineage_item(&paths, "new-classified-item", 10, url, "owned fixture", "unreachable_fixture.mkv");
+        seed_direct_success_job(&paths, "new-classified-job", Some("new-classified-item"), Some("owned-batch"), url, None);
+        record_download_lineage(&paths, DownloadLineageInput {
+            item_id: "new-classified-item".into(), source_job_id: "new-classified-job".into(),
+            source_batch_id: Some("owned-batch".into()), source_subscription_id: None,
+            classification: classify_direct_download_execution(url, None).expect("direct classification"),
+            item_created_at_ms: 10,
+        }).expect("normal completion already records durable lineage");
+        let page = list_youtube_single_history(&paths, 20, 0, None, None).expect("history");
+        assert!(page.backfill.complete, "already-classified later completion cannot reopen pending work");
+        assert!(!page.backfill.has_more);
+        assert_eq!(page.backfill.remaining_candidates, 0);
+        assert_eq!(page.backfill.cursor_job_rowid, initial.cursor_job_rowid, "read does not write the cursor");
+        let conn = db::open(&paths).expect("fixture connection");
+        let identity: (String, String, String) = conn.query_row(
+            "SELECT item_id,source_job_id,work_track FROM library_download_lineage WHERE item_id='new-classified-item'", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).expect("durable lineage retained");
+        assert_eq!(identity, ("new-classified-item".into(), "new-classified-job".into(), "other_video".into()));
+    }
+
+    #[test]
+    fn lineage_backfill_pending_excludes_missing_items_but_preserves_unknown_candidates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema");
+        seed_direct_success_job(&paths, "missing-item-job", Some("absent-item"), None,
+            "https://www.youtube.com/watch?v=missing-item", None);
+        seed_lineage_item(&paths, "unknown-item", 10, "https://www.youtube.com/watch?v=unknown", "unknown legacy item", "unreachable_unknown.mkv");
+        seed_direct_success_job(&paths, "malformed-job", Some("unknown-item"), None,
+            "https://www.youtube.com/watch?v=unknown", None);
+        let conn = db::open(&paths).expect("fixture connection");
+        conn.execute("UPDATE job SET params_json='not-json' WHERE id='malformed-job'", []).expect("malformed historical evidence");
+        let pending = download_lineage_backfill_state(&conn).expect("pending state");
+        assert_eq!(pending.remaining_candidates, 1, "only the reachable, unclassified malformed item is inspectable");
+        assert!(pending.has_more);
+        drop(conn);
+        let after = backfill_download_lineage_batch(&paths, 10).expect("bounded evidence inspection");
+        assert!(after.complete);
+        assert_eq!(after.remaining_candidates, 0);
+        let conn = db::open(&paths).expect("fixture connection");
+        let preserved: (i64, i64, i64) = conn.query_row(
+            "SELECT (SELECT COUNT(*) FROM job),(SELECT COUNT(*) FROM library_item),(SELECT COUNT(*) FROM library_download_lineage)", [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).expect("preserved unknown evidence");
+        assert_eq!(preserved, (2, 1, 0), "neither invent classification nor delete historical evidence");
+        assert_eq!(count_youtube_single_unclassified(&paths).expect("unknown count"), 1);
     }
 
     #[test]

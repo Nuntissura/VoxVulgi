@@ -1,7 +1,7 @@
 ---
 file_id: WP-0323
 file_kind: work_packet
-updated_at: 2026-10-03
+updated_at: 2026-10-04
 ---
 
 # Work Packet: WP-0323 — Readers intermittently fail with "database is locked"
@@ -141,5 +141,13 @@ Operator direction 2026-09-24: VoxVulgi cargo builds slow down the higher-priori
 - WP-0323-C-20261003-002: Prove normal successful downloads under unchanged provider pacing, and exact reported read-admission/history behavior; do not force cooldown release or treat a removed-video error as database success.
 - WP-0323-C-20261003-003: Prove first-attempt nonempty subscription export on final installed code and independently compare canonical subscriptions. Earlier export comparison covered316 subscriptions on an earlier build and does not supply fresh final-build proof.
 - WP-0323-C-20261003-004: Reconcile WP-0333 crash/reopen and WP-0332 active shutdown proof. Preserve retained data, original reproduction history, admission bounds and unchanged0.1.205. Status remains IN_PROGRESS; no complete database fix claimed.
+
+</topic>
+
+<topic id="history-phantom-pending-20261004" status="IN_PROGRESS" wp="WP-0323" updated_at="2026-10-04">
+
+- WP-0323-F-20261004-001: Fresh native canonical read `.local/wp0323_exact_remaining.json` at1791079124363 proves cursor342295 and exactly one later succeeded direct job: row342370/job`a3bed1a9-dcc0-40c0-a981-3f110f795c60`, attempt1, track`other_video`, item`8d73b7dc-9b01-4298-896c-a55619cc691e`, with both item and durable lineage present. The inspected normal Single videos surface nevertheless reports one proven link left and refreshes every1500ms. This is phantom pending classification, not proof of the reported read-admission timeout cause.
+- WP-0323-R-20261004-001: Narrow remediation is to count only post-cursor succeeded direct jobs whose referenced library item exists and lacks durable lineage. Align reachable-item semantics with the existing backfill candidate join; retain cursor advancement, unknown/malformed evidence handling, historical rows, runner/checkpoint policy, admission limits and version. No live data writes are authorized by this remediation.
+- WP-0323-V-20261004-001: Add owning natural regressions first; root runs them RED against the original count before the query fix, then GREEN using the same cache. Verify later already-classified completions and missing items do not claim pending work, while malformed existing-item evidence remains inspectable and preserved. Root owns tests/build and exact packaged history reconciliation. Status remains IN_PROGRESS; original timeout and other acceptance gates remain open.
 
 </topic>
