@@ -168,13 +168,44 @@ function Copy-Tree([string]$Source, [string]$Destination, [string[]]$ExcludeDire
   if ($LASTEXITCODE -ge 8) { throw "robocopy failed with exit code $LASTEXITCODE ($Source -> $Destination)" }
 }
 
+function Get-PythonDistributionMetadata([string]$SitePackages) {
+  $distributions = [ordered]@{}
+  foreach ($entry in (Get-ChildItem -LiteralPath $SitePackages -Force | Sort-Object Name)) {
+    if ($entry.Name -notmatch '\.(dist-info|egg-info)$') { continue }
+    $metadata = if ($entry.PSIsContainer) {
+      Join-Path $entry.FullName $(if ($entry.Name -match '\.dist-info$') { 'METADATA' } else { 'PKG-INFO' })
+    } else { $entry.FullName }
+    $metadata = Resolve-File $metadata 'Python distribution metadata'
+    $lines = Get-Content -LiteralPath $metadata
+    $name = @($lines | Where-Object { $_ -match '^Name:\s*' } | Select-Object -First 1)
+    $version = @($lines | Where-Object { $_ -match '^Version:\s*' } | Select-Object -First 1)
+    if ($name.Count -ne 1 -or $version.Count -ne 1) { throw "Python distribution metadata lacks name/version: $metadata" }
+    $canonical = (($name[0] -replace '^Name:\s*','').Trim().ToLowerInvariant() -replace '[-_.]+','-')
+    $value = ($version[0] -replace '^Version:\s*','').Trim()
+    if ([string]::IsNullOrWhiteSpace($canonical) -or [string]::IsNullOrWhiteSpace($value)) { throw "Python distribution metadata has empty name/version: $metadata" }
+    if ($distributions.Contains($canonical)) { throw "Duplicate active Python distribution metadata: $canonical" }
+    $distributions[$canonical] = $value
+  }
+  return $distributions
+}
+
 function New-SelfContainedPythonRuntime([string]$PortableRoot, [string]$VenvRoot, [string]$Destination) {
-  Copy-Tree $PortableRoot $Destination
+  if (Test-Path -LiteralPath $Destination) { throw "Self-contained Python destination must be fresh: $Destination" }
   $sitePackages = Join-Path $VenvRoot 'Lib\site-packages'
   if (-not (Test-Path -LiteralPath $sitePackages -PathType Container)) {
     throw "Qualified source venv has no Lib/site-packages: $VenvRoot"
   }
+  $sourceDistributions = Get-PythonDistributionMetadata $sitePackages
+  # The venv is authoritative; portable bootstrap metadata must not survive its overlay.
+  Copy-Tree $PortableRoot $Destination @((Join-Path $PortableRoot 'Lib\site-packages'))
   Copy-Tree $sitePackages (Join-Path $Destination 'Lib\site-packages')
+  $copiedDistributions = Get-PythonDistributionMetadata (Join-Path $Destination 'Lib\site-packages')
+  if ($copiedDistributions.Count -ne $sourceDistributions.Count) { throw 'Qualified Python distribution set differs from its source venv.' }
+  foreach ($name in $sourceDistributions.Keys) {
+    if (-not $copiedDistributions.Contains($name) -or $copiedDistributions[$name] -cne $sourceDistributions[$name]) {
+      throw "Qualified Python distribution version differs from its source venv: $name"
+    }
+  }
   $scripts = Join-Path $VenvRoot 'Scripts'
   if (Test-Path -LiteralPath $scripts -PathType Container) {
     Copy-Tree $scripts (Join-Path $Destination 'Scripts') @('python.exe', 'pythonw.exe')

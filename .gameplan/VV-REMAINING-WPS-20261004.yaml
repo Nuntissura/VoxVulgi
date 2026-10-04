@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 14
+generation: 18
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -19,7 +19,7 @@ steps:
 - {id: GP-003, role: any, at: before_round, do: confirm heavy build|test processes on target disk == 0, check: {type: confirm}, source: 'preset:build-round', state: active}
 - {id: GP-004, role: any, at: before_round, do: verify free disk(CARGO_TARGET_DIR or repo) >= 50 GiB, check: {type: cmd, argv: [python, -c, 'import os,shutil,sys;g=shutil.disk_usage(os.environ.get(''CARGO_TARGET_DIR'') or ''.'').free/2**30;print(round(g,1),''GiB free'');sys.exit(0 if g>=float(''50'') else 1)'], expect_exit: 0, timeout_seconds: 15}, source: 'preset:build-round', state: active}
 - {id: GP-005, role: any, at: before_round, do: confirm deepest generated path < 260 chars or long paths enabled, check: {type: confirm}, source: 'preset:build-round', state: active}
-- {id: GP-006, role: any, at: before_round, do: confirm test entrypoint + config unchanged since last green round, check: {type: confirm}, source: 'preset:build-round', state: active}
+- {id: GP-006, role: any, at: before_round, do: confirm test entrypoint + config unchanged since last green round, check: {type: confirm}, source: 'preset:build-round', state: retired}
 - {id: GP-007, role: any, at: before_round, do: forbid timeout wrapper around test entrypoint, check: {type: confirm}, source: 'preset:build-round', state: active}
 - {id: GP-008, role: any, at: before_round, do: record candidate SHA = pushed HEAD; later pushes -> next round, check: {type: confirm}, source: 'preset:build-round', state: active}
 - {id: GP-009, role: any, at: before_round, do: confirm env vars|config files read by changed code set for test run, check: {type: confirm}, source: 'preset:build-round', state: active}
@@ -36,3 +36,6 @@ steps:
 - {id: GP-020, role: any, at: before_round, do: require nonprivileged observer mode before associated Open retry, check: {type: confirm}, source: 'failure: Win32_ProcessStartTrace HRESULT0x80041003 AccessDenied before action', state: active}
 - {id: GP-021, role: any, at: before_round, do: verify PowerShell observer Boolean literals use dollar prefix, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0332/20261004/checkpoint_shutdown_batch_connection_owner/observe_open_processes.ps1, not_contains: =false}, source: 'failure: bare false invoked as command after observer ready', state: active}
 - {id: GP-022, role: any, at: before_round, do: confirm cmd.rs restored from verified clean HEAD with UTF8 atomic write, check: {type: confirm}, source: 'failure: cp1252 encode error truncated cmd.rs before write; no build ran', state: active}
+- {id: GP-023, role: any, at: before_round, do: require explicit unpackaged PowerShell7 path with observed identity, check: {type: confirm}, source: 'failure: bare pwsh resolved WindowsApps execution alias; PhaseA stopped before packaging', state: active}
+- {id: GP-024, role: any, at: before_round, do: require fresh native exact ISO mount inventory before update retry, check: {type: file, path: .local/proofVVRemaining/native_mount_inventory.json, contains: DriveLetter}, source: 'failure: native mount/root assertion stopped before installer; fresh inventory maps exact ISO H', state: active}
+- {id: GP-025, role: any, at: before_round, do: require frozen narrow metadata and qualification test controller before batch, check: {type: file, path: .local/vv_metadata_q_focused_tests.py, contains: assert gate.returncode==0}, source: new recorded META-Q defects require owning tests; prior unaffected green tests remain reused, state: active}

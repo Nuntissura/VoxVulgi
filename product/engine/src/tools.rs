@@ -6987,14 +6987,17 @@ fn status_pin_names(pack_name: &str) -> Option<&'static [&'static str]> {
 }
 
 fn python_site_packages_dir(python: &std::path::Path) -> Option<PathBuf> {
-    let scripts_dir = python.parent()?;
-    let venv_dir = scripts_dir.parent()?;
-    let site_packages = venv_dir.join("Lib").join("site-packages");
-    if site_packages.is_dir() {
-        Some(site_packages)
+    let executable_dir = python.parent()?;
+    let executable_folder = executable_dir.file_name()?.to_string_lossy();
+    let runtime_dir = if executable_folder.eq_ignore_ascii_case("Scripts")
+        || executable_folder.eq_ignore_ascii_case("bin")
+    {
+        executable_dir.parent()?
     } else {
-        None
-    }
+        executable_dir
+    };
+    let site_packages = runtime_dir.join("Lib").join("site-packages");
+    site_packages.is_dir().then_some(site_packages)
 }
 
 fn dist_info_distribution_name(file_name: &str) -> Option<String> {
@@ -7098,6 +7101,32 @@ fn cleanup_stale_distribution_metadata(python: &std::path::Path, pack_name: &str
     }
 }
 
+fn python_distribution_versions_code(distributions: &[String]) -> String {
+    let names_json = serde_json::to_string(distributions).unwrap_or_else(|_| "[]".to_string());
+    format!(r#"import importlib.metadata as m, json
+names = {names_json}
+out = {{}}
+for name in names:
+    try:
+        out[name] = m.version(name)
+    except Exception:
+        out[name] = None
+print(json.dumps(out))
+"#)
+}
+
+fn log_python_metadata_probe_failure(reason: &str, stdout: &[u8], stderr: &[u8]) {
+    fn bounded(bytes: &[u8]) -> String {
+        let text = String::from_utf8_lossy(bytes);
+        let mut end = text.len().min(2048);
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}{}", &text[..end], if end < text.len() { " [truncated]" } else { "" })
+    }
+    eprintln!("Python package metadata probe failed: {}; using filesystem metadata fallback; stdout={}; stderr={}", bounded(reason.as_bytes()), bounded(stdout), bounded(stderr));
+}
+
 fn python_distribution_versions(
     python: &std::path::Path,
     distributions: &[String],
@@ -7105,25 +7134,15 @@ fn python_distribution_versions(
     if distributions.is_empty() {
         return HashMap::new();
     }
-    let names_json = serde_json::to_string(distributions).unwrap_or_else(|_| "[]".to_string());
-    let code = format!(
-        "import importlib.metadata as m, json\n\
-         names = {names_json}\n\
-         out = {{}}\n\
-         for name in names:\n\
-             try:\n\
-                 out[name] = m.version(name)\n\
-             except Exception:\n\
-                 out[name] = None\n\
-         print(json.dumps(out))\n"
-    );
+    let code = python_distribution_versions_code(distributions);
     let output = match crate::cmd::command(python)
         .args(["-c", &code])
         .env("PYTHONNOUSERSITE", "1")
         .owned_output()
     {
         Ok(output) => output,
-        Err(_) => {
+        Err(error) => {
+            log_python_metadata_probe_failure(&format!("could not run: {error}"), &[], &[]);
             return distributions
                 .iter()
                 .map(|name| {
@@ -7136,6 +7155,7 @@ fn python_distribution_versions(
         }
     };
     if !output.status.success() {
+        log_python_metadata_probe_failure(&format!("exit {:?}", output.status.code()), &output.stdout, &output.stderr);
         return distributions
             .iter()
             .map(|name| {
@@ -7147,8 +7167,13 @@ fn python_distribution_versions(
             .collect();
     }
     let text = String::from_utf8_lossy(&output.stdout);
-    let mut parsed = serde_json::from_str::<HashMap<String, Option<String>>>(&text)
-        .unwrap_or_else(|_| HashMap::new());
+    let mut parsed = match serde_json::from_str::<HashMap<String, Option<String>>>(&text) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            log_python_metadata_probe_failure(&format!("invalid JSON: {error}"), &output.stdout, &output.stderr);
+            HashMap::new()
+        }
+    };
     for name in distributions {
         if parsed.get(name).and_then(|value| value.as_ref()).is_none() {
             if let Some(version) = python_distribution_version_from_site_packages(python, name) {
@@ -12919,6 +12944,54 @@ fn run_python_checked_with_retries(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wp0329_metadata_real_producer_preserves_indentation_and_versions() {
+        let base = std::env::temp_dir().join(format!("vv_wp0329_metadata_{}", uuid::Uuid::new_v4()));
+        let metadata = base.join("vv_metadata_fixture-1.2.3.dist-info");
+        std::fs::create_dir_all(&metadata).unwrap();
+        std::fs::write(metadata.join("METADATA"), "Name: vv-metadata-fixture\nVersion: 1.2.3\n").unwrap();
+        let names = vec!["vv-metadata-fixture".to_string(), "vv-definitely-missing-metadata-fixture".to_string()];
+        let python = std::env::var_os("VOXVULGI_TEST_PYTHON").unwrap_or_else(|| "python".into());
+        let mut command = crate::cmd::command(python);
+        command
+            .args(["-c", &python_distribution_versions_code(&names)])
+            .env("PYTHONPATH", &base).env("PYTHONNOUSERSITE", "1");
+        let output = crate::cmd::run_owned_output(
+            &mut command, std::time::Duration::from_secs(15), || false,
+        ).expect("execute real metadata producer");
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let versions: HashMap<String, Option<String>> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(versions[&names[0]].as_deref(), Some("1.2.3"));
+        assert_eq!(versions[&names[1]], None);
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn wp0329_metadata_fallback_preserves_scripts_and_standalone_layouts() {
+        let base = std::env::temp_dir().join(format!("vv_wp0329_layout_{}", uuid::Uuid::new_v4()));
+        for executable in [
+            base.join("venv/Scripts/python.exe"),
+            base.join("mixed_case/sCrIpTs/python.exe"),
+            base.join("legacy/bin/python"),
+            base.join("runtime_main/python.exe"),
+        ] {
+            let folder = executable.parent().unwrap().file_name().unwrap().to_string_lossy();
+            let root = if folder.eq_ignore_ascii_case("Scripts") || folder.eq_ignore_ascii_case("bin") {
+                executable.parent().unwrap().parent().unwrap()
+            } else { executable.parent().unwrap() };
+            let packages = root.join("Lib/site-packages");
+            let metadata = packages.join("resemblyzer-0.1.4.dist-info");
+            std::fs::create_dir_all(&metadata).unwrap();
+            std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            std::fs::write(metadata.join("METADATA"), "Name: Resemblyzer\nVersion: 0.1.4\n").unwrap();
+            assert_eq!(python_site_packages_dir(&executable), Some(packages));
+            assert_eq!(python_distribution_version_from_site_packages(&executable, "Resemblyzer").as_deref(), Some("0.1.4"));
+            assert_eq!(python_distribution_version_from_site_packages(&executable, "missing"), None);
+        }
+        assert_eq!(python_site_packages_dir(&base.join("absent/python.exe")), None);
+        std::fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn managed_offline_runtime_never_uses_path_or_mutates_sealed_runtime_tools() {

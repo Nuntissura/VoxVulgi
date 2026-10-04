@@ -18,6 +18,18 @@ Verification root owns: focused engine probe/tools tests in one warm Cargo run; 
 
 </topic>
 
+<topic id="installed-runtime-failures-20261004" status="IN_PROGRESS" wp="WP-0329" updated_at="2026-10-04">
+
+Actual intermediate ISO4dc24f060c149446821c9fe3bd6f1e775254a54dc73a7ad41915b569ff5b7f78 Update succeeded; all14 protected tables unchanged, all11 required assets verified, core sourcec798a25 installed SHA f855b49f1dc5f28ccf50988c5b6d092cb6d2fb7c759f567a385c2e785bf50d29. Native receipts: `.local/proofVVRemaining/intermediate_iso_update_c798a25_02/`; independent review agrees intermediate activation only. Final ONE offline acceptance attempt remains unused.
+
+Actual isolated installed appPID238624 imported original Haerin SHA328e555ab418eb37b6ca0cb7656497b2cef2684816dfa47257f69c1825001676, item6993ade8-cb06-434f-8fd6-f3836a68dead, batch0d6a6a5d-2e20-4634-a856-5b97ec69af63. ASR1e2f8e0d-5736-4096-b82c-6974dff75eda and translate73ea0ad6-3d85-4f03-b32c-bdf136cd3850 succeeded with nonempty Korean/English tracks. Diarizationfe7604a2-e473-4f1d-b2a0-d742a095525e failed, reporting absent pack. Originals/logs retained at `product/desktop/build_target/tool_artifacts/wp_runs/WP-0329/20261004/actual_localization_c798a25/` and its bound isolated root. No inference/output completion claim.
+
+Recorded failure/remediation: [WP-0329-META-001] `tools.rs::python_distribution_versions` uses escaped physical newlines that strip Python loop/try indentation; exact source-derived code against activated Python exited1 with IndentationError on line5. Raw receipt `product/desktop/build_target/tool_artifacts/wp_runs/WP-0329/20261004/exact_metadata_producer_before_fix/result.json` binds source/python/code hashes and actual childPID255016. [WP-0329-META-002] fallback `python_site_packages_dir` assumes Scripts/python.exe; standalone runtime_main/python.exe consequently misses its existing eight distribution metadata entries. Preserve Python indentation and support both exact layouts; expose bounded actual probe failure diagnostics rather than masking failure as missing packages. Root must run focused real-producer/layout regressions and packaged readiness/workflow proof.
+
+Separate recorded qualification failure: [WP-0329-Q-001] `New-SelfContainedPythonRuntime` overlays venv packages over portable Lib/site-packages, retaining portable setuptools65.5 metadata alongside authoritative84 package bytes/metadata. Actual CosyVoice identity rejects65.5; independent source/generation byte reads prove overlay origin. Exclude portable bootstrap site-packages when composing a fresh runtime; preserve source distribution identities and reject duplicates/occupied destinations. Do not weaken governed dependency pins, mutate prepared inputs or patch installed/qualified immutable generations. Test actual copy composition, then qualify the changed recipe and prove current product readiness/workflows before packaging/publication. Import-only qualification missed this failure; its prior PASS does not prove product readiness.
+
+</topic>
+
 <topic id="runtime-input-remediation-20261003" status="IN_PROGRESS" wp="WP-0329" updated_at="2026-10-03">
 
 Verified defect: old qualified runtime 0.1.204 copied flat Whisper files, while ModelStore/asr resolves models/<id>/<version>/<file>. Its required_files covered executables but omitted required ASR/Kokoro assets. Revised Phase Q uses exact existing model-manifest-bound bytes, creates canonical model paths, checks required Kokoro revision and three asset hashes, and includes them in required_files. Qualification identity now binds qualification recipe plus product model/dependency manifest hashes. Package-only script/old receipt remain unchanged.
