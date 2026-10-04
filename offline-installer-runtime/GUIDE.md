@@ -179,13 +179,32 @@ Recovery rules:
 
 ## Package and release workflow
 
-The only authorized commands are the two explicit entrypoints below. A filename never overrides this contract.
+The only authorized qualification and packaging commands are the two explicit entrypoints below. The separate input-preparation freeze command only prepares immutable inputs; it does not create an installer. A filename never overrides this contract.
 
 ### Current implementation conformity gate
 
 `build_offline_release_fast.ps1` was deleted on 2026-08-30 as an **invalid, unwanted stale artifact** because it invoked the desktop build with offline-payload refresh, triggered version increment, ran dependency warmups, downloaded/installed dependencies, created fresh environments, required fresh payload generation, and performed destructive prior-attempt cleanup.
 
 `build_offline_full_installer.ps1`, `prep_offline_bundle.ps1`, and `reconcile_offline_python_environments.ps1` are retained only as **legacy nonconforming recovery/history artifacts**. They are not authorized installer-creation commands because they combine qualification, repair, archive construction, acceptance, or publication with packaging.
+
+### Input preparation: freeze existing validated payload inputs
+
+[VV-OFFLINE-PREP-001] Input acquisition is separate from Phase Q and packaging. For a targeted CosyVoice repair, use the product `voxvulgi_setup --base-dir <explicit-absolute-mutable-base> --install-cosyvoice` entrypoint after its owning validation passes; preserve prepared caches, qualified generations, installed runtimes and user data. The actual product model graph/readiness and dependency identity must pass before calling that input working.
+
+[VV-OFFLINE-PREP-002] `governance/scripts/freeze_prepared_payload.ps1` is the authorized narrow immutable-input producer. It only copies and hashes five explicit existing source roots; it never downloads, installs, executes Python/models/apps, builds, repairs, archives or publishes a release. Freezing alone makes no working-runtime claim.
+
+```powershell
+pwsh -NoProfile -File governance/scripts/freeze_prepared_payload.ps1 `
+  -ToolsDir <existing-tools-dir> -ModelsDir <existing-models-dir> `
+  -HuggingFaceDir <existing-huggingface-dir> `
+  -CosyVoiceVenvDir <existing-validated-cosyvoice-venv> `
+  -VoiceBackendsDir <existing-voice-backends-dir> `
+  -PreparedParent product/desktop/build_target/offline_payload_cache/prepared
+```
+
+[VV-OFFLINE-PREP-003] The producer refuses linked inputs/output ancestors, source/output overlap and overwriting any deterministic `prepared_<contract-hash>` output. Tools exclude exactly `python/venv_cosyvoice`; the independent CosyVoice source populates that destination. Source-before/source-after and copied-destination identities must agree before atomic same-parent publication of `immutable_cache.json`, with uppercase SHA-256 identities and read-only copied files. Failed staging is retained, never represented as published input.
+
+[VV-OFFLINE-PREP-004] Reuse unchanged main Python/tools, models, Hugging Face and voice-backend inputs through their explicit source roots; freezing does not modify those sources or prior prepared outputs. Phase Q consumes the resulting canonical prepared receipt and retains its actual import/model-graph qualification gates. Final exact-ISO offline acceptance and publication gates remain unchanged.
 
 ### Phase Q — qualify an existing working runtime when its inputs changed
 

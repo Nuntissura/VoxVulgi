@@ -13018,9 +13018,12 @@ mod tests {
     #[test]
     fn wp0329_cosy_runtime_requirement_is_enforced_before_acquisition() {
         let code = format!("__name__ = 'wp0329_fixture'\nexec(compile({}, 'prepare_cosyvoice_wheelhouse.py', 'exec'))\nimport tempfile\nwith tempfile.TemporaryDirectory() as directory:\n    target = pathlib.Path(directory) / 'combined.txt'\n    torch = [(n, v[0].split('+')[0]) for n, v in TORCH_WHEELS.items()]\n    valid = write_combined_requirements(target, torch, [('setuptools', '80.10.2')])\n    assert ('setuptools', '80.10.2') in valid\n    exact = {{'name': 'setuptools', 'version': '80.10.2', 'sha256': SETUPTOOLS_WHEEL_SHA256}}\n    verify_setuptools_runtime_identity([exact])\n    for invalid in ([], [dict(exact, version='84.0.0')], [dict(exact, sha256='0' * 64)]):\n        try:\n            verify_setuptools_runtime_identity(invalid)\n        except ValueError:\n            pass\n        else:\n            raise AssertionError('incompatible setuptools wheel identity admitted')\n    for bad in ([], [('setuptools', '84.0.0')]):\n        try:\n            write_combined_requirements(target, torch, bad)\n        except ValueError:\n            pass\n        else:\n            raise AssertionError('incompatible runtime pin admitted')\n", serde_json::to_string(COSYVOICE_WHEELHOUSE_HELPER).unwrap());
+        let fixture = tempfile::tempdir().unwrap();
+        let fixture_script = fixture.path().join("cosyvoice_requirement_fixture.py");
+        std::fs::write(&fixture_script, code).unwrap();
         let python = std::env::var_os("VOXVULGI_TEST_PYTHON").unwrap_or_else(|| "python".into());
         let mut command = crate::cmd::command(python);
-        command.args(["-c", &code]);
+        command.arg(&fixture_script);
         let output =
             crate::cmd::run_owned_output(&mut command, std::time::Duration::from_secs(15), || {
                 false
