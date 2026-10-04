@@ -1528,6 +1528,26 @@
         "Fix and independently stabilize recorded FIFO timeout before exact final normalrunning-download acceptance",
         "Keep planned86running proof and allhistoricREDs; IN_PROGRESS retained"
       ]
+    },
+    {
+      "date": "2026-10-04",
+      "record_id": "WP-0333-NATIVE-WPR-TARGET-RED-20261004-001",
+      "status_retained": "IN_PROGRESS",
+      "note": "Fresh native WPR-target PK trial remains RED:529stdoutACK independently persisted529/1823reads/2writer_admission_timeout, all69protectedtables and exactfixture-derived dirty-trigger delta PASS, sourcebackup unchanged. Same example executableSHA a035df01da17a262c42f904bdf6fdc5191b066171f79f0ddfec1a66d4940d08d and exact runtime/factory hashes. Both timeout events1791111703740(request0-45) and1791111704961(request1-45) precede recording start1791111730757; this capture cannot explain those two failures. Within recording, writer0-167 admitted1791111802378/finished1791111804730, runtimeclose1898ms/nativeMAINxClose1897.3982ms; readers4-566 and3-569 admitted1791111802715/finished1791111804730, nativeMAINxClose2006.9792/2006.9327ms, while reader5-568 native xRead max2006.9443ms (total2007.6182ms). These are actual overlapping captured-phase witnesses, not OS-cause attribution. Operator approved oneUAC for reviewed collector; elevated ownedPID221944/namedinstance VV_WP0333_51c014496a87429aa57bb0213e3d04da/start0/capture90.0157577sec. Stop requested1791111822874; fresh opened receipt has advanced from merging to stopexit0 at1791112121242, collector CAPTURE_COMPLETE_ANALYSIS_PENDING at1791112156188, namedinstance gone/foreign sessions unchanged/noforcedstops. SavedETL4253024256bytes SHA d5e51526c4e8760770edd2349006191ed9080930cec23d502773f1b394d7649e; stop reports245893dropped events, so capture loss and analysis are explicit limitations. No complete ETL analysis or OS/APIretry/filter/preemption root cause claimed. Preserve500ms/PASSIVE/FULL/autocheckpoint0 policy and allhistoric RED/GREENs.86running acceptance prepared/unrun held until critical recorded failure fixed. Both WP0333/WP0323 IN_PROGRESS; no downstream runtime or DONE claim.",
+      "evidence": {
+        "summary": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_wpr_summary.json",
+        "owned": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_wpr_owned.json",
+        "independent": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_wpr_independent.json",
+        "events": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0333/20261004/production_owner_native_wpr_stdout.log",
+        "collector": ".local/proofWP333/wpr_capture_01/collector_receipt.json",
+        "start": ".local/proofWP333/wpr_capture_01/start_owned.json",
+        "stop": ".local/proofWP333/wpr_capture_01/stop_owned_only.json"
+      },
+      "remaining": [
+        "Loss-aware exactPID/time/path OS trace analysis; two failedrequests occurredbeforecapture",
+        "Evidence-grounded minimum remediation and independently stabilized FIFO failure",
+        "Final30minute selectedrunning acceptance remains held; planned86work retained"
+      ]
     }
   ],
   "native_probe_validation_20261004": {
