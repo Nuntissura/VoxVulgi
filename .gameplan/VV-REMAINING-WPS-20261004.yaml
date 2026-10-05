@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 40
+generation: 41
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -61,3 +61,4 @@ steps:
 - {id: GP-045, role: any, at: before_round, do: verify scoped Rust changes exclude unrelated formatter churn, check: {type: confirm}, source: 'mistake: whole-file rustfmt expanded existing unrelated jobs formatting; transplant only DIAG changes', state: active}
 - {id: GP-046, role: any, at: before_round, do: require owned bridge token replay gate, check: {type: file, path: .local/wp0329_mux_replay_native.py, exists: true}, source: 'cause: replay01 HTTP403 omitted bridge token; fresh02 preserves failed01', state: active}
 - {id: GP-047, role: any, at: before_round, do: require canonical subtitle language replay metadata, check: {type: file, path: .local/wp0329_mux_replay_native.py, exists: true}, source: 'cause: replay02 used raw en ko instead of exact production eng kor; fresh03 preserves02', state: active}
+- {id: GP-048, role: any, at: before_round, do: verify portable vendor patch root stays anchored to selected interpreter layout, check: {type: file, path: product/engine/src/vendor_patches.rs, contains: 'let venv_dir = environment_root_from_python(python)?;'}, source: 'cause: portable python parent.parent falsely reported existing OpenVoice patch missing', state: active}

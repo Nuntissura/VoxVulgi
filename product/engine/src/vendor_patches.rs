@@ -150,10 +150,7 @@ fn openvoice_api_patch_applied_text(text: &str) -> bool {
 }
 
 fn site_package_file_from_venv_python(python: &Path, relative: &[&str]) -> Result<PathBuf> {
-    let venv_dir = python
-        .parent()
-        .and_then(|p| p.parent())
-        .ok_or_else(|| EngineError::InstallFailed("invalid venv python path".to_string()))?;
+    let venv_dir = environment_root_from_python(python)?;
 
     let mut candidates: Vec<PathBuf> = Vec::new();
     if cfg!(windows) {
@@ -194,9 +191,52 @@ fn site_package_file_from_venv_python(python: &Path, relative: &[&str]) -> Resul
         })
 }
 
+fn environment_root_from_python(python: &Path) -> Result<&Path> {
+    let invalid = || EngineError::InstallFailed("invalid venv python path".to_string());
+    let parent = python.parent().ok_or_else(invalid)?;
+    let directory = parent.file_name().and_then(|value| value.to_str()).ok_or_else(invalid)?;
+    let executable = python.file_name().and_then(|value| value.to_str()).ok_or_else(invalid)?;
+    if directory.eq_ignore_ascii_case("Scripts") && executable.eq_ignore_ascii_case("python.exe")
+        || directory == "bin" && executable == "python"
+    {
+        return parent.parent().ok_or_else(invalid);
+    }
+    if directory.starts_with("runtime_") && executable.eq_ignore_ascii_case("python.exe") {
+        return Ok(parent);
+    }
+    Err(invalid())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vendor_patch_environment_root_matches_python_layout() {
+        assert_eq!(environment_root_from_python(Path::new("managed/runtime_main/python.exe")).unwrap(), Path::new("managed/runtime_main"));
+        assert_eq!(environment_root_from_python(Path::new("managed/venv/Scripts/python.exe")).unwrap(), Path::new("managed/venv"));
+        assert_eq!(environment_root_from_python(Path::new("managed/venv/bin/python")).unwrap(), Path::new("managed/venv"));
+        assert!(environment_root_from_python(Path::new("managed/other/python.exe")).is_err());
+        assert!(environment_root_from_python(Path::new("managed/runtime_main/other.exe")).is_err());
+    }
+
+    #[test]
+    fn vendor_patch_lookup_never_uses_foreign_parent_package() {
+        let fixture = tempfile::tempdir().unwrap();
+        let root = fixture.path().join("runtime_main");
+        let relative = &["openvoice", "api.py"];
+        let foreign = fixture.path().join("Lib/site-packages/openvoice");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("api.py"), "foreign").unwrap();
+        assert!(site_package_file_from_venv_python(&root.join("python.exe"), relative).is_err());
+        let local = root.join("Lib/site-packages/openvoice");
+        std::fs::create_dir_all(&local).unwrap();
+        std::fs::write(local.join("api.py"), "local").unwrap();
+        if cfg!(windows) {
+            assert_eq!(site_package_file_from_venv_python(&root.join("python.exe"), relative).unwrap(), local.join("api.py"));
+            assert_eq!(site_package_file_from_venv_python(&root.join("Scripts/python.exe"), relative).unwrap(), local.join("api.py"));
+        }
+    }
 
     #[test]
     fn webrtcvad_patch_is_idempotent() {
