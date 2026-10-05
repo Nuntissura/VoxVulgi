@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: WP-0230B-VALIDATE-20261006
 parent: null
-generation: 5
+generation: 11
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -30,3 +30,9 @@ steps:
 - {id: GP-014, role: any, at: before_round, do: verify transfer command lock temporary drops before local step, check: {type: file, path: product/engine/src/phase2_transfer_live.rs, contains: let scope = if let Ok(mut latest)}, source: engine01 compiler E0597 end-expression mutex guard outlives step, state: active}
 - {id: GP-015, role: any, at: before_round, do: require wheel download into isolated target instead of metadata-only pip dry-run, check: {type: file, path: .local/wp0230b_actual_adapters_20261006_v2.py, contains: --target}, source: Actual adapters01 pip dry-run exited0 after metadata without downloading wheel, state: active}
 - {id: GP-016, role: any, at: before_round, do: verify task board UTF8 read, check: {type: file, path: .local/record_wp0230b_validation_20261006.py, contains: board.read_text(encoding='utf-8')}, source: 'Record helper cp1252 read failed; corrected explicit UTF8; gameplan read verb rejected, corrected verify', state: active}
+- {id: GP-017, role: any, at: before_round, do: require accepted HEAD confirmations before native dispatch, check: {type: confirm}, source: UI01 gate refused; overlong confirmation note rejected before dispatch; no tests ran, state: active}
+- {id: GP-018, role: any, at: before_round, do: require mounted UI audit before original installer action, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/original_pair_01/after_mount_audit.json, exists: true}, source: Pair01 request preceded UI listener; later same PID audit passed; file gate requires explicit exists, state: active}
+- {id: GP-019, role: any, at: before_round, do: require sustained byte baseline independent from fluctuating ETA, check: {type: file, path: .local/wp0230b_pair_viewport_20261006_v3.py, contains: and eligible(live)}, source: Continuous ETA rejected actual27second transfer; stable bytes separated; shortened rejected overlong source, state: active}
+- {id: GP-020, role: any, at: before_round, do: verify existing shipped Cosy backend input before private repair, check: {type: file, path: offline-installer-runtime/qualified_runtime/runtime_7ea19cb688095cd14dfbc84e/generation/voice_backends/cosyvoice/cosyvoice/cli/cosyvoice.py, exists: true}, source: Fresh test omitted shipped Cosy code; broad buildtree search interrupted; known authority source used, state: active}
+- {id: GP-021, role: any, at: before_round, do: require SHA hexadecimal case normalization and durable copy errors, check: {type: file, path: .local/wp0230b_cosy_backend_code_input_20261006_v2.py, contains: .lower()}, source: Backendinput01 rejected same SHA case beforecopy; v2 fixes comparison and records exception receipts, state: active}
+- {id: GP-022, role: any, at: before_round, do: require canonical restart restore before original repair action, check: {type: file, path: product/desktop/src/lib/phase2InstallRestore.ts, contains: job.id !== id}, source: Repair hidden after restart because failure state transient; exact canonical reread restores existing UI, state: active}

@@ -230,3 +230,20 @@ test("Localization voice setup exposes exact quiet activation of its original tr
   assert.equal(requireExpectedProductActionId(actionId, actionId), actionId);
   assert.throws(() => requireExpectedProductActionId(actionId, "diagnostics.phase2.install"));
 });
+
+test("Localization failure repair exposes its exact original action without bypassing disabled guards", () => {
+  const source = readRepoFile("src", "App.tsx");
+  const actionId = "localization.voice-setup.repair";
+  const declaration = source.indexOf(`data-agent-action-id="${actionId}"`);
+  assert.notEqual(declaration, -1);
+  const button = source.slice(source.lastIndexOf("<button", declaration), source.indexOf("</button>", declaration));
+  assert.match(button, /disabled=\{voiceSetupActionDisabled\}/);
+  assert.match(button, /data-agent-effect-class="reversible_state_change"/);
+  assert.match(button, /queueVoiceCloningSetup\("repair"\)/);
+  assert.doesNotMatch(button, /data-agent-safe-action/);
+  assert.deepEqual(classifySafeAgentActions("button", "button", false, false, actionId, "reversible_state_change"), ["scroll_into_view", "activate_product_action"]);
+  assert.equal(requireExpectedProductActionId(actionId, actionId), actionId);
+  assert.throws(() => requireExpectedProductActionId(actionId, "localization.voice-setup.install"));
+  const bridge = readRepoFile("src", "lib", "agentUiAudit.ts");
+  assert.match(bridge, /if \(before\.disabled\) throw new Error\(`refused disabled control:/);
+});

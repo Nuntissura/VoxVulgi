@@ -14,7 +14,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import html2canvas from "html2canvas";
 import "./App.css";
-import { usePhase2Transfer } from "./lib/usePhase2Transfer";
+import { usePhase2Transfer, type Phase2TransferStatus } from "./lib/usePhase2Transfer";
+import { restorePhase2Install, type Phase2RestoreLatest } from "./lib/phase2InstallRestore";
 import { useDesktopActivity, usePageActivity, usePollingLoop } from "./lib/activity";
 import {
   diagnosticsTrace,
@@ -1040,6 +1041,7 @@ function LocalizationStudioHome({
   const [voiceSetupEstimate, setVoiceSetupEstimate] = useState<LocalizationVoiceSetupEstimate | null>(null);
   const [voiceSetupStatusError, setVoiceSetupStatusError] = useState<string | null>(null);
   const [voiceSetupJob, setVoiceSetupJob] = useState<PendingImportJobRow | null>(null);
+  const voiceSetupRestoreGeneration = useRef(0);
   const voiceTransfer = usePhase2Transfer(voiceSetupJob?.id ?? null, pageVisible);
   const voiceSetupReadOwner = useRef({ id: voiceSetupJob?.id ?? null, visible: pageVisible, mounted: true });
   voiceSetupReadOwner.current = { ...voiceSetupReadOwner.current, id: voiceSetupJob?.id ?? null, visible: pageVisible };
@@ -1172,6 +1174,28 @@ function LocalizationStudioHome({
     void refreshVoiceSetupStatus();
   }, [pageVisible, refreshVoiceSetupStatus]);
 
+  useEffect(() => {
+    if (!pageVisible || voiceSetupReadOwner.current.id) return;
+    const generation = ++voiceSetupRestoreGeneration.current;
+    let live = true;
+    const mayCommit = () => live && voiceSetupRestoreGeneration.current === generation &&
+      voiceSetupReadOwner.current.mounted && voiceSetupReadOwner.current.visible && !voiceSetupReadOwner.current.id;
+    void restorePhase2Install(
+      () => invoke<Phase2RestoreLatest>("tools_phase2_packs_install_latest_state"),
+      (jobId) => invoke<Phase2TransferStatus>("tools_phase2_transfer_status", { jobId }),
+      (job) => {
+        if (job.status === "failed") {
+          setVoiceSetupFailure(job.error ? summarizeErrorMessage(job.error) : "No error detail was recorded.");
+        } else {
+          setVoiceSetupFailure(null);
+          setVoiceSetupJob(job);
+        }
+      },
+      mayCommit,
+    ).catch(() => {});
+    return () => { live = false; };
+  }, [pageVisible]);
+
   // WP-0245: detect a paused job queue so a user who clicked "Pause all"
   // earlier (or whose queue stayed paused after a prior session) cannot be
   // silently blocked — the Hearin and Miyeon dub jobs both sat in `queued`
@@ -1207,6 +1231,7 @@ function LocalizationStudioHome({
   }, []);
 
   async function queueVoiceCloningSetup(action: "setup" | "repair") {
+    ++voiceSetupRestoreGeneration.current;
     setVoicePackBusy(true);
     setError(null);
     setNotice(null);
@@ -2102,7 +2127,7 @@ function LocalizationStudioHome({
                     <strong>What to try next</strong>
                     <span>{voiceSetupFailure}</span>
                     <span>Check that the app-data drive has free space, then queue a tracked repair. Existing media and preferences are kept.</span>
-                    <button type="button" disabled={voiceSetupActionDisabled} onClick={() => void queueVoiceCloningSetup("repair")}>
+                    <button type="button" disabled={voiceSetupActionDisabled} data-agent-action-id="localization.voice-setup.repair" data-agent-effect-class="reversible_state_change" onClick={() => void queueVoiceCloningSetup("repair")}>
                       Repair voice cloning
                     </button>
                   </div>
