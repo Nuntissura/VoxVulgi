@@ -47,7 +47,12 @@ test("WP-0229 skips satisfied packs and preserves an explicit all-pack force pat
   assert.match(bridge, /force: Option<bool>[\s\S]{0,180}force\.unwrap_or\(false\)/);
   assert.match(diagnostics, /onClick=\{\(\) => enqueueInstallPhase2Packs\(false\)\}/);
   assert.match(diagnostics, /onClick=\{\(\) => enqueueInstallPhase2Packs\(true\)\}[\s\S]{0,100}Force reinstall all packs/);
-  assert.match(diagnostics, /invoke\("jobs_enqueue_install_phase2_packs_v1", \{ force \}\)/);
+  const enqueueStart = diagnostics.indexOf("async function enqueueInstallPhase2Packs(");
+  const enqueueEnd = diagnostics.indexOf("\n  async function ", enqueueStart + 1);
+  assert.ok(enqueueStart >= 0 && enqueueEnd > enqueueStart);
+  const enqueue = diagnostics.slice(enqueueStart, enqueueEnd);
+  assert.match(enqueue, /if \(!ok \|\| !installConfirmationGate\.canStart\(\)\) return/);
+  assert.match(enqueue, /await invoke(?:<[^\n]+>)?\("jobs_enqueue_install_phase2_packs_v1", \{ force \}\)/);
 });
 
 test("WP-0228 preserves only still-valid completed steps when resuming", () => {
