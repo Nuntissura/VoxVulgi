@@ -41,7 +41,7 @@ test("qualification creates reusable non-solid self-contained runtime artifacts 
   assert.match(source, /runtime_main/);
   assert.match(source, /runtime_cosyvoice/);
   assert.match(source, /python\*\._pth/);
-  assert.match(source, /python\[0-9\]\[0-9\]\[0-9\]\.dll/);
+  assert.ok(source.includes(String.raw`'^python[0-9]{3}\.dll$'`));
   assert.match(source, /'Lib', 'DLLs', 'Lib\\site-packages', 'import site'/);
   assert.match(source, /-ms=off/);
   assert.match(source, /QUALIFIED_RUNTIME_REUSED/);

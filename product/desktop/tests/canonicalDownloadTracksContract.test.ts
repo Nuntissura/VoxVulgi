@@ -42,7 +42,9 @@ test("single-video queue and Jobs progress use bounded element-level projections
 
   assert.match(library, /invoke<JobsTrackActivityPage>\("jobs_track_activity"/);
   assert.match(library, /youtube-single-live-job-/);
-  assert.match(library, /intervalMs:\s*\(youtubeSingleActivityPage\?\.active_total \?\? 0\) > 0 \? 750 : 2_500/);
+  assert.match(library, /const\s+singleActivityPageSize\s*=\s*100;/);
+  assert.match(library, /"jobs_track_activity",\s*\{\s*track:\s*"youtube_single",\s*limit:\s*singleActivityPageSize,\s*offset:\s*youtubeSingleActivityOffset,/);
+  assert.match(library, /usePollingLoop\(\s*async \(\) => \{\s*await refreshYoutubeSingleActivity\(\);\s*\},\s*\{\s*enabled: visible && showVideoIngest && videoArchiverTab === "youtube_single",\s*intervalMs: 5_000,/);
   assert.match(jobs, /invoke<JobRow\[]>\("jobs_progress_many"/);
   assert.match(jobs, /ACTIVE_JOB_PROGRESS_POLL_INTERVAL_MS\s*=\s*750/);
   assert.match(engine, /--progress-template/);

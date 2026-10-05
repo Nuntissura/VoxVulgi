@@ -192,7 +192,7 @@ test("stale fast-release entrypoint stays deleted and the guide names only the p
   assert.equal(existsSync(stalePath), false);
   assert.match(guide, /invalid, unwanted stale artifact/i);
   assert.match(guide, /scripts\/package_offline_release\.ps1/i);
-  assert.match(guide, /only authorized commands are the two explicit entrypoints/i);
+  assert.match(guide, /only authorized qualification and packaging commands are the two explicit entrypoints/i);
   assert.match(cleanupSource, /Get-BoundDirectoryIdentities/);
   assert.match(cleanupSource, /Current ownership marker SHA-256 mismatch/);
 });

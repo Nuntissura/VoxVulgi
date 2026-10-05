@@ -11,6 +11,13 @@ const diagnostics = readFileSync(join(desktopRoot, "src", "pages", "DiagnosticsP
 const jobs = readFileSync(join(repoRoot, "product", "engine", "src", "jobs.rs"), "utf8");
 const tools = readFileSync(join(repoRoot, "product", "engine", "src", "tools.rs"), "utf8");
 
+function priorDoneCarryBlock() {
+  const start = jobs.indexOf("if let Some(prior) = prior_done_steps");
+  const end = jobs.indexOf('status: "queued".to_string()', start);
+  assert.ok(start >= 0 && end > start, "prior-done carry must precede queued fallback");
+  return jobs.slice(start, end);
+}
+
 test("WP-0228 keeps Phase 2 installation operator-triggered", () => {
   assert.doesNotMatch(bridge, /phase2_auto_install_enqueue/);
   assert.doesNotMatch(bridge, /should_auto_install_phase2\s*\(/);
@@ -32,7 +39,10 @@ test("WP-0229 skips satisfied packs and preserves an explicit all-pack force pat
     assert.match(tools, new RegExp(`pub fn ${wrapper}\\b`), `${wrapper} must exist`);
   }
   assert.match(jobs, /#\[serde\(default\)\]\s*force: bool/);
-  assert.match(jobs, /filter\(\|_\| !p\.force && tools::phase2_pack_step_satisfied/);
+  const carry = priorDoneCarryBlock();
+  assert.match(carry, /\.filter\(\|_\| \{\s*if p\.force \{ return false; \}/);
+  assert.match(carry, /let satisfied = tools::phase2_pack_step_satisfied\(paths, &item\.id\);/);
+  assert.match(carry, /\n\s*satisfied\s*\}\)/);
   assert.match(jobs, /if p\.force[\s\S]{0,180}install_spleeter_pack\(paths\)[\s\S]{0,180}install_spleeter_pack_if_needed\(paths\)/);
   assert.match(bridge, /force: Option<bool>[\s\S]{0,180}force\.unwrap_or\(false\)/);
   assert.match(diagnostics, /onClick=\{\(\) => enqueueInstallPhase2Packs\(false\)\}/);
@@ -43,8 +53,8 @@ test("WP-0229 skips satisfied packs and preserves an explicit all-pack force pat
 test("WP-0228 preserves only still-valid completed steps when resuming", () => {
   assert.match(jobs, /read_to_string\(&latest_path\)[\s\S]{0,500}filter\(\|s\| s\.status == "done"\)/);
   assert.match(
-    jobs,
-    /prior_done_steps[\s\S]{0,800}phase2_pack_step_satisfied\(paths, &item\.id\)[\s\S]{0,500}status: "done"\.to_string\(\)/,
+    priorDoneCarryBlock(),
+    /\.filter\(\|_\| \{[\s\S]*?let satisfied = tools::phase2_pack_step_satisfied\(paths, &item\.id\);[\s\S]*?\n\s*satisfied\s*\}\)[\s\S]*?status: "done"\.to_string\(\)/,
   );
   assert.match(jobs, /if state\.steps\[step_index\]\.status == "done"[\s\S]{0,80}continue/);
 });

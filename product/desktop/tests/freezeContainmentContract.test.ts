@@ -146,7 +146,8 @@ test("Jobs landing view is bounded, current-work-first, and receipt-linked", () 
     /const\s+visibleJobIds\s*=\s*queued[\s\S]{0,500}Job \$\{visibleJobIds\.join/,
     "single-video enqueue must return durable job IDs in its receipt",
   );
-  assert.match(librarySource, /Queued and downloading/);
+  assert.match(librarySource, /id="youtube-single-live-queue"/);
+  assert.match(librarySource, /youtubeSingleActivityPage\s*\?\s*`\$\{youtubeSingleActivityPage\.running\} downloading · \$\{youtubeSingleActivityPage\.queued\} queued`\s*:\s*"Loading active single videos…"/);
 });
 
 test("Jobs context hydration is page-visible and fan-out bounded", () => {
@@ -707,10 +708,11 @@ test("visual debugger snapshots capture a bounded app viewport under load", () =
 test("read-only SQLite UI connections fail fast on DB contention", () => {
   const dbSource = readRepoFile("..", "engine", "src", "db.rs");
   const runtimeSource = readRepoFile("..", "engine", "src", "database_runtime.rs");
-  const openReadonlyRawStart = dbSource.indexOf("fn open_readonly_raw");
+  const openReadonlyRaw = dbSource.match(/^fn open_readonly_raw\b[^\{]*\{[\s\S]*?^\}/m);
+  assert.ok(openReadonlyRaw, "the governed read-only connection factory must exist");
   const openReadonlyStart = dbSource.indexOf("pub fn open_readonly");
   const migrateStart = dbSource.indexOf("pub fn migrate");
-  const openReadonlyRawBlock = dbSource.slice(openReadonlyRawStart, openReadonlyStart);
+  const openReadonlyRawBlock = openReadonlyRaw[0];
   const openReadonlyBlock = dbSource.slice(openReadonlyStart, migrateStart);
 
   assert.match(

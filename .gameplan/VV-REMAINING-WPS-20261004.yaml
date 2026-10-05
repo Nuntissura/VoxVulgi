@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 77
+generation: 79
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -97,3 +97,5 @@ steps:
 - {id: GP-081, role: any, at: before_round, do: verify multiline inventory parser consumes retained successful native test listing without rerun, check: {type: confirm}, source: 'parser RED: discovery105 exit0 but anchored re.findall omitted re.M; reuse actual stdout', state: active}
 - {id: GP-082, role: any, at: before_round, do: verify manual command constants and readiness summary assertions match current product behavior, check: {type: confirm}, source: 'frontend RED: recovery schema omitted const; readiness test demanded obsolete journal branch', state: active}
 - {id: GP-083, role: any, at: before_round, do: require fresh desktop compiler proof when embedded manual JSON changes, check: {type: confirm}, source: 'dependency check: Rust include_str embeds manual; old desktop105 cannot prove new manual', state: active}
+- {id: GP-084, role: any, at: before_round, do: require UTF8-safe console rendering after native test receipts are saved, check: {type: confirm}, source: harness console cp1252 failed printing checkmark after frontend child exit0; retain green log, state: active}
+- {id: GP-085, role: any, at: before_round, do: verify source contracts scope current functions and preserve approved behavior guards, check: {type: confirm}, source: 'full contracts RED7 stale matchers: approved text cadence and scoped factories differ from old assertions', state: active}
