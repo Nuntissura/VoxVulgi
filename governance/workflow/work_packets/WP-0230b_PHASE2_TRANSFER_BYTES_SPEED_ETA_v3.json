@@ -10,7 +10,7 @@
   },
   "parent_wp": "WP-0230",
   "consumer_wp": "WP-0235",
-  "operator_authorization": "Operator 2026-10-05: focus on WP-0230b and work and finish it; preceding stop-testing instruction remains in effect",
+  "operator_authorization": "Operator 2026-10-05: focus on WP-0230b and finish; 2026-10-06: validate. Testing authorized for this packet; offline ISO excluded.",
   "source_head": "f692cadf864402736042875a22a763d68a7938b3",
   "scope": [
     "WP0230 original base five honest headlines, real completed-step progress, per-pack icon and one-second elapsed display remain required.",
@@ -135,28 +135,103 @@
       "HF and pip numeric callbacks include shared Windows boot tick; absent/future/stale clock age refuses speed and ETA while retaining bytes.",
       "UI independently expires speed and ETA at remaining freshness deadline even when subsequent singleflight read remains pending; canonical status/bytes retained."
     ],
-    "tests": "Owning source-clock delayed/future/failure, true original generator delegation/close, UI pending-read expiry and visibility cleanup tests written but UNRUN."
+    "tests": "Owning helper, engine and frontend cases passed in 20261006 proof batch; packaged pending/IPC delay boundary still required."
   },
   "refinement_proposal_sha256": "77cc95787c7e3b10b703608c1de678f59fa8d43b2006a32b594c7812b58b2289",
   "correction_10": {
     "reason": "Source age sampled before IPC delivery; recording receipt time alone omits transport and can relabel old sample fresh.",
     "control": "Actual shared poller measures monotonic request-start to resolve elapsed and conservatively adds full duration to source age before commit. Missing/nonfinite/backward clock refuses rate/ETA, bytes and canonical status preserved. Existing independent local expiry remains.",
-    "proof": "Owning actual poller delayed-resolution plus invalid-clock negatives written UNRUN; actual packaged React pending/IPC delay remains required.",
+    "proof": "Owning poller delayed-resolution and invalid-clock tests passed; actual packaged React pending/IPC delay remains required.",
     "callback_clock_order": "Capture boot tick first, then counter/monotonic frame fields; later preparation delay counts against freshness.",
     "genuine_retry": "Original shared bar remains; nonwaiting telemetry-only generation/baseline reset+gap on genuine recursive context preserves A03."
   },
   "taskboard": "governance/workflow/TASK_BOARD.md#WP-0230b",
   "verification_execution": {
-    "status": "NOT_RUN_BY_OPERATOR_DIRECTION",
-    "reason": "Operator stopped testing on 2026-10-05",
-    "completion_limit": "Implementation does not establish packaged runtime acceptance or authorize DONE"
+    "status": "PARTIAL_VALIDATION_NEEDS_RUNTIME_PROOF",
+    "date": "2026-10-06",
+    "source_head": "addc6f5fb5d66616ce56f68dd8562eede40a5e3e",
+    "proof_root": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006",
+    "results": {
+      "focused_02": {
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/focused_02/result.json",
+        "sha256": "fedcc9a682bae599a3605dee39a582a72410ba13e7e49c0b52c839e0c07f900e",
+        "status": "PASS"
+      },
+      "engine_02": {
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/engine_02/result.json",
+        "sha256": "32495196f153ecb88858b3723eb981597679a9f10c691d58d2b333e0cd0a2383",
+        "status": "PASS"
+      },
+      "frontend_01": {
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/frontend_01/result.json",
+        "sha256": "22eba9d8034aebc6bdac04b715be4be06552e6f48c443e455570a1b0e48f1a8d",
+        "status": "PASS"
+      },
+      "cmd_01": {
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/cmd_01/result.json",
+        "sha256": "019d07ccdb7f7c3d58b27930400f26a5bc120db70eb48f37babf1fe70cf8c4cd",
+        "status": "PASS"
+      },
+      "core_01": {
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/core_01/result.json",
+        "sha256": "890bf2791711f9770ffd97995c593f1ce906ddc82696e1d23e6226386e8ff61e",
+        "status": "PASS"
+      },
+      "boundary_01": {
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/boundary_01/result.json",
+        "sha256": "a0af8c3886ec43f5aae081ab1f3f3c1c0df3f6e7ccd6b04f72a037ac4f074abd",
+        "status": "PASS_READONLY_BOUNDARY_LIVE_TRANSFER_NOT_PROVEN"
+      },
+      "actual_adapters_02": {
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/actual_adapters_02/result.json",
+        "sha256": "92f2ac22800f62ba3f605ae35945d30ab94890c40d51b127cc6e0150af0ae783",
+        "status": "PASS_ACTUAL_ADAPTERS_NOT_FULL_INSTALLER_UI",
+        "observations": [
+          {
+            "name": "pip_real_wheel_dry_run",
+            "exit_code": 0,
+            "live_positive_updates": 50
+          },
+          {
+            "name": "hf_real_model_cold",
+            "exit_code": 0,
+            "live_positive_updates": 2
+          },
+          {
+            "name": "hf_same_model_cached",
+            "exit_code": 0,
+            "live_positive_updates": 0
+          }
+        ],
+        "source_modules_preserved": true,
+        "verified_model_sha256": "a6ac6a63997761ae2997373e2ee1c47040854b4b759ea41ec48e4e42df0f4d73"
+      }
+    },
+    "artifacts": {
+      "desktop": {
+        "path": "product/desktop/build_target/Current/release/desktop.exe",
+        "sha256": "a6c818f47fa4a83a7e15755b5ebf973b73740f7f8b84900269d57bc6742e73c1",
+        "bytes": 60808704
+      },
+      "installer": {
+        "path": "product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.205_x64-setup.exe",
+        "sha256": "891c9fde4250e12683e7bfec84750c9ada79e03ea71b7acada3db261e3cdfbfd",
+        "bytes": 234123145
+      }
+    },
+    "remaining": [
+      "A07: same genuine tracked Phase2 installation with paired Diagnostics/Localization transfer pixels, audit, dump and canonical attempt/journal.",
+      "Full original installer resume/cancel/concurrency and Cosy interpreter boundary proof remain unexecuted.",
+      "Parent WP0230 genuine crash/recovery acceptance remains separate and unproven by this batch."
+    ],
+    "completion_limit": "No DONE: real paired installer GUI and remaining original production boundary proof not established."
   },
   "implementation": {
     "status": "IMPLEMENTED",
     "date": "2026-10-05",
     "files": "19 product files: engine observers/adapters, Tauri and bridge readback, shared frontend feed and both consumers",
     "preservation": "f692cad initial0/M and CSS/native progress retained; original install and assigned0.1.205 unchanged",
-    "tests": "Prepared owning regression cases present, not executed",
-    "installed": "No new build or installation"
+    "tests": "Focused and desktop contract checks passed; see verification_execution. Compile lifetime remediation addc6f5 passed engine and canonical core build.",
+    "installed": "Current app/core and standard NSIS installer built at unchanged0.1.205; Current executable tested headless in disposable root. Operator installation not updated."
   }
 }
