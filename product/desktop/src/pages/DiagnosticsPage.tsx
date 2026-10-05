@@ -1,5 +1,6 @@
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { phase2AdmissionView, type Phase2Admission, type Phase2CanonicalInstall } from "../lib/phase2Admission";
 import { createDiagnosticsInstallConfirmation } from "../lib/diagnosticsInstallConfirmation";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { usePollingLoop } from "../lib/activity";
@@ -134,6 +135,7 @@ type Phase2InstallLatestState = {
   active?: boolean;
   stale?: boolean;
   job_status?: string | null;
+  canonical_install?: Phase2CanonicalInstall | null;
 };
 
 type SpleeterPackStatus = {
@@ -1171,6 +1173,14 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const [portablePython, setPortablePython] = useState<PortablePythonStatus | null>(null);
   const [phase2Plan, setPhase2Plan] = useState<Phase2PackPlanItem[] | null>(null);
   const [phase2Latest, setPhase2Latest] = useState<Phase2InstallLatestState | null>(null);
+  const [phase2Admission, setPhase2Admission] = useState<Phase2Admission | null>(null);
+  const phase2AdmissionRef = useRef<Phase2Admission | null>(null);
+  const phase2CanonicalGenerationRef = useRef<DemandGeneration | null>(null);
+  const [phase2ObservationNotice, setPhase2ObservationNotice] = useState<{ id: string; label: string } | null>(null);
+  const observePhase2Admission = useCallback((value: Phase2Admission | null) => {
+    phase2AdmissionRef.current = value;
+    setPhase2Admission(value);
+  }, []);
   const [spleeter, setSpleeter] = useState<SpleeterPackStatus | null>(null);
   const [demucs, setDemucs] = useState<DemucsPackStatus | null>(null);
   const [diarization, setDiarization] = useState<DiarizationPackStatus | null>(null);
@@ -1597,16 +1607,17 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           if (readGeneration) commitDemandResult(readGeneration, () => { setPhase2Plan(value); });
           return value;
         }),
-        nextPhase2Latest: () => invoke<Phase2InstallLatestState>("tools_phase2_packs_install_latest_state").then((value) => {
-          if (readGeneration) commitDemandResult(readGeneration, () => { setPhase2Latest(value); });
+        nextPhase2Latest: () => invoke<Phase2InstallLatestState>("tools_phase2_packs_install_latest_state", phase2AdmissionRef.current ? { jobId: phase2AdmissionRef.current.id } : undefined).then((value) => {
+          if (readGeneration) commitDemandResult(readGeneration, () => { phase2CanonicalGenerationRef.current = readGeneration; setPhase2Latest(value); });
           return value;
         }),
         }, "phase2", force, (values) => {
           if (values.nextPhase2Plan !== undefined) setPhase2Plan(values.nextPhase2Plan);
-          if (values.nextPhase2Latest !== undefined) setPhase2Latest(values.nextPhase2Latest);
+          if (values.nextPhase2Latest !== undefined) { phase2CanonicalGenerationRef.current = readGeneration; setPhase2Latest(values.nextPhase2Latest); }
         });
       commitDemandResult(generation, () => {
         setPhase2Plan(value.nextPhase2Plan);
+        phase2CanonicalGenerationRef.current = generation;
         setPhase2Latest(value.nextPhase2Latest);
       });
     } catch (e) {
@@ -1815,10 +1826,15 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     [loadBuildSection, loadJobsSection, loadPhase2Section, loadStorageSection, loadToolsSection, loadTraceSection],
   );
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (discoverPhase2 = true) => {
+    // Explicit Refresh discovers canonical unfinished work instead of pinning a past attempt.
+    if (discoverPhase2) {
+      phase2CanonicalGenerationRef.current = null;
+      observePhase2Admission(null);
+    }
     setError(null);
     await Promise.all([...sectionDemandLoaders.values()].map((loadSection) => loadSection(true)));
-  }, [sectionDemandLoaders]);
+  }, [sectionDemandLoaders, observePhase2Admission]);
 
   useEffect(() => {
     if (!visible) return;
@@ -1838,7 +1854,10 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         },
       ]),
     ) as Record<DiagnosticsSectionKey, DiagnosticsSectionStatus>);
+    phase2CanonicalGenerationRef.current = null;
+    observePhase2Admission(null);
     void loadBuildSection();
+    void loadPhase2Section(true);
     const observer = typeof IntersectionObserver === "undefined"
       ? null
       : new IntersectionObserver((entries) => {
@@ -1863,12 +1882,14 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
       observer.observe(element);
     }
     return () => {
+      phase2CanonicalGenerationRef.current = null;
+      observePhase2Admission(null);
       observer?.disconnect();
       youtubeProtectionRequestRef.current += 1;
       diagnosticsDemandCoordinator.cancelGeneration(generation);
       if (demandGenerationRef.current === generation) demandGenerationRef.current = null;
     };
-  }, [visible, loadBuildSection, sectionDemandLoaders]);
+  }, [visible, loadBuildSection, loadPhase2Section, observePhase2Admission, sectionDemandLoaders]);
 
   const modelGroups = useMemo(() => {
     const models = inventory?.models ?? [];
@@ -1985,10 +2006,29 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   // while the install is in flight. Ticks only when there's something to count.
   const [phase2NowMs, setPhase2NowMs] = useState<number>(Date.now());
   useEffect(() => {
-    if (!phase2HasActive) return;
+    if (!phase2HasActive && !phase2Admission) return;
     const id = window.setInterval(() => setPhase2NowMs(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, [phase2HasActive]);
+  }, [phase2HasActive, phase2Admission]);
+
+  const phase2AdmissionStatus = phase2AdmissionView(phase2Admission, phase2Latest?.canonical_install, phase2Latest?.state?.job_id, phase2NowMs);
+  const phase2HistoryIsPrevious = phase2Admission
+    ? phase2AdmissionStatus.previous
+    : !!phase2ObservationNotice && phase2Latest?.state?.job_id !== phase2ObservationNotice.id;
+  useEffect(() => {
+    if (!visible || phase2CanonicalGenerationRef.current !== demandGenerationRef.current) return;
+    const canonical = phase2Latest?.canonical_install;
+    if (!phase2Admission && canonical && (canonical.status === "queued" || canonical.status === "running")) {
+      setPhase2ObservationNotice(null);
+      observePhase2Admission({ id: canonical.id, attempt_no: canonical.attempt_no, force: canonical.force, held: canonical.held, observedAtMs: Date.now() });
+    } else if (phase2Admission && phase2AdmissionStatus.terminal) {
+      setPhase2ObservationNotice({ id: phase2Admission.id, label: phase2AdmissionStatus.label ?? `Installer ${phase2Admission.id} attempt ${phase2Admission.attempt_no} ${canonical!.status}.` });
+      phase2CanonicalGenerationRef.current = null;
+      observePhase2Admission(null);
+      // Preserve the terminal notice/history while discovering another genuine admission once.
+      if (visible) void loadPhase2Section(true);
+    }
+  }, [phase2Latest, phase2Admission, phase2AdmissionStatus.terminal, phase2AdmissionStatus.label, observePhase2Admission, loadPhase2Section, visible]);
 
   const phase2HeadlineKind = useMemo(
     () =>
@@ -2032,7 +2072,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     {
       // Logical page visibility keeps quiet mounted WebViews current without focus.
       // The existing demand group serializes reads and rejects detached generations.
-      enabled: visible && phase2HasActive,
+      enabled: visible && (phase2Admission ? phase2AdmissionStatus.poll : phase2HasActive),
       intervalMs: 1000,
     },
   );
@@ -2355,11 +2395,13 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         : "Queued Voice cloning packages installer. Already-installed packs will be skipped; see progress below.",
     );
     try {
-      const admitted = await invoke<{ id: string; install_dispatch?: { held: boolean; runner_start_error?: string | null; queue_error?: string | null } }>("jobs_enqueue_install_phase2_packs_v1", { force });
+      const admitted = await invoke<{ id: string; attempt_no: number; install_dispatch?: { held: boolean; runner_start_error?: string | null; queue_error?: string | null } }>("jobs_enqueue_install_phase2_packs_v1", { force });
+      setPhase2ObservationNotice(null);
+      observePhase2Admission({ id: admitted.id, attempt_no: admitted.attempt_no, force, held: !!admitted.install_dispatch?.held, observedAtMs: Date.now() });
       if (admitted.install_dispatch?.held) {
         setNotice(`Original installer ${admitted.id} is queued and held: ${admitted.install_dispatch.runner_start_error ?? admitted.install_dispatch.queue_error ?? "global queue remains paused"}.`);
       }
-      await refresh();
+      await refresh(false);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -4752,8 +4794,9 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         {/* WP-0230: honest progress — a real <progress> bar driven by the existing
             step state, plus a 5-state headline that never lies (no more permanent
             "interrupted" label when nothing has even been attempted). */}
+        {phase2AdmissionStatus.label || phase2ObservationNotice?.label ? <p role="status">{phase2AdmissionStatus.label ?? phase2ObservationNotice?.label}</p> : null}
         <div className="kv">
-          <div className="k">Latest installation attempt</div>
+          <div className="k">{phase2HistoryIsPrevious ? "Previous installation attempt" : "Latest installation attempt"}</div>
           <div className="v">
             <div>{phase2HeadlineLabel}</div>
             {phase2Steps.length > 0 && (
@@ -4762,7 +4805,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                   value={phase2CompletedSteps}
                   max={phase2Steps.length}
                   style={{ width: 260, verticalAlign: "middle" }}
-                  aria-label={`Latest installation attempt completed ${phase2CompletedSteps} of ${phase2Steps.length} steps`}
+                  aria-label={`${phase2HistoryIsPrevious ? "Previous" : "Latest"} installation attempt completed ${phase2CompletedSteps} of ${phase2Steps.length} steps`}
                 />
                 <span style={{ marginLeft: 8, color: "#4b5563" }}>
                   {phase2CompletedSteps} / {phase2Steps.length}

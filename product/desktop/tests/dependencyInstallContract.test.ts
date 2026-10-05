@@ -10,7 +10,7 @@ test("active Phase2 progress refresh uses logical visibility and generation-owne
   const end = source.indexOf("  async function installDemo()", start);
   const poll = source.slice(start, end);
   assert.match(poll, /\(\) => loadPhase2Section\(true\)/);
-  assert.match(poll, /enabled: visible && phase2HasActive/);
+  assert.match(poll, /enabled: visible && \(phase2Admission \? phase2AdmissionStatus\.poll : phase2HasActive\)/);
   assert.doesNotMatch(poll, /pageActive|usePageActivity|hasFocus|setPhase2Latest|refresh\(/);
   const loader = source.slice(source.indexOf("  const loadPhase2Section"), source.indexOf("  const loadStorageSection"));
   assert.match(loader, /requestDiagnosticGroup\("diagnostics.phase2"/);

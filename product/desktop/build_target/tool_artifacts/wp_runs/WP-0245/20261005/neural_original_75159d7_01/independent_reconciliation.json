@@ -1,0 +1,172 @@
+{
+  "scope": "WP0245 original Neural invoke timing; not whole-WP completion",
+  "source": "75159d73d219525d5bb329d1b69ec44034b3c8bf",
+  "installed_version": "0.1.205",
+  "owner_pid": 248436,
+  "original_timer": [
+    {
+      "ts_ms": 1791207257492,
+      "event": "command_completed",
+      "level": "info",
+      "details": {
+        "cmd": "tools_tts_neural_local_v1_install",
+        "elapsed_ms": 50890,
+        "invocation_id": 15,
+        "request_id": null,
+        "span_id": null,
+        "started_at_ms": 1791207206602
+      },
+      "process": null,
+      "span_id": "invoke-15"
+    }
+  ],
+  "trace_rows": 136,
+  "trace_event_counts": {
+    "panel_switch": 1,
+    "panel_switch_rendered": 1,
+    "agent_ui_audit": 16,
+    "diagnostics_demand_scheduler": 33,
+    "agent_ui_action": 9,
+    "youtube_shared_gate_open": 9,
+    "freeze_detected": 2,
+    "frontend_long_task": 4,
+    "freeze_recovered": 2,
+    "command_started": 6,
+    "runtime_sample": 9,
+    "main_thread_alive": 9,
+    "heartbeat_source_acknowledged": 17,
+    "install_proof_acquire_validation": 1,
+    "worker_alive": 8,
+    "command_completed": 6,
+    "command_slow": 1,
+    "command_phase": 2
+  },
+  "action_sequence": [
+    {
+      "ts_ms": 1791207199687,
+      "request_id": "ui-1791207199677-53",
+      "file": "original_phase2_load.json",
+      "action": "click",
+      "product_action_id": null,
+      "target_name": "Refresh"
+    },
+    {
+      "ts_ms": 1791207201027,
+      "request_id": "ui-1791207201013-56",
+      "file": "neural_preflight_original_section_tools_expand.json",
+      "action": "click",
+      "product_action_id": null,
+      "target_name": "Tools"
+    },
+    {
+      "ts_ms": 1791207201819,
+      "request_id": "ui-1791207201813-58",
+      "file": "neural_preflight_original_section_scroll.json",
+      "action": "scroll_into_view",
+      "product_action_id": null,
+      "target_name": "Reinstall Neural TTS"
+    },
+    {
+      "ts_ms": 1791207202540,
+      "request_id": "ui-1791207202532-60",
+      "file": "cancel_open_action.json",
+      "action": "activate_product_action",
+      "product_action_id": "diagnostics.neural-tts.install",
+      "target_name": "Reinstall Neural TTS"
+    },
+    {
+      "ts_ms": 1791207203795,
+      "request_id": "ui-1791207203781-63",
+      "file": "cancel_action.json",
+      "action": "activate_product_action",
+      "product_action_id": "diagnostics.install-cancel",
+      "target_name": "Cancel"
+    },
+    {
+      "ts_ms": 1791207205544,
+      "request_id": "ui-1791207205536-67",
+      "file": "install_open_action.json",
+      "action": "activate_product_action",
+      "product_action_id": "diagnostics.neural-tts.install",
+      "target_name": "Reinstall Neural TTS"
+    },
+    {
+      "ts_ms": 1791207206607,
+      "request_id": "ui-1791207206597-70",
+      "file": "install_confirm_action.json",
+      "action": "activate_product_action",
+      "product_action_id": "diagnostics.install-confirm",
+      "target_name": "Confirm installation"
+    },
+    {
+      "ts_ms": 1791207206837,
+      "request_id": "ui-1791207206832-72",
+      "file": "neural_running_original_section_scroll.json",
+      "action": "scroll_into_view",
+      "product_action_id": null,
+      "target_name": "Reinstall Neural TTS"
+    },
+    {
+      "ts_ms": 1791207260085,
+      "request_id": "ui-1791207260080-75",
+      "file": "neural_terminal_original_section_scroll.json",
+      "action": "scroll_into_view",
+      "product_action_id": null,
+      "target_name": "Reinstall Neural TTS"
+    }
+  ],
+  "recorded_post_confirm_actions": "two scroll_into_view only; no navigation/Refresh/error clear",
+  "panel_switches_before_confirm_only": true,
+  "continuity_limit": "No independent DOM mount identifier; source-frozen exclusive root coordination plus recorded sequence and same owner/page late states. No assertion about uninstrumented external actions.",
+  "canonical_exact_equal": true,
+  "late_complete_audits_error_free": true,
+  "early_busy_audits_preserved": {
+    "outcome_disabled": true,
+    "paired_disabled": true,
+    "outcome_timestamp_ms": 1791207259759,
+    "paired_timestamp_ms": 1791207260701
+  },
+  "pixels_reviewed": "Actual settled PNG opened by root and independent agent: enabled Reinstall Neural TTS, Installed readiness, Diagnostics selected, no visible error",
+  "runtime_inventory_delta": {
+    "before_entries": 140265,
+    "after_entries": 140268,
+    "added": [
+      "tools\\python\\venv\\Lib\\site-packages\\setuptools-82.0.1.dist-info\\direct_url.json",
+      "tools\\python\\venv_cosyvoice\\Lib\\site-packages\\narwhals-2.27.0.dist-info\\INSTALLER",
+      "tools\\python\\venv_cosyvoice\\Lib\\site-packages\\narwhals-2.27.0.dist-info\\METADATA",
+      "tools\\python\\venv_cosyvoice\\Lib\\site-packages\\narwhals-2.27.0.dist-info\\RECORD",
+      "tools\\python\\venv_cosyvoice\\Lib\\site-packages\\narwhals-2.27.0.dist-info\\REQUESTED",
+      "tools\\python\\venv_cosyvoice\\Lib\\site-packages\\narwhals-2.27.0.dist-info\\WHEEL",
+      "tools\\python\\venv_cosyvoice\\Lib\\site-packages\\narwhals-2.27.0.dist-info\\licenses\\LICENSE.md",
+      "tools\\python\\venv_cosyvoice\\Lib\\site-packages\\narwhals\\_dask\\__pycache__\\expr_list.cpython-311.pyc",
+      "tools\\python\\venv_cosyvoice\\Lib\\site-packages\\narwhals\\_dask\\expr_list.py"
+    ],
+    "removed": [
+      "tools\\python\\venv_cosyvoice\\Lib\\site-packages\\narwhals-2.26.0.dist-info\\INSTALLER",
+      "tools\\python\\venv_cosyvoice\\Lib\\site-packages\\narwhals-2.26.0.dist-info\\METADATA",
+      "tools\\python\\venv_cosyvoice\\Lib\\site-packages\\narwhals-2.26.0.dist-info\\RECORD",
+      "tools\\python\\venv_cosyvoice\\Lib\\site-packages\\narwhals-2.26.0.dist-info\\REQUESTED",
+      "tools\\python\\venv_cosyvoice\\Lib\\site-packages\\narwhals-2.26.0.dist-info\\WHEEL",
+      "tools\\python\\venv_cosyvoice\\Lib\\site-packages\\narwhals-2.26.0.dist-info\\licenses\\LICENSE.md"
+    ],
+    "changed_byte_entries": 21258,
+    "changed_by_prefix": {
+      "cache": 127,
+      "tools": 21131
+    },
+    "scope": "Launch baseline through normal+force+Neural, not Neural-only causality; no unchanged-runtime claim",
+    "identity_comparison": "NOT_COMPARABLE: before FILE_ID_INFO versus after Python stat identity schemas",
+    "before_sha256": "019d95f694d4a89fd809c78cd1f8b25e3857813aaec4c5d6376bc2e17734381b",
+    "after_sha256": "39693e775009786545049600fd183eb3f26bb194b0782e2a6458088a83c4acbe"
+  },
+  "remaining": "Other five original installer invocation traces and Jobs/Library batching runtime acceptance remain; inference/listening/offline not proven",
+  "input_bindings": {
+    "D:\\Projects\\LLM projects\\VoxVulgi\\.local\\proofVVRemaining\\wp0229_literal_neural_75159d7_02\\actual_new_diagnostics_trace.jsonl": "4fa81d9c1b3d5e87f1879839ba384b6421009b298884c0b12e544d6f5301f413",
+    "D:\\Projects\\LLM projects\\VoxVulgi\\.local\\proofVVRemaining\\wp0330_reattached_install_75159d7_01\\private_runtime_before.json": "019d95f694d4a89fd809c78cd1f8b25e3857813aaec4c5d6376bc2e17734381b",
+    "D:\\Projects\\LLM projects\\VoxVulgi\\.local\\proofVVRemaining\\wp0229_literal_neural_75159d7_02\\private_runtime_after.json": "39693e775009786545049600fd183eb3f26bb194b0782e2a6458088a83c4acbe",
+    "D:\\Projects\\LLM projects\\VoxVulgi\\.local\\proofVVRemaining\\wp0229_literal_neural_75159d7_02\\result.json": "455b9ce8144a5eeaaadb8a054bdc21d3df9568ffda88cfa532f5e6b37671902d",
+    "D:\\Projects\\LLM projects\\VoxVulgi\\.local\\proofVVRemaining\\wp0229_literal_neural_75159d7_02\\independent_neural_outcome_review.json": "74116d9d6a374a3d1fa14020a16543d47805cde9f002a6cf475b8be1cd9a7ed4"
+  },
+  "product_actions": 0,
+  "builds_tests_installs": 0
+}

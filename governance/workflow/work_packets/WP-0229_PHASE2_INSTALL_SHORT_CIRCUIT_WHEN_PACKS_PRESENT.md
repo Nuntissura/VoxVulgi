@@ -2,7 +2,7 @@
 
 ## Status
 
-IN_PROGRESS
+DONE
 
 ## Base Scope
 
@@ -346,5 +346,13 @@ Current installed 0.1.205/source164b8365 original normal job `5f99ddeb-5e4e-4c67
 The actual trace records9,814ms full physical-root/descendant ownership validation. Original job-log status timings total20,150ms, including Cosy13,305ms, OpenVoice3,977ms and Kokoro1,774ms. Preserve the complete ownership/readiness controls; optimize verified repeated metadata child work, then prove the original timing again. Normal01 failed before installation because the audit saw a loading DOM; its evidence is retained separately.
 
 The original literal UI proof also remains open: Phase2 uses native confirmation outside the semantic bridge; healthy Neural TTS has a disabled install button. Scoped quiet confirmation, deliberate Neural reinstall and guarded original private UI admission candidates are under review. No force rerun on unchanged code, completion claim or acceptance narrowing. Packet status is IN_PROGRESS while these recorded defects are remediated.
+
+</topic>
+
+<topic id="wp0229-installed-literal-normal-force-closure-75159d7" wp="WP-0229" status="DONE" updated_at="2026-10-05">
+
+Current source75159d73d219525d5bb329d1b69ec44034b3c8bf/version0.1.205 satisfies the unchanged installed-app criterion: original normal job dac5dc08-6467-4f38-9eb7-c0305ac616af/attempt1 succeeded in29,228ms (<30s), all eight prior step timestamps retained and all eight new logs empty. Original Install/Force controls and inline Confirm/Cancel were exercised; Cancel preserved canonical state. Original force job1aecdded-4563-4724-b1ef-4e5c50df6d0b/attempt1 naturally succeeded in1,061,695ms/all8done; root independently opened every command-producing step log with full actual pip stdout/stderr and verified successful pipe capture/publication and owning append boundaries. Independent native canonical rereads reconcile IDs/attempts/journals/log hashes. Portable Python is a truthful existing-base skip.
+
+Canonical proof: product/desktop/build_target/tool_artifacts/wp_runs/WP-0229/20261005_75159d7/{summary.md,evidence.json}. Core/native Update passed; engine composed842, desktop109 and frontend423/423 proof retains exact execution sources and original failures. Root accepted the installed criterion independently of WP-0230. All historical RED evidence and prior status statements above are retained and superseded by this current DONE closure. WP-0230 stale live progress remains unresolved; Spleeter dependency warnings do not prove model/voice usability. No requirement was narrowed or widened; no other WP, version/changelog or runtime state changed.
 
 </topic>

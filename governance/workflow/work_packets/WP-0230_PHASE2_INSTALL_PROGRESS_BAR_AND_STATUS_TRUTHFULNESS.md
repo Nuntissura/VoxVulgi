@@ -2,7 +2,7 @@
 
 ## Status
 
-NEEDS_VALIDATION
+IN_PROGRESS
 
 ## Owner
 
@@ -341,3 +341,9 @@ The reviewed `tools.recover_interrupted_phase2_proof` entrypoint is restricted t
 Source and four component tests are present but unexecuted. Packaged proof must use a freshly session-owned process and genuine original installer, independently establish the interrupted process and its owned children are absent, then inspect the actual interrupted N/M surface against preserved done steps. Never-started, active, completion, elapsed readability and all existing acceptance criteria remain unchanged; status stays `NEEDS_VALIDATION`.
 
 </topic>
+
+## Recorded remediation 2026-10-05
+
+Source75159d7 real force-install snapshots progress_002_1791204273229.png and progress_003_1791204283347.png showed the previous completed installation while canonical job1aecdded-4563-4724-b1ef-4e5c50df6d0b was running. The active polling dependency came only from that previous journal. Reconcile canonical unfinished Phase2 job admission independently of journal creation; pin the admitted job/attempt, retain prior history explicitly, and poll through delayed journal publication. Candidate04 is source-reviewed; application, owning tests, packaged React proof and the original interrupted-install acceptance remain pending. Original base and separately carried WP-0230b/WP-0235 scope remain unchanged.
+
+Implementation2026-10-05: exact candidate04 five files applied after owned private app248436 gracefully exited. First apply refused before edits because its liveness check mistook a retained exited handle for a live process; V2 uses native signaled/absent confirmation and succeeded. Canonical admission is now independent of previous journal state. Owning tests, fresh desktop compile and packaged active/terminal/interrupted proof remain pending; status stays IN_PROGRESS.

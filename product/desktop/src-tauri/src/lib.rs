@@ -3202,6 +3202,7 @@ struct Phase2InstallLatestState {
     active: bool,
     stale: bool,
     job_status: Option<String>,
+    canonical_install: Option<Phase2CanonicalInstall>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -4104,6 +4105,35 @@ fn mark_phase2_active_steps_terminal(
         );
         obj.insert("normalization_note".to_string(), serde_json::json!(message));
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct Phase2CanonicalInstall {
+    id: String,
+    attempt_no: u32,
+    status: String,
+    force: bool,
+    held: bool,
+}
+
+fn phase2_canonical_install(paths: &AppPaths, job_id: Option<&str>) -> Result<Option<Phase2CanonicalInstall>, String> {
+    use rusqlite::OptionalExtension;
+    // Canonical type/identity selection, never the visible/paginated Jobs list.
+    let conn=db::open_readonly(paths).map_err(|e|e.to_string())?;
+    let tx=conn.unchecked_transaction().map_err(|e|e.to_string())?;
+    let selected:Option<(String,u32,String,String)>=tx.query_row(
+        "SELECT id,attempt_no,status,params_json FROM job WHERE type='install_phase2_packs_v1' AND ((?1 IS NOT NULL AND id=?1) OR (?1 IS NULL AND status IN ('queued','running'))) ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,created_at_ms DESC,id DESC LIMIT 1",
+        [job_id], |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+    ).optional().map_err(|e|e.to_string())?;
+    let paused:Option<String>=tx.query_row("SELECT value FROM meta WHERE key='jobs_queue_paused'",[],|row|row.get(0)).optional().map_err(|e|e.to_string())?;
+    let paused=paused.is_some_and(|v|v.trim()=="1" || v.trim().eq_ignore_ascii_case("true"));
+    let receipt:Result<Option<Phase2CanonicalInstall>,String>=selected.map(|(id,attempt_no,status,params)| {
+        let params:serde_json::Value=serde_json::from_str(&params).map_err(|e|e.to_string())?;
+        Ok(Phase2CanonicalInstall {id,attempt_no,held:status=="queued" && paused,status,force:params.get("force").and_then(|v|v.as_bool()).unwrap_or(false)})
+    }).transpose();
+    tx.commit().map_err(|e|e.to_string())?;
+    receipt
+    // All read-slot/transaction handles drop before the caller performs journal filesystem I/O.
 }
 
 fn normalize_phase2_latest_state(
@@ -8390,6 +8420,23 @@ mod tests {
         let mut missing_provider = ready;
         missing_provider.youtube_po_provider_installed = false;
         assert!(!offline_bundle_runtime_ready_from_flags(missing_provider));
+    }
+
+    #[test]
+    fn wp0230_canonical_install_discovers_held_remount_before_new_journal() {
+        let dir=tempfile::tempdir().unwrap(); let paths=AppPaths::new(dir.path().join("app")); db::ensure_schema(&paths).unwrap();
+        let old=jobs::enqueue_install_phase2_packs_v1_with_options(&paths,false).unwrap();
+        { let conn=db::write_context(&paths).unwrap(); conn.execute("UPDATE job SET status='succeeded' WHERE id=?1",[&old.id]).unwrap(); }
+        let new=jobs::enqueue_install_phase2_packs_v1_with_options(&paths,true).unwrap(); jobs::set_queue_paused(&paths,true).unwrap();
+        { let conn=db::write_context(&paths).unwrap();
+          for n in 0..201 { conn.execute("INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path) VALUES(?1,'dummy_sleep','queued',0,'{}',9999999999999,'owned')",[format!("other-{n}")]).unwrap(); }
+        }
+        assert!(!paths.install_logs_dir().join("phase2/latest.json").exists());
+        let found=phase2_canonical_install(&paths,None).unwrap().unwrap();
+        assert_eq!(found.id,new.id); assert_eq!(found.attempt_no,new.attempt_no); assert_eq!(found.status,"queued"); assert!(found.held && found.force);
+        let previous=phase2_canonical_install(&paths,Some(&old.id)).unwrap().unwrap(); assert_eq!(previous.status,"succeeded"); assert!(!previous.held);
+        assert!(phase2_canonical_install(&paths,Some("other-0")).unwrap().is_none());
+        assert_eq!(jobs::get_job(&paths,&new.id).unwrap().unwrap().params_json,new.params_json);
     }
 
     #[test]
@@ -13738,9 +13785,11 @@ fn tools_phase2_packs_setup_estimate() -> tools::Phase2PacksSetupEstimate {
 #[tauri::command]
 async fn tools_phase2_packs_install_latest_state(
     state: State<'_, AppState>,
+    job_id: Option<String>,
 ) -> Result<Phase2InstallLatestState, String> {
     let paths = state.paths.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let canonical_install=phase2_canonical_install(&paths,job_id.as_deref())?;
         let path = paths.install_logs_dir().join("phase2").join("latest.json");
 
         if !path.exists() {
@@ -13751,6 +13800,7 @@ async fn tools_phase2_packs_install_latest_state(
                 active: false,
                 stale: false,
                 job_status: None,
+                canonical_install,
             });
         }
 
@@ -13765,6 +13815,7 @@ async fn tools_phase2_packs_install_latest_state(
             active,
             stale,
             job_status,
+            canonical_install,
         })
     })
     .await

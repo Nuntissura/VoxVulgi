@@ -2,7 +2,7 @@
 
 ## Status
 
-NEEDS_VALIDATION
+IN_PROGRESS
 
 ## Owner
 
@@ -112,3 +112,23 @@ Out of scope:
 - Current status: NEEDS_VALIDATION
 - Batched Jobs/Library commands and async install tracing implemented and recorded tested. Installing historical 0.1.50 is not a current prerequisite; remaining is current installed batching/command trace proof against the packet acceptance.
 - Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
+
+<topic id="wp0245-original-healthy-neural-flight-75159d7" wp="WP-0245" status="IN_PROGRESS" updated_at="2026-10-05">
+
+Root dispatched the genuine original healthy Neural TTS Reinstall control on current installed source75159d73d219525d5bb329d1b69ec44034b3c8bf, owned private PID248436, through the existing literal UI handler and confirmation. Native collector PID258740 started at1791206943459; evidence is retained under .local/proofVVRemaining/wp0229_literal_neural_75159d7_01. Flight remains pending: HANDLER_OUTCOME NOT YET PROVEN. InvokeTimer completion/drop alone cannot prove successful installation; original handler result, readiness/error state, canonical preservation and actual trace must be independently reconciled. This status supersedes earlier NEEDS_VALIDATION statements without discarding historical evidence. Jobs/Library batching and all six original install-command tracing criteria remain unchanged; no WP closure, product change or runtime action is claimed by this status update.
+
+</topic>
+
+<topic id="wp0245-neural-collector-preflight-refusal-75159d7" wp="WP-0245" status="IN_PROGRESS" updated_at="2026-10-05">
+
+Supersedes the pending-flight observation above: native collector258740 naturally terminated FAIL at1791206951250 before any installer action. Its complete collapsed-voice audit did not expose the healthy Neural control, so the collector refused before activation/confirmation. This is a collector preflight failure, not a Neural handler/install failure; HANDLER_OUTCOME remains NOT PROVEN. The original failure is retained under .local/proofVVRemaining/wp0229_literal_neural_75159d7_01/result.json. A distinct collector must open the original tools disclosure details#diag-tools and freshly audit the real control before retry; no product change or installation occurred in this failed flight. Status remains IN_PROGRESS and all original acceptance remains unchanged.
+
+</topic>
+
+<topic id="wp0245-neural-original-timer-proof-75159d7" wp="WP-0245" status="IN_PROGRESS" updated_at="2026-10-05">
+
+Distinct flight02 invoked the original healthy Reinstall Neural TTS handler after preserved Cancel and explicit Confirm. Installed source75159d73d219525d5bb329d1b69ec44034b3c8bf/PID248436 emitted original invocation15 `command_completed`: started1791207206602, completed1791207257492, elapsed50890ms. The Neural invocation-trace criterion is proven; timer/drop alone is not installation-success proof. Original early terminal audits remained busy and are retained. A separate native read-only reviewer later observed complete119-element audits, enabled Reinstall, no handler error, healthy original readiness, and exact whole canonical jobs/grants/meta/libraries equality before/after. Root and independent agent opened the actual settled PNG. Recorded post-Confirm actions are only two scrolls; recorded page switches precede Confirm. Same mounted context is supported by source-frozen coordination and same owner/page observations; no independent DOM mount identifier or claim about uninstrumented external actions exists.
+
+Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0245/20261005/neural_original_75159d7_01/summary.md`; independent reconciliation SHA180c7db514459b626329a86d4528b870282e9a255af4d52cc135f0f092c985ea. Launch-baseline versus final private inventory covers normal+force+Neural together:140265→140268 entries,9added/6removed/21258changed-byte entries; it does not prove unchanged runtime or Neural-only causality. WP remains IN_PROGRESS. Other five original install-command traces and Jobs/Library batching runtime criteria remain; inference/listening/offline and whole-WP completion are not declared. Original failed flight01 and all acceptance criteria remain unchanged.
+
+</topic>

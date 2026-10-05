@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 92
+generation: 97
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -112,3 +112,8 @@ steps:
 - {id: GP-096, role: any, at: before_round, do: require FIFO diagnostics flush before owned install test directory cleanup, check: {type: file, path: product/desktop/src-tauri/src/install_proof.rs, contains: 'flush_diagnostics_trace_queue(&paths, Duration::from_secs(5)).unwrap();'}, source: 'desktop focused RED Os145: async acquire diagnostics raced immediate owned test root deletion', state: active}
 - {id: GP-097, role: any, at: before_round, do: require blocking accepted HTTP fixture stream before bounded header read, check: {type: file, path: product/engine/src/jobs.rs, contains: stream.set_nonblocking(false).expect("blocking accepted fixture stream");}, source: 'engine full RED10035: accepted Windows socket inherited nonblocking listener before request headers', state: active}
 - {id: GP-098, role: any, at: before_round, do: require strict metadata batch and OpenVoice distribution precedence contract, check: {type: file, path: product/desktop/tests/dependencyInstallContract.test.ts, contains: version\("MyShell-OpenVoice"\)\s*\.or_else}, source: 'frontend RED423/422/1: stale separate-distribution matcher after reviewed strict metadata batching', state: active}
+- {id: GP-099, role: any, at: before_round, do: require exact keyed subscription comparison before fresh closed backup and independent69-table reconciliation, check: {type: confirm}, source: 'Update refused: current youtube_subscription changed after old backup; preserve current data before retry', state: active}
+- {id: GP-100, role: any, at: before_round, do: require original Phase2 section scroll before literal force progress snapshots, check: {type: file, path: .local/wp0229_literal_diagnostics_collector_v8.py, contains: show_original_section('phase2_admitted_original_section')}, source: 'UI proof gap: actual normal screenshots captured Diagnostics top with Phase2 progress offscreen', state: active}
+- {id: GP-101, role: any, at: before_round, do: confirm delayed-journal candidate preserves every unrelated raw UTF8 baseline byte, check: {type: confirm}, source: 'Source review rejected candidate01: locale read corrupted Japanese emoji and comments outside remediation', state: active}
+- {id: GP-102, role: any, at: before_round, do: require original Neural disclosure open and healthy audited control before literal Cancel workflow, check: {type: confirm}, source: 'Collector V9 preflight RED: original Neural action absent while voice disclosure collapsed', state: active}
+- {id: GP-103, role: any, at: before_round, do: verify process liveness via WaitForSingleObject; apply272156 mistook exited248436 handle for live PID, check: {type: confirm}, source: Recorded apply failure272156 20261005, state: active}
