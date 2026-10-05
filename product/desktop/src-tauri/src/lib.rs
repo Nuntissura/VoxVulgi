@@ -8394,6 +8394,7 @@ mod tests {
     fn phase2_latest_state_marks_interrupted_steps_when_job_failed() {
         let dir = tempfile::tempdir().expect("tempdir");
         let paths = AppPaths::new(dir.path().to_path_buf());
+        db::ensure_schema(&paths).expect("schema ready before enqueue");
         let job = jobs::enqueue_dummy_sleep(&paths, 1).expect("enqueue");
         let finished_at_ms = now_epoch_ms_i64();
         let conn = db::open(&paths).expect("db");
