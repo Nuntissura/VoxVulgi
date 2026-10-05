@@ -19,7 +19,7 @@ import { copyPathToClipboard, openPathBestEffort, revealPath as revealFilesystem
 import { loadYoutubeProtectionSnapshot } from "../lib/youtubeProtectionSnapshot";
 import { RootRebindControl } from "../components/RootRebindControl";
 import { collectDiagnosticsFieldResults, DiagnosticReadErrors, settleDiagnosticDemands, diagnosticPendingText, capabilityIsVerified } from "../lib/diagnosticsResults";
-import { phase2StatusIcon } from "../lib/phase2Progress";
+import { phase2ProgressTotal, phase2StatusIcon } from "../lib/phase2Progress";
 import "./DiagnosticsPage.css";
 
 type RuntimeProvenance = {
@@ -2047,6 +2047,10 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const phase2CompletedSteps = useMemo(
     () => phase2CompletedCount(phase2Steps),
     [phase2Steps],
+  );
+  const phase2ProgressSteps = useMemo(
+    () => phase2ProgressTotal(phase2Steps, phase2Latest?.exists, phase2Plan),
+    [phase2Steps, phase2Latest?.exists, phase2Plan],
   );
   const voicePackagesRuntimeReady = Boolean(
     ttsNeuralLocalV1?.installed && ttsVoicePreservingLocalV1?.installed,
@@ -4799,16 +4803,26 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <div className="k">{phase2HistoryIsPrevious ? "Previous installation attempt" : "Latest installation attempt"}</div>
           <div className="v">
             <div>{phase2HeadlineLabel}</div>
-            {phase2Steps.length > 0 && (
+            {phase2ProgressSteps > 0 && (
               <div style={{ marginTop: 6 }}>
                 <progress
                   value={phase2CompletedSteps}
-                  max={phase2Steps.length}
-                  style={{ width: 260, verticalAlign: "middle" }}
-                  aria-label={`${phase2HistoryIsPrevious ? "Previous" : "Latest"} installation attempt completed ${phase2CompletedSteps} of ${phase2Steps.length} steps`}
+                  max={phase2ProgressSteps}
+                  style={{ position: "absolute", width: 1, height: 1, padding: 0, margin: -1, overflow: "hidden", clipPath: "inset(50%)", whiteSpace: "nowrap", border: 0 }}
+                  aria-label={`${phase2HistoryIsPrevious ? "Previous" : "Latest"} installation attempt completed ${phase2CompletedSteps} of ${phase2ProgressSteps} steps`}
                 />
+                <div
+                  data-testid="phase2-progress-track"
+                  aria-hidden="true"
+                  style={{ display: "inline-block", width: 260, height: 12, verticalAlign: "middle", background: "#e2e8f0", border: "1px solid #64748b", boxSizing: "border-box", overflow: "hidden" }}
+                >
+                  <div
+                    data-testid="phase2-progress-fill"
+                    style={{ height: "100%", width: `${(phase2CompletedSteps / phase2ProgressSteps) * 100}%`, background: "#2563eb" }}
+                  />
+                </div>
                 <span style={{ marginLeft: 8, color: "#4b5563" }}>
-                  {phase2CompletedSteps} / {phase2Steps.length}
+                  {phase2CompletedSteps} / {phase2ProgressSteps}
                 </span>
               </div>
             )}

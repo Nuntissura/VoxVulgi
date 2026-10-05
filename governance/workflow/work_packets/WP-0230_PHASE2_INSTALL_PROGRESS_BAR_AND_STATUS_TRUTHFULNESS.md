@@ -332,6 +332,12 @@ Opened screenshots: `governance/snapshots/WP-0330_20261005_actual_install/force_
 
 </topic>
 
+<topic id="zero-plan-remediation-applied-testing-stopped-20261005" wp="WP-0230" status="IN_PROGRESS" updated_at="2026-10-05">
+
+Operator directed stopping tests and applying the known remediation. Candidate03 is applied to `phase2Progress.ts`, `DiagnosticsPage.tsx` and the two prepared regression cases in `phase2Progress.test.ts`. Confirmed absent history uses the actual supported-plan total; existing journal totals remain authoritative. The live CSS track/fill and accessible native progress element share the same completed/total values. No test or build was run after this instruction; this source change is not yet present in the installed executable and is not runtime-validated. WP remains IN_PROGRESS. Offline ISO work is excluded by operator direction.
+
+</topic>
+
 <topic id="quiet-interrupted-proof-tool-20261005" status="needs-validation" wp="WP-0230" updated_at="2026-10-05">
 
 The genuine force-quit/restart acceptance cannot use graceful shutdown as its substitute. Inspected headless startup skips orphan recovery; the existing `jobs_recover_orphaned_running`/`recover_orphaned_running_jobs_exact` path marks an original interrupted installer failed without starting a runner, but lacked a bridge entrypoint. The operator authorized missing tool expansion for autonomous proof.
@@ -347,3 +353,11 @@ Source and four component tests are present but unexecuted. Packaged proof must 
 Source75159d7 real force-install snapshots progress_002_1791204273229.png and progress_003_1791204283347.png showed the previous completed installation while canonical job1aecdded-4563-4724-b1ef-4e5c50df6d0b was running. The active polling dependency came only from that previous journal. Reconcile canonical unfinished Phase2 job admission independently of journal creation; pin the admitted job/attempt, retain prior history explicitly, and poll through delayed journal publication. Candidate04 is source-reviewed; application, owning tests, packaged React proof and the original interrupted-install acceptance remain pending. Original base and separately carried WP-0230b/WP-0235 scope remain unchanged.
 
 Implementation2026-10-05: exact candidate04 five files applied after owned private app248436 gracefully exited. First apply refused before edits because its liveness check mistook a retained exited handle for a live process; V2 uses native signaled/absent confirmation and succeeded. Canonical admission is now independent of previous journal state. Owning tests, fresh desktop compile and packaged active/terminal/interrupted proof remain pending; status stays IN_PROGRESS.
+
+<topic id="current-installed-proof-and-zero-plan-remediation-20261005" wp="WP-0230" status="IN_PROGRESS" updated_at="2026-10-05">
+
+Current installed source `9080e128`, version `0.1.205`: desktop110/frontend433 passed; engine842 is retained composed coverage with its original failed full-run receipt preserved. Canonical Core build and native Update passed independent all69-table preservation checks. The actual original paused installation `32bfdad1-01c7-4140-b69e-33b1ad65f19c` kept previous history explicit, resumed, and completed8/8. Root inspected the paired completion image `governance/snapshots/WP-0230_current_ui/progress_002_1791213107958.png`; its capture ended974ms after the canonical finish. Independent readback is `.local/proofVVRemaining/wp0230_held_visible_wake_9080e12_01/independent_native_readback_v3.json`. Route navigation proves visible wake, not React unmount/remount. Active elapsed/icons and genuine crash/restart remain pending.
+
+Fresh owned app230520 has zero canonical jobs and no installation journal. Root opened `governance/snapshots/WP-0230/genuine_never_started_1791215372005.png`: the never-installed headline and plan rows are present, but the required0/M progress bar is absent. `DiagnosticsPage.tsx` renders the bar only when journal steps exist. Remediation: retain every existing journal count; for confirmed absent history only, use the actual supported plan total with zero completed steps. Unknown/loading or malformed existing history must not invent a total. Three-file off-tree candidate `.local/wp0230_zero_plan_progress_candidate_01` is source-reviewed and unapplied; owning frontend checks, canonical Core build and fresh packaged0/8 evidence are required. The original image remains RED. Status remains IN_PROGRESS; no whole-packet completion or byte-progress delivery is claimed.
+
+</topic>

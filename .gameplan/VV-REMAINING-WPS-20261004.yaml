@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 97
+generation: 110
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -117,3 +117,16 @@ steps:
 - {id: GP-101, role: any, at: before_round, do: confirm delayed-journal candidate preserves every unrelated raw UTF8 baseline byte, check: {type: confirm}, source: 'Source review rejected candidate01: locale read corrupted Japanese emoji and comments outside remediation', state: active}
 - {id: GP-102, role: any, at: before_round, do: require original Neural disclosure open and healthy audited control before literal Cancel workflow, check: {type: confirm}, source: 'Collector V9 preflight RED: original Neural action absent while voice disclosure collapsed', state: active}
 - {id: GP-103, role: any, at: before_round, do: verify process liveness via WaitForSingleObject; apply272156 mistook exited248436 handle for live PID, check: {type: confirm}, source: Recorded apply failure272156 20261005, state: active}
+- {id: GP-104, role: any, at: before_round, do: verify compile delta distinguishes five product edits from four required committed proof files; preflight193928 refused, check: {type: confirm}, source: Recorded focused preflight193928 20261005, state: active}
+- {id: GP-105, role: any, at: before_round, do: require lexical cargo.exe argv; resolve followed rustup symlink and compile191464 failed before compilation, check: {type: confirm}, source: Actual compile191464 log and cargo symlink 20261005, state: active}
+- {id: GP-106, role: any, at: before_round, do: require exact-test parser accepting authenticated filtered count; full parser rejected retained repaired log, check: {type: confirm}, source: Actual native193480 independent reconciliation parser failure 20261005, state: active}
+- {id: GP-107, role: any, at: before_round, do: require authenticated historical log bindings; verifier224164 omitted four retained log paths, check: {type: confirm}, source: Actual native224164 missing physical log bindings independently verified 20261005, state: active}
+- {id: GP-108, role: any, at: before_round, do: verify physical file identity for short and extended Windows paths; fresh launcher265492 compared path strings, check: {type: confirm}, source: Actual219372 marker/launch same nonce at short/extended profile paths observed20261005, state: active}
+- {id: GP-109, role: any, at: before_round, do: verify first completion image and allowed gameplan verbs; reader240676 used later capture, check: {type: confirm}, source: Actual reader240676 late capture assertion failed; gameplan rejected measure verb; use actual first image, state: active}
+- {id: GP-110, role: any, at: before_round, do: require terminal wait and exit-code queries; observer270068 queried image after owned WM_CLOSE, check: {type: confirm}, source: Actual natural-close observer270068 lost image query after posted WM_CLOSE; preserve action without repeat, state: active}
+- {id: GP-111, role: any, at: before_round, do: verify actual binding membership; close165856 required an absent preparation-control key, check: {type: confirm}, source: Actual close165856 failed before WM_CLOSE; retained launch source_bindings has no gameplan key, state: active}
+- {id: GP-112, role: any, at: before_round, do: verify canonical terminal status before declaring inter-step journal gap terminal, check: {type: confirm}, source: Actual active248016 failed at journal gap while original installer and owned Python children continued, state: active}
+- {id: GP-113, role: any, at: before_round, do: require independent native membership reconciliation before any owned crash after image-query exit race, check: {type: confirm}, source: Actual ready218064 held on keeper image-query failure at1791217935453; no crash action occurred, state: active}
+- {id: GP-114, role: any, at: before_round, do: require fresh independent membership and ready in one explicit unchanged-target crash dispatch, check: {type: confirm}, source: Actual crash230252 refused before action because independent membership receipt exceeded60 seconds, state: active}
+- {id: GP-115, role: any, at: before_round, do: verify actual terminal baseline before separate crash attempt; preserve completed jobs and reuse private dependencies, check: {type: confirm}, source: Actual orchestrator213364 refused before action because original90ac job naturally completed all8 steps, state: active}
+- {id: GP-116, role: any, at: before_round, do: run one preparation gate before atomic fresh-observation crash transaction; preserve actual native checks, check: {type: confirm}, source: Actual246444 new7082 admission succeeded but duplicate10s preparation check let fresh membership become stale, state: active}
