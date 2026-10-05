@@ -29510,11 +29510,10 @@ fn plan_audio_language_retag(
     for wanted in expected {
         let exact = actual.iter().enumerate().position(|(index, observed)| {
             !consumed[index]
-                && match (wanted.language.as_deref(), observed.language.as_deref()) {
-                    (Some(w), Some(o)) => subtitle_languages_match(w, o),
-                    (Some(_), None) => false,
-                    (None, _) => true,
-                }
+                && managed_mkv_language_matches(
+                    wanted.language.as_deref(),
+                    observed.language.as_deref(),
+                )
                 && metadata_value_matches(&wanted.title, &observed.title)
         });
         if let Some(index) = exact {
@@ -30875,6 +30874,16 @@ fn metadata_value_matches(expected: &Option<String>, actual: &Option<String>) ->
         .eq_ignore_ascii_case(&actual.replace('_', "-"))
 }
 
+// FFmpeg's Matroska demuxer deliberately omits the language metadata tag for `und`.
+// This applies to its probe projection, not Matroska's absent-element default (`eng`).
+fn managed_mkv_language_matches(expected: Option<&str>, actual: Option<&str>) -> bool {
+    match (expected, actual) {
+        (Some(expected), Some(actual)) => subtitle_languages_match(expected, actual),
+        (Some(expected), None) => expected.trim().eq_ignore_ascii_case("und"),
+        (None, _) => true,
+    }
+}
+
 fn validate_stream_expectations(
     kind: &str,
     expected: &[StreamExpectation],
@@ -30885,11 +30894,10 @@ fn validate_stream_expectations(
     for wanted in expected {
         let matched = actual.iter().enumerate().position(|(index, observed)| {
             !consumed[index]
-                && match (wanted.language.as_deref(), observed.language.as_deref()) {
-                    (Some(wanted), Some(observed)) => subtitle_languages_match(wanted, observed),
-                    (Some(_), None) => false,
-                    (None, _) => true,
-                }
+                && managed_mkv_language_matches(
+                    wanted.language.as_deref(),
+                    observed.language.as_deref(),
+                )
                 && metadata_value_matches(&wanted.title, &observed.title)
         });
         let Some(index) = matched else {
@@ -43989,6 +43997,114 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
             language: language.map(str::to_string),
             title: title.map(str::to_string),
         }
+    }
+
+    #[test]
+    fn managed_mkv_und_probe_projection_keeps_known_languages_and_titles_strict() {
+        let output = Path::new("owned_fixture.mkv");
+        let actual = vec![expectation(None, Some("Original audio"))];
+        let expected = vec![expectation(Some("und"), Some("Original audio"))];
+        validate_stream_expectations("audio", &expected, &actual, output).unwrap();
+        assert!(plan_audio_language_retag(&expected, &actual).is_none());
+        let mixed_expected = vec![
+            expectation(Some("und"), Some("Original audio")),
+            expectation(Some("kor"), Some("Korean dub")),
+        ];
+        let mixed_actual = vec![
+            expectation(None, Some("Original audio")),
+            expectation(None, Some("Korean dub")),
+        ];
+        let plan = plan_audio_language_retag(&mixed_expected, &mixed_actual).unwrap();
+        assert_eq!(plan.len(), 1);
+        assert_eq!(plan[0].stream_index, 1);
+        assert_eq!(plan[0].language, "kor");
+        assert!(validate_stream_expectations(
+            "audio",
+            &[expected[0].clone(), expected[0].clone()],
+            &actual,
+            output,
+        )
+        .is_err(), "one stream cannot satisfy two und expectations");
+        for language in ["eng", "kor"] {
+            assert!(validate_stream_expectations(
+                "audio",
+                &[expectation(Some(language), Some("Original audio"))],
+                &actual,
+                output,
+            )
+            .is_err());
+        }
+        assert!(validate_stream_expectations(
+            "audio",
+            &expected,
+            &[expectation(Some("eng"), Some("Original audio"))],
+            output,
+        )
+        .is_err());
+        assert!(validate_stream_expectations(
+            "audio",
+            &expected,
+            &[expectation(None, Some("Wrong title"))],
+            output,
+        )
+        .is_err());
+        assert!(validate_stream_expectations("audio", &expected, &[], output).is_err());
+    }
+
+    #[test]
+    fn managed_mkv_und_real_roundtrip_preserves_audio_and_subtitle_requirements() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let paths = AppPaths::new(dir.path().join("app"));
+        let output = dir.path().join("dub_and_original.mkv");
+        let subtitles = dir.path().join("english.srt");
+        std::fs::write(&subtitles, "1\n00:00:00,000 --> 00:00:00,200\nfixture\n")
+            .expect("subtitle fixture");
+        let output_text = output.to_string_lossy().to_string();
+        let subtitle_text = subtitles.to_string_lossy().to_string();
+        run_fixture_ffmpeg(
+            &paths,
+            &[
+                "-f", "lavfi", "-i", "color=c=black:s=64x64:d=0.2",
+                "-f", "lavfi", "-i", "sine=frequency=440:duration=0.2",
+                "-i", &subtitle_text,
+                "-map", "0:v", "-map", "1:a", "-map", "1:a", "-map", "2:s",
+                "-c:v", "mpeg4", "-c:a", "aac", "-c:s", "srt",
+                "-metadata:s:a:0", "language=eng",
+                "-metadata:s:a:0", "title=English (AI dub - cloned voice)",
+                "-metadata:s:a:1", "language=und",
+                "-metadata:s:a:1", "title=Original audio",
+                "-metadata:s:s:0", "language=eng",
+                "-metadata:s:s:0", "title=English",
+                &output_text,
+            ],
+        );
+        let expectations = ManagedMkvExpectations {
+            min_audio_streams: 2,
+            audio_tracks: vec![
+                expectation(Some("eng"), Some("English (AI dub - cloned voice)")),
+                expectation(Some("und"), Some("Original audio")),
+            ],
+            subtitle_tracks: vec![expectation(Some("eng"), Some("English"))],
+        };
+        let before = ffmpeg::probe(&paths, &output).expect("real FFmpeg probe");
+        assert_eq!(before.audio_streams.len(), 2);
+        assert_eq!(before.audio_streams[1].language, None, "FFmpeg omits und");
+        assert_eq!(before.audio_streams[1].title.as_deref(), Some("Original audio"));
+        let bytes_before = std::fs::read(&output).unwrap();
+        validate_managed_mkv_output(&paths, &output, &expectations).expect("valid managed MKV");
+        assert_eq!(std::fs::read(&output).unwrap(), bytes_before, "no futile retag remux");
+        let mut wrong_title = expectations.clone();
+        wrong_title.audio_tracks[1].title = Some("Wrong title".into());
+        assert!(validate_managed_mkv_output(&paths, &output, &wrong_title).is_err());
+        let mut missing_audio = expectations.clone();
+        missing_audio.min_audio_streams = 3;
+        assert!(validate_managed_mkv_output(&paths, &output, &missing_audio).is_err());
+        let mut wrong_subtitle = expectations.clone();
+        wrong_subtitle.subtitle_tracks[0].language = Some("kor".into());
+        assert!(validate_managed_mkv_output(&paths, &output, &wrong_subtitle).is_err());
+        let mut missing_subtitle = expectations;
+        missing_subtitle.subtitle_tracks.push(expectation(Some("eng"), Some("Second")));
+        assert!(validate_managed_mkv_output(&paths, &output, &missing_subtitle).is_err());
     }
 
     #[test]

@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 38
+generation: 40
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -59,3 +59,5 @@ steps:
 - {id: GP-043, role: any, at: before_round, do: require exact qualified model copy before retained inference replay, check: {type: file, path: .local/wp0329_cosy_exact_replay.py, contains: qualified_model_before}, source: 'replay RED: first model run wrote bytecode; preserve installed generation and exact-check fresh qualified copy', state: active}
 - {id: GP-044, role: any, at: before_round, do: require governed WAV writer before genuine cloned output retry, check: {type: file, path: product/engine/resources/tooling/voxvulgi_cosyvoice_render.py, contains: def save_generated_wav}, source: 'actual dtype replay RED: Torchaudio save requires missing TorchCodec after genuine synthesis', state: active}
 - {id: GP-045, role: any, at: before_round, do: verify scoped Rust changes exclude unrelated formatter churn, check: {type: confirm}, source: 'mistake: whole-file rustfmt expanded existing unrelated jobs formatting; transplant only DIAG changes', state: active}
+- {id: GP-046, role: any, at: before_round, do: require owned bridge token replay gate, check: {type: file, path: .local/wp0329_mux_replay_native.py, exists: true}, source: 'cause: replay01 HTTP403 omitted bridge token; fresh02 preserves failed01', state: active}
+- {id: GP-047, role: any, at: before_round, do: require canonical subtitle language replay metadata, check: {type: file, path: .local/wp0329_mux_replay_native.py, exists: true}, source: 'cause: replay02 used raw en ko instead of exact production eng kor; fresh03 preserves02', state: active}
