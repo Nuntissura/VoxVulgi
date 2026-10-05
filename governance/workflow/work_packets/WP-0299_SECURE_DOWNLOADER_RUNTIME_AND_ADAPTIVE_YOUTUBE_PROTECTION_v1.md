@@ -99,3 +99,11 @@ WP-0299 must not be moved to DONE on the strength of this review. Part 1 clears 
 Source/runtime trust and adaptive protection work recorded implemented and reviewed. Remaining offline packaged, exact authenticated canary, restart/replay/recovery and UI proof; foreign-compilation delay was historical. Current version/changelog retention rules override historical increment instructions. Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
 
 </topic>
+
+<topic id="v47-upgrade-remediation-20261005" status="needs-validation" wp="WP-0299" updated_at="2026-10-05">
+
+The actual c49c95c full engine run ended with 819 passed, 2 failed and 5 ignored. Retained result: `.local/proofVVRemaining/wp0330_final_core_c49c95c_02_resume/result.json`, SHA256 `6c73bd870649ebe0fb456da98144dcffcd7308073ea15253a039a2010cce11eb`. The provider adoption test failed because its partial schema-47 fixture omitted `library_item`. Replaying the production migration ladder through 47 also exposed a production ordering defect: migration 48 backfills the unbound identity before dropping the superseded schema-47 update trigger that rejects it.
+
+The reviewed remediation restores the authentic historical fixture and moves only the two superseded trigger drops before backfill within the existing migration transaction. Original exact-destination, mismatch, pre-adoption, nonce and lineage assertions and all schema-48 enforcement remain intact. Source changed; execution proof is pending. Required focused proof covers authentic unbound-47 adoption and mismatch refusal, schema-48 illegal SQL/governed reinstall and malformed authority, followed by the full owning engine suite. Existing packaged, canary, restart and offline gates remain open; status stays `NEEDS_VALIDATION`. This defect does not establish the cause or resolution of the operator's read-admission timeout.
+
+</topic>

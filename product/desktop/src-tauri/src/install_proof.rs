@@ -65,6 +65,14 @@ impl InstallProof {
             jobs::start_runner_with_install_proof_guard(paths.clone(),self.runner_guard(safe_mode))
         }
     }
+    pub(super) fn interrupted_recovery_ready(&self,paths:&AppPaths,nonce:&str,owner_sha:&str)->Result<u32,String> {
+        if !self.reattached || self.workflow || self.active_install.load(Ordering::SeqCst)
+            || self.original_owner_pid==std::process::id() || owner_sha!=self.original_owner_sha256 {
+            return Err("Recovery requires the closed initial owner of this installer-only proof root".into());
+        }
+        self.revalidate(paths,nonce)?;
+        Ok(self.original_owner_pid)
+    }
     pub(super) fn phase2_admission_ready(&self, paths: &AppPaths, nonce: &str) -> Result<(),String> {
         if self.workflow {return Err("Private workflow mode refuses installer commands".into());}
         self.revalidate_fast(paths,nonce)?;
@@ -205,6 +213,7 @@ impl InstallProof {
 }
 #[cfg(not(windows))]
 impl InstallProof {
+    pub(super) fn interrupted_recovery_ready(&self,_:&AppPaths,_:&str,_:&str)->Result<u32,String>{Err("Install proof requires Windows".into())}
     pub(super) fn provenance(&self) -> serde_json::Value { serde_json::Value::Null }
     pub(super) fn start_explicit_runner(self:&Arc<Self>, _: &AppPaths, _: Arc<AtomicBool>) -> voxvulgi_engine::Result<jobs::JobRunnerHandle> {Err(voxvulgi_engine::EngineError::InstallFailed("Install proof requires Windows".into()))}
     pub(super) fn phase2_admission_ready(&self, _: &AppPaths, _: &str) -> Result<(),String> { Err("Install proof requires Windows".into()) }

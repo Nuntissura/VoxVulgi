@@ -227,10 +227,61 @@ fn voice_runtime_paths_readback(paths:&AppPaths)->Result<Value,String> {
         "cosy_backend_dir":paths.cosyvoice_backend_dir(),"cosy_model_dir":paths.cosyvoice_model_parent_dir().join("CosyVoice2-0.5B")}))
 }
 
+
+// Only the exact original guarded installer can use the ordinary orphan-recovery API.
+fn recover_interrupted_phase2_original(paths:&AppPaths, request:&Value, original_owner_pid:u32)->Result<Value,String> {
+    let id=request["job_id"].as_str().filter(|v|token(v)).ok_or("exact job_id required")?;
+    let attempt=request["attempt_no"].as_u64().filter(|v|*v>0).ok_or("attempt_no required")?;
+    let actor=request["original_actor_id"].as_str().filter(|v|token(v)).ok_or("original actor required")?;
+    let operation=request["original_operation_id"].as_str().filter(|v|token(v)).ok_or("original operation required")?;
+    let key=format!("{:x}",Sha256::digest(format!("{actor}\0{operation}").as_bytes()));
+    let producer_path=paths.base_dir.join("diagnostics/agent_operations").join(format!("{key}.json"));
+    let read_bounded=|path:&std::path::Path|->Result<Value,String> {
+        if std::fs::metadata(path).map_err(|e|e.to_string())?.len()>1_048_576 {return Err("Proof JSON exceeds bounded input".into());}
+        serde_json::from_slice(&std::fs::read(path).map_err(|e|e.to_string())?).map_err(|e|e.to_string())
+    };
+    let producer=read_bounded(&producer_path)?;
+    if producer["command"]!="tools.install_phase2" || producer["status"]!="completed"
+        || producer["actor_id"]!=actor || producer["operation_id"]!=operation
+        || producer["process_id"].as_u64()!=Some(u64::from(original_owner_pid))
+        || producer["result"]["admission"]["job"]["id"]!=id
+        || producer["result"]["admission"]["job"]["type"]!="install_phase2_packs_v1"
+        || producer["result"]["admission"]["job"]["attempt_no"].as_u64()!=Some(attempt) {
+        return Err("Original initial-owner installer producer receipt mismatch".into());
+    }
+    let journal=read_bounded(&paths.install_logs_dir().join("phase2/latest.json"))?;
+    if journal["job_id"]!=id {return Err("Original installer journal does not match selected job".into());}
+    let job=jobs::get_job(paths,id).map_err(|e|e.to_string())?.ok_or("Original installer missing")?;
+    if job.job_type!="install_phase2_packs_v1" || job.status!=jobs::JobStatus::Running
+        || u64::from(job.attempt_no)!=attempt {return Err("Exact running original installer attempt required".into());}
+    let confirmation=format!("RECOVER_ORPHANED_RUNNING:{:x}",Sha256::digest(format!("{id}\0").as_bytes()));
+    if request["confirmation"].as_str()!=Some(confirmation.as_str()) {return Err(format!("exact confirmation required: {confirmation}"));}
+    // Existing API rechecks pause and the WHOLE canonical running set in its transaction.
+    // It marks the installer failed/interrupted, retaining its original ID and attempt.
+    let receipt=jobs::recover_orphaned_running_jobs_exact(paths,&[id.to_string()]).map_err(|e|e.to_string())?;
+    Ok(json!({"recovery":receipt,"original_job_id":id,"attempt_no":attempt,"runner_started":false,
+        "replacement_created":false,"installer_requeued":false,"journal_rewritten":false}))
+}
+
 fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, String> {
     match command {
         "ui.viewport.inspect" => super::agent_viewport::execute(request, false),
         "ui.viewport.set" => super::agent_viewport::execute(request, true),
+        "tools.recover_interrupted_phase2_proof" => {
+            require_localization_mutation_ready()?;
+            if !agent_bridge_state().lock().unwrap().agent_headless {return Err("Recovery requires headless install proof".into());}
+            if EXPLICIT_HEADLESS_RUNNER.get().is_some_and(|runner|runner.lock().map_or(true,|r|r.is_some())) {
+                return Err("Recovery refuses a live explicit runner".into());
+            }
+            let app=AGENT_APP_HANDLE.get().ok_or("application unavailable")?;
+            let state=app.try_state::<AppState>().ok_or("startup not ready")?;
+            let owner=state.install_proof.as_ref().ok_or("Explicit private install proof required")?;
+            let pid=owner.interrupted_recovery_ready(paths,
+                request["proof_nonce"].as_str().ok_or("proof_nonce required")?,
+                request["original_owner_sha256"].as_str().ok_or("original owner SHA required")?)?;
+            require_localization_mutation_ready()?; // Fresh check after full owned-tree validation.
+            recover_interrupted_phase2_original(paths,request,pid)
+        }
         "tools.install_phase2" => {
             require_localization_mutation_ready()?;
             if !agent_bridge_state().lock().unwrap().agent_headless { return Err("Install proof requires headless".into()); }
@@ -840,6 +891,60 @@ mod tests {
         assert_eq!(value["cosy_interpreter"],tools::cosyvoice_venv_python_path(&paths).unwrap().to_string_lossy().as_ref());
         assert_eq!(value["huggingface_cache_dir"],paths.huggingface_cache_dir().to_string_lossy().as_ref());
         assert_ne!(value["main_interpreter"],value["cosy_interpreter"]);
+    }
+
+    fn wp0230_orphan_fixture()->(tempfile::TempDir,AppPaths,Value) {
+        let temp=tempfile::tempdir().unwrap();let paths=AppPaths::new(temp.path().join("private"));paths.ensure_dirs().unwrap();
+        let conn=rusqlite::Connection::open(paths.db_dir().join("app.sqlite")).unwrap();db::migrate(&conn).unwrap();drop(conn);
+        let row=jobs::enqueue_install_phase2_packs_v1(&paths).unwrap();
+        {let conn=db::write_context(&paths).unwrap();conn.execute("UPDATE job SET status='running',started_at_ms=123 WHERE id=?1",[&row.id]).unwrap();}
+        jobs::set_queue_paused(&paths,true).unwrap();
+        let actor="test.original";let operation="original-install";
+        let key=format!("{:x}",Sha256::digest(format!("{actor}\0{operation}").as_bytes()));
+        let folder=paths.base_dir.join("diagnostics/agent_operations");std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(format!("{key}.json")),json!({"command":"tools.install_phase2","status":"completed","actor_id":actor,"operation_id":operation,"process_id":12345,"result":{"admission":{"job":{"id":row.id,"type":"install_phase2_packs_v1","attempt_no":row.attempt_no}}}}).to_string()).unwrap();
+        let journal=paths.install_logs_dir().join("phase2/latest.json");std::fs::create_dir_all(journal.parent().unwrap()).unwrap();
+        std::fs::write(journal,json!({"job_id":row.id,"steps":[{"id":"python","status":"done","finished_at_ms":42},{"id":"cosyvoice","status":"running"}]}).to_string()).unwrap();
+        let confirmation=format!("RECOVER_ORPHANED_RUNNING:{:x}",Sha256::digest(format!("{}\0",row.id).as_bytes()));
+        (temp,paths,json!({"job_id":row.id,"attempt_no":row.attempt_no,"original_actor_id":actor,"original_operation_id":operation,"confirmation":confirmation}))
+    }
+    #[test] fn wp0230_exact_orphan_recovery_preserves_original_attempt_and_journal_without_runner() {
+        let (_temp,paths,request)=wp0230_orphan_fixture();let id=request["job_id"].as_str().unwrap();
+        let before=jobs::get_job(&paths,id).unwrap().unwrap();let path=paths.install_logs_dir().join("phase2/latest.json");let bytes=std::fs::read(&path).unwrap();
+        let result=recover_interrupted_phase2_original(&paths,&request,12345).unwrap();
+        let after=jobs::get_job(&paths,id).unwrap().unwrap();assert_eq!(after.status,jobs::JobStatus::Failed);assert_eq!(after.error.as_deref(),Some("interrupted by app shutdown"));
+        assert_eq!((after.id,after.attempt_no,after.params_json),(before.id,before.attempt_no,before.params_json));
+        assert_eq!(std::fs::read(path).unwrap(),bytes);assert_eq!(result["runner_started"],false);assert_eq!(result["replacement_created"],false);
+        assert!(recover_interrupted_phase2_original(&paths,&request,12345).is_err());
+    }
+    #[test] fn wp0230_exact_orphan_recovery_refuses_later_attempt_with_old_genuine_producer() {
+        let (_temp,paths,mut request)=wp0230_orphan_fixture();let id=request["job_id"].as_str().unwrap().to_owned();
+        {let conn=db::write_context(&paths).unwrap();conn.execute("UPDATE job SET attempt_no=2 WHERE id=?1",[&id]).unwrap();}
+        request["attempt_no"]=json!(2);
+        let before=jobs::get_job(&paths,&id).unwrap().unwrap();let journal=paths.install_logs_dir().join("phase2/latest.json");let bytes=std::fs::read(&journal).unwrap();
+        assert!(recover_interrupted_phase2_original(&paths,&request,12345).unwrap_err().contains("producer receipt mismatch"));
+        let after=jobs::get_job(&paths,&id).unwrap().unwrap();assert_eq!(after.status,jobs::JobStatus::Running);
+        assert_eq!((after.id,after.attempt_no,after.params_json,after.started_at_ms),(before.id,before.attempt_no,before.params_json,before.started_at_ms));
+        assert_eq!(std::fs::read(journal).unwrap(),bytes);
+    }
+    #[test] fn wp0230_orphan_recovery_catalog_refuses_arbitrary_sql_and_missing_owner() {
+        let catalog=catalog();let descriptor=catalog["commands"].as_array().unwrap().iter().find(|v|v["name"]=="tools.recover_interrupted_phase2_proof").unwrap();
+        assert!(!is_read("tools.recover_interrupted_phase2_proof"));
+        let mut request=json!({"actor_id":"test","operation_id":"recover","command":"tools.recover_interrupted_phase2_proof","proof_nonce":"nonce","original_owner_sha256":"sha","original_actor_id":"initial","original_operation_id":"install","job_id":"original","attempt_no":1,"confirmation":"exact"});
+        assert!(validate_input(&request,descriptor).is_ok());request["sql"]=json!("UPDATE job SET status='failed'");assert!(validate_input(&request,descriptor).is_err());
+        request.as_object_mut().unwrap().remove("sql");request.as_object_mut().unwrap().remove("proof_nonce");assert!(validate_input(&request,descriptor).is_err());
+    }
+    #[test] fn wp0230_exact_orphan_recovery_refuses_wrong_producer_attempt_unpaused_and_extra_running() {
+        let (_temp,paths,request)=wp0230_orphan_fixture();let id=request["job_id"].as_str().unwrap();
+        assert!(recover_interrupted_phase2_original(&paths,&request,54321).is_err());
+        let mut wrong=request.clone();wrong["attempt_no"]=json!(2);assert!(recover_interrupted_phase2_original(&paths,&wrong,12345).is_err());
+        wrong=request.clone();wrong["confirmation"]=json!("wrong");assert!(recover_interrupted_phase2_original(&paths,&wrong,12345).is_err());
+        jobs::set_queue_paused(&paths,false).unwrap();assert!(recover_interrupted_phase2_original(&paths,&request,12345).is_err());
+        jobs::set_queue_paused(&paths,true).unwrap();
+        {let conn=db::write_context(&paths).unwrap();conn.execute("INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path) VALUES('unrelated','asr_local','running',0,'{}',1,'')",[]).unwrap();}
+        assert!(recover_interrupted_phase2_original(&paths,&request,12345).is_err());
+        assert_eq!(jobs::get_job(&paths,id).unwrap().unwrap().status,jobs::JobStatus::Running);
+        assert_eq!(jobs::get_job(&paths,"unrelated").unwrap().unwrap().status,jobs::JobStatus::Running);
     }
 
 }

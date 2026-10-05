@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 60
+generation: 68
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -80,3 +80,11 @@ steps:
 - {id: GP-064, role: any, at: before_round, do: require force pip log RED retained for independent original direct handler proof, check: {type: file, path: .local/wp0330_actual_install_proof_native_v6.py, contains: prior_force_log_red}, source: force product succeeded actual INSTALL observed but fullpip step output missing, state: active}
 - {id: GP-065, role: any, at: before_round, do: verify exact baseline identities before final candidate apply, check: {type: confirm}, source: 'failure: normalized final patch refused current CRLF baseline; verify raw and normalized hashes before apply', state: active}
 - {id: GP-066, role: any, at: before_round, do: require exact final source hashes after CR only apply repair, check: {type: confirm}, source: 'failure: patch inserted doubled CR; all20 differ only CR before exact prepared byte replacement', state: active}
+- {id: GP-067, role: any, at: before_round, do: require focused parser handles intentional panic output and reuse proven green tests, check: {type: confirm}, source: 'failure: engine test7 passed but nocapture split ok line; resume exact same EXE without rerunning greens', state: active}
+- {id: GP-068, role: any, at: before_round, do: require projection contract names match current approved getters, check: {type: confirm}, source: 'engine full RED: obsolete get_tuning projection contract after WP0321 cooldown replacement', state: active}
+- {id: GP-069, role: any, at: before_round, do: require historical provider fixture replays complete production schema through47, check: {type: confirm}, source: 'engine full RED: partial version47 fixture lacks library_item required by later migrations', state: active}
+- {id: GP-070, role: any, at: before_round, do: require full suite parser separates native nested child summaries and validates six tuple fields, check: {type: confirm}, source: 'review P1: full logs contain nested summaries and prepared parser used nonexistent tuple index6', state: active}
+- {id: GP-071, role: any, at: before_round, do: require migration drops superseded guards before atomic identity backfill, check: {type: confirm}, source: 'source P1: genuine47 unbound fixture exposes old update trigger rejecting version48 backfill', state: active}
+- {id: GP-072, role: any, at: before_round, do: require original installer producer type and attempt match current recovery selection, check: {type: confirm}, source: 'source P1: orphan route matched producer ID but omitted actual producer type and attempt', state: active}
+- {id: GP-073, role: any, at: before_round, do: verify each candidate source path against actual prepared file inventory before apply, check: {type: confirm}, source: 'apply preflight RED: orphan candidate uses product folder directly rather than source/product', state: active}
+- {id: GP-074, role: any, at: before_round, do: require manifest baseline identities and patch match the declared predecessor source, check: {type: confirm}, source: 'review: V7 declared c49 baseline but retained d066 hashes and absent-file records', state: active}

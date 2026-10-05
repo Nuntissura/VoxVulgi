@@ -15442,29 +15442,19 @@ mod tests {
     ) {
         paths.ensure_dirs().unwrap();
         let conn = rusqlite::Connection::open(paths.db_dir().join("app.sqlite")).unwrap();
-        conn.execute_batch(
-            "CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-             INSERT INTO meta(key,value) VALUES('schema_version','47');
-             CREATE TABLE provider_install_lineage(
-               attempt_id TEXT PRIMARY KEY,stage_root TEXT NOT NULL,phase TEXT NOT NULL,
-               updated_at_ms INTEGER NOT NULL,ownership_token_digest TEXT NOT NULL DEFAULT '',
-               node_directory_identity TEXT NOT NULL DEFAULT '',provider_directory_identity TEXT NOT NULL DEFAULT '',
-               node_tree_sha256 TEXT NOT NULL DEFAULT '',provider_tree_sha256 TEXT NOT NULL DEFAULT ''
-             );
-             CREATE TABLE provider_install_owner(
-               singleton INTEGER PRIMARY KEY,attempt_id TEXT NOT NULL UNIQUE,
-               acquired_at_ms INTEGER NOT NULL,updated_at_ms INTEGER NOT NULL,
-               owner_pid INTEGER NOT NULL DEFAULT 0,owner_process_identity TEXT NOT NULL DEFAULT ''
-             );
-             CREATE TABLE provider_installed_identity(
-               singleton INTEGER PRIMARY KEY,install_generation TEXT NOT NULL,
-               node_directory_identity TEXT NOT NULL,provider_directory_identity TEXT NOT NULL,
-               node_tree_sha256 TEXT NOT NULL,provider_tree_sha256 TEXT NOT NULL,
-               committed_at_ms INTEGER NOT NULL
-             );
-             PRAGMA user_version=47;",
-        )
-        .unwrap();
+        for step in crate::db::MIGRATION_STEPS.iter().take_while(|step| step.version <= 47) {
+            let tx = conn.unchecked_transaction().unwrap();
+            (step.apply)(&tx).unwrap();
+            tx.pragma_update(None, "user_version", step.version).unwrap();
+            tx.execute("INSERT INTO meta(key,value) VALUES('schema_version',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [step.version.to_string()]).unwrap();
+            tx.commit().unwrap();
+        }
+        assert_eq!(crate::db::schema_user_version(&conn).unwrap(), 47);
+        conn.execute(
+            "INSERT INTO provider_install_lineage(attempt_id,stage_root,phase,updated_at_ms,node_directory_identity,provider_directory_identity,node_tree_sha256,provider_tree_sha256)
+             VALUES('v47_fixture','v47_fixture','committed',1,?1,?2,?3,?4)",
+            rusqlite::params![identity.node_directory_identity,identity.provider_directory_identity,node_tree_override.unwrap_or(&identity.node_tree_sha256),identity.provider_tree_sha256],
+        ).unwrap();
         conn.execute(
             "INSERT INTO provider_installed_identity(
                singleton,install_generation,node_directory_identity,provider_directory_identity,
@@ -15479,6 +15469,8 @@ mod tests {
             ],
         )
         .unwrap();
+        conn.execute("DELETE FROM provider_install_lineage WHERE attempt_id='v47_fixture'", []).unwrap();
+
     }
 
     #[test]

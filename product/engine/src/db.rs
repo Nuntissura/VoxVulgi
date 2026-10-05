@@ -2454,6 +2454,10 @@ fn apply_schema_v48(conn: &Connection) -> Result<()> {
     // re-authenticate its complete destination trees before adopting it under the lifecycle lock.
     conn.execute_batch(
         r#"
+-- Retire v47 guards before backfill; the same migration transaction installs v48 authority below.
+DROP TRIGGER IF EXISTS trg_provider_installed_identity_requires_committed_lineage_insert;
+DROP TRIGGER IF EXISTS trg_provider_installed_identity_requires_committed_lineage_update;
+
 UPDATE provider_install_lineage
 SET commit_nonce=lower(hex(randomblob(32)))
 WHERE commit_nonce='';
@@ -2502,9 +2506,6 @@ CREATE TABLE IF NOT EXISTS provider_installed_identity_mutation_guard (
   operation TEXT NOT NULL CHECK(operation IN ('invalidate','uninstall')),
   created_at_ms INTEGER NOT NULL
 );
-
-DROP TRIGGER IF EXISTS trg_provider_installed_identity_requires_committed_lineage_insert;
-DROP TRIGGER IF EXISTS trg_provider_installed_identity_requires_committed_lineage_update;
 
 CREATE TRIGGER IF NOT EXISTS trg_provider_install_lineage_v48_insert_prepared
 BEFORE INSERT ON provider_install_lineage
@@ -4952,7 +4953,7 @@ CREATE INDEX idx_media_availability_refresh
             (
                 "youtube_protection.rs",
                 &[
-                    "get_tuning",
+                    "get_cooldown_settings",
                     "load_policy_state",
                     "retention_continuation",
                     "policy_history",

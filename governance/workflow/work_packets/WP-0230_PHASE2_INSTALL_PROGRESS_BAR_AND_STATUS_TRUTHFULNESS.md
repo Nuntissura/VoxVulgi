@@ -331,3 +331,13 @@ Actual installed d066e3c/source0.1.205, owned guarded PID264504: original forced
 Opened screenshots: `governance/snapshots/WP-0330_20261005_actual_install/force_actual_headline_1791172809702.png`, `force_actual_active_step_1791172810097.png`, `force_retained_native_current_1791173322855.png` (786×594). Paired audit/dump/snapshot receipts and exact canonical/latest-journal reread are under `.local/proofVVRemaining/wp0330_actual_force_d066e3c_02/force_retained_current_*_1791173322371.json` and `force_progress_1791173322371.json`. These snapshots requested no scroll_top; a blank/faint captured progress bar alone does not establish a native renderer defect. Never-started, cancelled/interrupted, successful and corrected live-poll cases remain unproven by this scoped run. Existing status and all criteria remain unchanged.
 
 </topic>
+
+<topic id="quiet-interrupted-proof-tool-20261005" status="needs-validation" wp="WP-0230" updated_at="2026-10-05">
+
+The genuine force-quit/restart acceptance cannot use graceful shutdown as its substitute. Inspected headless startup skips orphan recovery; the existing `jobs_recover_orphaned_running`/`recover_orphaned_running_jobs_exact` path marks an original interrupted installer failed without starting a runner, but lacked a bridge entrypoint. The operator authorized missing tool expansion for autonomous proof.
+
+The reviewed `tools.recover_interrupted_phase2_proof` entrypoint is restricted to an explicitly reattached, exclusively owned disposable installer root, headless mode, Safe Mode off and no active installer or explicit runner. It binds the immutable initial owner and original persisted installer producer, exact job type/ID/attempt, actual journal and selection confirmation; the original engine transaction rechecks pause and the entire canonical running set. It preserves the original attempt and journal and never enqueues, replaces or resumes an installer. Producer attempt 1 must refuse a later canonical attempt 2. `queue.pause` establishes pause through the existing product command.
+
+Source and four component tests are present but unexecuted. Packaged proof must use a freshly session-owned process and genuine original installer, independently establish the interrupted process and its owned children are absent, then inspect the actual interrupted N/M surface against preserved done steps. Never-started, active, completion, elapsed readability and all existing acceptance criteria remain unchanged; status stays `NEEDS_VALIDATION`.
+
+</topic>
