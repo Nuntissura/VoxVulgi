@@ -102,7 +102,8 @@ pub fn begin_command(command:&std::process::Command,pid:u32)->CommandScope {
     if !matches!(protocol.as_str(),"pip_raw"|"huggingface_http_payload") || uuid::Uuid::parse_str(&id).is_err() {return CommandScope(None);}
     let counter_source=if protocol=="pip_raw" {"original_pip_raw_payload_sum"} else {"original_http_update_payload_sum"};
     let c=Arc::new(Command {step:step.clone(),id,pid,protocol,active:AtomicBool::new(true),lost:AtomicBool::new(false),start:Instant::now(),decoder:Mutex::new(Decoder {counter_source,..Decoder::default()})});
-    if let Ok(mut latest)=step.command.try_lock() {*latest=Some(c.clone());CommandScope(Some(c))} else {CommandScope(None)}
+    let scope = if let Ok(mut latest)=step.command.try_lock() {*latest=Some(c.clone());CommandScope(Some(c))} else {CommandScope(None)};
+    scope
 }
 impl Command {
     fn feed(&self,bytes:&[u8],stderr:bool) {
