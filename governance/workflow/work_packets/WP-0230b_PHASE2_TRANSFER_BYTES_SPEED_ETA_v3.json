@@ -220,6 +220,7 @@
       }
     },
     "remaining": [
+      "Recorded validation failure 2026-10-06: original Cosy model call tools.rs uses [-I,-c,code], but phase2_transfer_live.rs accepts only [-c,code] and rebuilds without isolation. Remediate exact isolated invocation recognition and preserve -I; prove original arguments/env/cwd and genuine Cosy boundary without changing package pins.",
       "A07: same genuine tracked Phase2 installation with paired Diagnostics/Localization transfer pixels, audit, dump and canonical attempt/journal.",
       "Full original installer resume/cancel/concurrency and Cosy interpreter boundary proof remain unexecuted.",
       "Parent WP0230 genuine crash/recovery acceptance remains separate and unproven by this batch."

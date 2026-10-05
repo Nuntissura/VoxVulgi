@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: WP-0230B-VALIDATE-20261006
 parent: null
-generation: 11
+generation: 12
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -36,3 +36,4 @@ steps:
 - {id: GP-020, role: any, at: before_round, do: verify existing shipped Cosy backend input before private repair, check: {type: file, path: offline-installer-runtime/qualified_runtime/runtime_7ea19cb688095cd14dfbc84e/generation/voice_backends/cosyvoice/cosyvoice/cli/cosyvoice.py, exists: true}, source: Fresh test omitted shipped Cosy code; broad buildtree search interrupted; known authority source used, state: active}
 - {id: GP-021, role: any, at: before_round, do: require SHA hexadecimal case normalization and durable copy errors, check: {type: file, path: .local/wp0230b_cosy_backend_code_input_20261006_v2.py, contains: .lower()}, source: Backendinput01 rejected same SHA case beforecopy; v2 fixes comparison and records exception receipts, state: active}
 - {id: GP-022, role: any, at: before_round, do: require canonical restart restore before original repair action, check: {type: file, path: product/desktop/src/lib/phase2InstallRestore.ts, contains: job.id !== id}, source: Repair hidden after restart because failure state transient; exact canonical reread restores existing UI, state: active}
+- {id: GP-023, role: any, at: before_round, do: require native volume identity normalization equal Rust low32, check: {type: file, path: .local/wp0230b_owned_lifecycle_v2.py, contains: v.volume & 0xffffffff}, source: Close01 refused before WM_CLOSE; native64 serial differs Rustas-u32; full128 file ID matches, state: active}

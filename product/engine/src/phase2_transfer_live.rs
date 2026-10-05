@@ -163,9 +163,9 @@ pub fn instrument_python(command:&mut std::process::Command,python:&Path,args:&[
         }
         let wrapper=format!("{}\n{}\n{}",include_str!("../resources/tooling/hf_owned_progress.py"),include_str!("../resources/tooling/hf_transfer_wrapper.py"),include_str!("../resources/tooling/pip_transfer_wrapper.py"));
         let code=format!("{}\n_vv_run_original_pip({}, {}, {})",wrapper,serde_json::to_string(&args[2..]).ok()?,serde_json::to_string(&entry["files"]).ok()?,serde_json::to_string(&site.to_string_lossy()).ok()?);
-        replace_python_code(command,&code);
+        replace_python_code(command,&code,false);
         command.env("VOXVULGI_ORIGINAL_SCOPED_PIP","1");protocol="pip_raw";selected=entry;
-    } else if args.len()==2 && args[0]=="-c" && (args[1].contains("hf_hub_download(")||args[1].contains("snapshot_download(")) {
+    } else if let Some((isolated,original_code))=hf_python_code(args) {
         let (site,entry)=pinned_site(python,&table["huggingface"])?;
         if !((entry["huggingface_hub"]=="0.34.4"&&entry["tqdm"]=="4.68.3")||(entry["huggingface_hub"]=="1.33.0"&&entry["tqdm"]=="4.70.1")){return None;}
         let required=["huggingface_hub.utils.tqdm","huggingface_hub.file_download","huggingface_hub.constants","tqdm.std","tqdm.utils","tqdm.auto"];
@@ -173,17 +173,26 @@ pub fn instrument_python(command:&mut std::process::Command,python:&Path,args:&[
         if modules.len()!=required.len() || required.iter().any(|name|!modules.get(*name).and_then(Value::as_str).is_some_and(|hash|hash.len()==64&&hash.bytes().all(|b|b.is_ascii_hexdigit()))) {return None;}
         let code=include_str!("../resources/tooling/hf_owned_progress.py");
         let wrapper=include_str!("../resources/tooling/hf_transfer_wrapper.py");
-        let prelude=format!("{}\n{}\n_vv_run_original({}, {}, {})",code,wrapper,serde_json::to_string(args[1]).ok()?,serde_json::to_string(&site.to_string_lossy()).ok()?,serde_json::to_string(&entry["modules"]).ok()?);
+        let prelude=format!("{}\n{}\n_vv_run_original({}, {}, {})",code,wrapper,serde_json::to_string(original_code).ok()?,serde_json::to_string(&site.to_string_lossy()).ok()?,serde_json::to_string(&entry["modules"]).ok()?);
         // Replace only this command's original -c code; original acquisition code is executed unchanged.
-        replace_python_code(command,&prelude);
+        replace_python_code(command,&prelude,isolated);
         protocol="huggingface_http_payload";selected=entry;
     } else {return None;}
     let _=selected;
     let nonce=uuid::Uuid::new_v4().to_string();command.env("VOXVULGI_TRANSFER_NONCE",&nonce).env("VOXVULGI_TRANSFER_PROTOCOL",protocol);Some(nonce)
 }
-fn replace_python_code(command:&mut std::process::Command,code:&str) {
+/// Only the two original acquisition forms are eligible; no extra flags or argv tail.
+fn hf_python_code<'a>(args:&[&'a str])->Option<(bool,&'a str)> {
+    let (isolated,code)=match args {
+        ["-c",code]=>(false,*code),
+        ["-I","-c",code]=>(true,*code),
+        _=>return None,
+    };
+    (code.contains("hf_hub_download(")||code.contains("snapshot_download(")).then_some((isolated,code))
+}
+fn replace_python_code(command:&mut std::process::Command,code:&str,isolated:bool) {
     let program=command.get_program().to_owned();let envs:Vec<_>=command.get_envs().map(|(k,v)|(k.to_owned(),v.map(std::ffi::OsStr::to_owned))).collect();let cwd=command.get_current_dir().map(Path::to_path_buf);
-    let mut replacement=crate::cmd::command(program);replacement.args(["-c",code]);
+    let mut replacement=crate::cmd::command(program);if isolated {replacement.arg("-I");}replacement.args(["-c",code]);
     for (k,v) in envs {if let Some(v)=v{replacement.env(k,v);}else{replacement.env_remove(k);}}if let Some(cwd)=cwd{replacement.current_dir(cwd);}*command=replacement;
 }
 
@@ -212,6 +221,38 @@ mod tests {
         let mut c=crate::cmd::command("python.exe");c.args(["-m","pip","install","example"]);
         assert!(instrument_python(&mut c,Path::new("Scripts/python.exe"),&["-m","pip","install","example"]).is_none());
         assert_eq!(c.get_args().collect::<Vec<_>>(),["-m","pip","install","example"].map(std::ffi::OsStr::new));
+    }
+    #[test] fn isolated_hf_code_preserves_isolation_original_code_environment_and_cwd() {
+        let original="from huggingface_hub import snapshot_download\nsnapshot_download('original-repo', revision='original-revision')";
+        let args=["-I","-c",original];
+        let (isolated,code)=hf_python_code(&args).unwrap();
+        assert!(isolated);assert_eq!(code,original);
+        assert_eq!(hf_python_code(&["-c",original]),Some((false,original)));
+        let temp=tempfile::tempdir().unwrap();
+        let mut command=crate::cmd::command("original-python.exe");command.args(args);
+        command.env("HF_HOME","original-cache").env("PIP_NO_INPUT","1").env_remove("PYTHONPATH").current_dir(temp.path());
+        let before_env:Vec<_>=command.get_envs().map(|(k,v)|(k.to_owned(),v.map(std::ffi::OsStr::to_owned))).collect();
+        let wrapped=format!("_vv_run_original({}, 'site', {{}})",serde_json::to_string(code).unwrap());
+        replace_python_code(&mut command,&wrapped,isolated);
+        assert_eq!(command.get_program(),std::ffi::OsStr::new("original-python.exe"));
+        assert_eq!(command.get_args().collect::<Vec<_>>(),["-I","-c",wrapped.as_str()].map(std::ffi::OsStr::new));
+        assert_eq!(command.get_current_dir(),Some(temp.path()));
+        assert_eq!(command.get_envs().map(|(k,v)|(k.to_owned(),v.map(std::ffi::OsStr::to_owned))).collect::<Vec<_>>(),before_env);
+        assert!(wrapped.contains(&serde_json::to_string(original).unwrap()));
+    }
+    #[test] fn unsupported_hf_flags_or_trailing_arguments_leave_command_unchanged() {
+        let temp=tempfile::tempdir().unwrap();let paths=AppPaths::new(temp.path().to_path_buf());
+        let _step=enter_step(&paths,"unsupported-hf-flags",1,"model");
+        let code="hf_hub_download('original-repo', 'original-file')";
+        for args in [vec!["-u","-c",code],vec!["-E","-c",code],vec!["-B","-c",code],vec!["-I","-B","-c",code],vec!["-I","-c",code,"tail"],vec!["-c",code,"tail"],vec!["-I","-c","print('not acquisition')"]] {
+            assert!(hf_python_code(&args).is_none());
+            let mut command=crate::cmd::command("original-python.exe");command.args(&args).env("HF_HOME","original-cache").env_remove("PYTHONPATH").current_dir(temp.path());
+            let before_env:Vec<_>=command.get_envs().map(|(k,v)|(k.to_owned(),v.map(std::ffi::OsStr::to_owned))).collect();
+            assert!(instrument_python(&mut command,Path::new("Scripts/python.exe"),&args).is_none());
+            assert_eq!(command.get_args().collect::<Vec<_>>(),args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>());
+            assert_eq!(command.get_current_dir(),Some(temp.path()));
+            assert_eq!(command.get_envs().map(|(k,v)|(k.to_owned(),v.map(std::ffi::OsStr::to_owned))).collect::<Vec<_>>(),before_env);
+        }
     }
     fn frame(sequence:u64,bar:u64,bytes:u64,emitted:u64)->Vec<u8> {
         format!("@@VV_TRANSFER nonce {}\n",serde_json::json!({"schema":"vv.phase2.http_transfer.v1","unit":"B","counter_source":"original_http_update_payload_sum","sequence":sequence,"bar":bar,"received_bytes":bytes,"initial_bytes":0,"total_bytes":1000,"gap":false,"event":"update","delta_bytes":100,"observed_monotonic_ns":emitted,"command_start_monotonic_ns":100,"observed_boot_tick_ms":1000})).into_bytes()
