@@ -3478,8 +3478,9 @@ mod tests {
     fn wp0335_rows(conn: &Connection, sql: &str) -> Vec<Vec<rusqlite::types::Value>> {
         let mut stmt = conn.prepare(sql).unwrap();
         let columns = stmt.column_count();
-        stmt.query_map([], |row| (0..columns).map(|column| row.get(column)).collect())
-            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        let rows = stmt.query_map([], |row| (0..columns).map(|column| row.get(column)).collect())
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        rows
     }
 
     fn wp0335_protected_rows(conn: &Connection) -> std::collections::BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
@@ -3562,6 +3563,8 @@ mod tests {
             wp0335_schema61(&conn);
             wp0335_activity_fixture(&conn, 2000, 16*1024);
             if candidate { apply_schema_v62(&conn).unwrap(); }
+            assert_eq!(conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name='idx_job_activity_candidates'", [], |row| row.get::<_, i64>(0)).unwrap(), i64::from(candidate));
+            assert_eq!(schema_user_version(&conn).unwrap(), 61, "only the candidate index differs in this VFS counterfactual");
             drop(conn);
             let database = AppDatabase::for_paths(&paths).unwrap();
             let read = database.read_context(DatabaseOperationContext::new("wp0335", "activity_covering_index")).unwrap();
