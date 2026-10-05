@@ -75,6 +75,7 @@ impl InstallProof {
         Ok(())
     }
     pub(super) fn revalidate(&self, paths: &AppPaths, nonce: &str) -> Result<(), String> {
+        use std::os::windows::io::AsRawHandle;
         self.revalidate_fast(paths, nonce)?;
         // Seed/preparation is allowed only inside this fresh mutable root. Refuse linked
         // descendants before invoking an installer; the harness is the sole writer.
