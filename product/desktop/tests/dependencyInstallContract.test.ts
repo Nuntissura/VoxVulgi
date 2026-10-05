@@ -273,17 +273,42 @@ test("direct voice pack install commands run off the Tauri command lane", () => 
 
 test("Diagnostics voice package headline prefers current runtime readiness over stale install journal", () => {
   const diagnosticsSource = readRepoFile("src", "pages", "DiagnosticsPage.tsx");
-
-  assert.match(
-    diagnosticsSource,
-    /const\s+voicePackagesRuntimeReady\s*=/,
+  const runtimeReady = diagnosticsSource.match(
+    /const\s+voicePackagesRuntimeReady\s*=\s*Boolean\(([\s\S]*?)\);/,
+  );
+  const summary = diagnosticsSource.match(
+    /const\s+phase2SummaryLabel\s*=\s*([\s\S]*?);/,
+  );
+  assert.ok(
+    runtimeReady,
     "Diagnostics must compute current package readiness independently from the latest one-click install journal",
   );
+  assert.ok(summary, "Diagnostics must expose the current readiness summary");
   assert.match(
-    diagnosticsSource,
-    /voicePackagesRuntimeReady[\s\S]{0,220}\?\s*"Installed"[\s\S]{0,220}: phase2HasProblem/,
+    runtimeReady[1],
+    /ttsNeuralLocalV1\?\.installed\s*&&\s*ttsVoicePreservingLocalV1\?\.installed/,
+  );
+  assert.match(summary[1], /voicePackagesRuntimeReady\s*\?\s*"Installed"\s*:\s*"Needs repair"/);
+  assert.doesNotMatch(
+    summary[1],
+    /phase2HasProblem|phase2Latest|phase2HeadlineLabel/,
     "a stale failed phase2 journal must not make the headline say Interrupted when current voice runtime probes are ready",
   );
+  assert.match(diagnosticsSource, /Current readiness<\/div><div className="v">\{phase2SummaryLabel\}/);
+
+  // Exercise the original summary expression, including its pending/active guards.
+  const currentHeadline = new Function(
+    "phase2HasActive", "ttsNeuralLocalV1", "ttsVoicePreservingLocalV1",
+    "sectionStatus", "diagnosticPendingText",
+    `${runtimeReady[0]}\nreturn (${summary[1]});`,
+  );
+  const headline = (active: boolean, neural: { installed: boolean } | null, clone: { installed: boolean } | null) =>
+    currentHeadline(active, neural, clone, { tools: { state: "unrequested" } }, () => "Not checked");
+  assert.equal(headline(false, { installed: true }, { installed: true }), "Installed");
+  assert.equal(headline(false, { installed: false }, { installed: true }), "Needs repair");
+  assert.equal(headline(false, { installed: true }, { installed: false }), "Needs repair");
+  assert.equal(headline(false, null, { installed: true }), "Not checked");
+  assert.equal(headline(true, { installed: true }, { installed: true }), "Installing…");
 });
 
 test("agent bridge handles long visual-debug requests without starving health and state", () => {

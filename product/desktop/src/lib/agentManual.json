@@ -37,7 +37,8 @@
             "type": "string"
           },
           "command": {
-            "type": "string"
+            "type": "string",
+            "const": "tools.recover_interrupted_phase2_proof"
           },
           "proof_nonce": {
             "type": "string"

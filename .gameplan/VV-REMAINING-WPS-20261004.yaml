@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 68
+generation: 77
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -88,3 +88,12 @@ steps:
 - {id: GP-072, role: any, at: before_round, do: require original installer producer type and attempt match current recovery selection, check: {type: confirm}, source: 'source P1: orphan route matched producer ID but omitted actual producer type and attempt', state: active}
 - {id: GP-073, role: any, at: before_round, do: verify each candidate source path against actual prepared file inventory before apply, check: {type: confirm}, source: 'apply preflight RED: orphan candidate uses product folder directly rather than source/product', state: active}
 - {id: GP-074, role: any, at: before_round, do: require manifest baseline identities and patch match the declared predecessor source, check: {type: confirm}, source: 'review: V7 declared c49 baseline but retained d066 hashes and absent-file records', state: active}
+- {id: GP-075, role: any, at: before_round, do: require locked Tauri v6 sidecar for unchanged resource-less desktop test executable, check: {type: confirm}, source: 'desktop loader RED0xC0000139: bins-only resources omit libtest v6 manifest', state: active}
+- {id: GP-076, role: any, at: before_round, do: verify trial and resume consume actual integer0 process counters from retained proof, check: {type: confirm}, source: 'trial V1 source HOLD: expected lists but actual V8 process counters are integers', state: active}
+- {id: GP-077, role: any, at: before_round, do: verify desktop resource OUT_DIR comes from actual current compiler JSON row, check: {type: confirm}, source: inspection found stale204 output; actual205 compiler binds desktop-07ad988a0b2fd109, state: active}
+- {id: GP-078, role: any, at: before_round, do: require actual loader diagnostic before changing failed external-manifest discovery method, check: {type: confirm}, source: 'trial RED: exact external CommonControls manifest still returns0xC0000139 before discovery', state: active}
+- {id: GP-079, role: any, at: before_round, do: require followup_task for completed agents assigned new executable work, check: {type: confirm}, source: 'coordination mistake: send_message to completed agent queued request but did not start preparation', state: active}
+- {id: GP-080, role: any, at: before_round, do: verify exact relocation payload preserved when manifest tool moves relocation table metadata, check: {type: confirm}, source: 'trial RED: mt inserted resource before relocation table; five raw section payloads unchanged', state: active}
+- {id: GP-081, role: any, at: before_round, do: verify multiline inventory parser consumes retained successful native test listing without rerun, check: {type: confirm}, source: 'parser RED: discovery105 exit0 but anchored re.findall omitted re.M; reuse actual stdout', state: active}
+- {id: GP-082, role: any, at: before_round, do: verify manual command constants and readiness summary assertions match current product behavior, check: {type: confirm}, source: 'frontend RED: recovery schema omitted const; readiness test demanded obsolete journal branch', state: active}
+- {id: GP-083, role: any, at: before_round, do: require fresh desktop compiler proof when embedded manual JSON changes, check: {type: confirm}, source: 'dependency check: Rust include_str embeds manual; old desktop105 cannot prove new manual', state: active}
