@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 79
+generation: 85
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -99,3 +99,9 @@ steps:
 - {id: GP-083, role: any, at: before_round, do: require fresh desktop compiler proof when embedded manual JSON changes, check: {type: confirm}, source: 'dependency check: Rust include_str embeds manual; old desktop105 cannot prove new manual', state: active}
 - {id: GP-084, role: any, at: before_round, do: require UTF8-safe console rendering after native test receipts are saved, check: {type: confirm}, source: harness console cp1252 failed printing checkmark after frontend child exit0; retain green log, state: active}
 - {id: GP-085, role: any, at: before_round, do: verify source contracts scope current functions and preserve approved behavior guards, check: {type: confirm}, source: 'full contracts RED7 stale matchers: approved text cadence and scoped factories differ from old assertions', state: active}
+- {id: GP-086, role: any, at: before_round, do: require ASCII regex escape for Unicode test summary markers in saved controller source, check: {type: confirm}, source: 'source review HOLD: PowerShell text roundtrip corrupted U2139 parser before compiler execution', state: active}
+- {id: GP-087, role: any, at: before_round, do: verify persisted PE comparison normalizes tuple values to JSON lists without changing values, check: {type: confirm}, source: 'controller RED before tests: genuine resource equivalence differs only tuple versus persisted JSON list', state: active}
+- {id: GP-088, role: any, at: before_round, do: verify successor manifests resolve retained predecessor repair lists through hashed reference, check: {type: confirm}, source: 'controller RED before tests: current27 snapshot references prior manifest instead of embedding repair key', state: active}
+- {id: GP-089, role: any, at: before_round, do: verify managed build log filename matches canonical release nonce pattern before dispatch, check: {type: confirm}, source: 'Core preflight RED: caller omitted required build_desktop_target_release_ prefix; no compiler ran', state: active}
+- {id: GP-090, role: any, at: before_round, do: verify exact Cargo byte restoration after newline-only rewrite and reject semantic mutation, check: {type: confirm}, source: 'Core final gate RED: Tauri normalized CRLF Cargo manifest to LF', state: active}
+- {id: GP-091, role: any, at: before_round, do: require ordinal decoded comparison rejecting UTF8 BOM changes, check: {type: confirm}, source: 'Actual selftest RED bom_removed: PowerShell culture comparison ignores UFEFF', state: active}

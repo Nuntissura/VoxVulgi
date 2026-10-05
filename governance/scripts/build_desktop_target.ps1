@@ -68,6 +68,22 @@ function Get-FileSha256Hex([string]$Path) {
   }
 }
 
+function Restore-CargoManifestNewlineBytes([string]$Path, [byte[]]$OriginalBytes) {
+  $observedBytes = [System.IO.File]::ReadAllBytes($Path)
+  $originalBase64 = [Convert]::ToBase64String($OriginalBytes)
+  if ([Convert]::ToBase64String($observedBytes) -ceq $originalBase64) { return $false }
+  # Tauri may serialize Cargo.toml with LF. Restore only its exact CRLF-to-LF rewrite.
+  # Strict decoding retains BOM as U+FEFF and rejects invalid UTF-8; no other edits qualify.
+  $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+  $originalText = $strictUtf8.GetString($OriginalBytes)
+  $observedText = $strictUtf8.GetString($observedBytes)
+  if (-not [String]::Equals($originalText.Replace("`r`n", "`n"), $observedText, [StringComparison]::Ordinal)) {
+    throw "Desktop build mutated protected release identity input: $Path"
+  }
+  [System.IO.File]::WriteAllBytes($Path, $OriginalBytes)
+  return $true
+}
+
 function Get-DirectoryPayloadBytes([string]$Path) {
   if (-not (Test-Path -LiteralPath $Path -PathType Container)) {
     return 0L
@@ -710,6 +726,7 @@ if ($TauriArgs) {
   }
 }
 
+$originalDesktopCargoTomlBytes = [System.IO.File]::ReadAllBytes($desktopCargoTomlPath)
 $protectedReleaseInputHashes = [ordered]@{}
 foreach ($protectedPath in @($tauriConfPath, $packageJsonPath, $desktopCargoTomlPath, $buildChangelogPath)) {
   $protectedReleaseInputHashes[$protectedPath] = Get-FileSha256Hex -Path $protectedPath
@@ -954,6 +971,9 @@ try {
   }
 
   Step "Verifying release identity remained unchanged"
+  if (Restore-CargoManifestNewlineBytes -Path $desktopCargoTomlPath -OriginalBytes $originalDesktopCargoTomlBytes) {
+    Write-Host "Restored original Cargo.toml bytes after an exact newline-only tool rewrite."
+  }
   foreach ($protectedPath in $protectedReleaseInputHashes.Keys) {
     $observedHash = Get-FileSha256Hex -Path $protectedPath
     if ($observedHash -cne $protectedReleaseInputHashes[$protectedPath]) {
