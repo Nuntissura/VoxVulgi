@@ -376,8 +376,13 @@ test("voice-preserving status checks OpenVoice runtime availability without impo
   );
   assert.match(
     block,
-    /python_distribution_version\(&venv_python,\s*"MyShell-OpenVoice"\)/,
+    /python_distribution_versions_strict\(&venv_python,\s*&\[[\s\S]*?"MyShell-OpenVoice"/,
     "OpenVoice installed from git reports distribution metadata as MyShell-OpenVoice, not openvoice",
+  );
+  assert.match(
+    block,
+    /version\("MyShell-OpenVoice"\)\s*\.or_else\(\|\| version\("openvoice"\)\)/,
+    "OpenVoice status must prefer MyShell-OpenVoice metadata before the legacy distribution name",
   );
   assert.match(
     block,
