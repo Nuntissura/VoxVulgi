@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: VV-REMAINING-WPS-20261004
 parent: null
-generation: 90
+generation: 91
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -110,3 +110,4 @@ steps:
 - {id: GP-094, role: any, at: before_round, do: verify original Diagnostics target mounted before installer dispatch, check: {type: confirm}, source: 'collector normal01 failed before install: audit captured loading DOM immediately after navigation', state: active}
 - {id: GP-095, role: any, at: before_round, do: verify original installer contract accepts typed invoke and retains exact force and confirmation guards, check: {type: file, path: product/desktop/tests/voicePackManualInstallContract.test.ts, contains: 'const enqueue = diagnostics.slice(enqueueStart, enqueueEnd);'}, source: 'frontend RED: old untyped invoke matcher rejected preserved original command with typed return receipt', state: active}
 - {id: GP-096, role: any, at: before_round, do: require FIFO diagnostics flush before owned install test directory cleanup, check: {type: file, path: product/desktop/src-tauri/src/install_proof.rs, contains: 'flush_diagnostics_trace_queue(&paths, Duration::from_secs(5)).unwrap();'}, source: 'desktop focused RED Os145: async acquire diagnostics raced immediate owned test root deletion', state: active}
+- {id: GP-097, role: any, at: before_round, do: require blocking accepted HTTP fixture stream before bounded header read, check: {type: file, path: product/engine/src/jobs.rs, contains: stream.set_nonblocking(false).expect("blocking accepted fixture stream");}, source: 'engine full RED10035: accepted Windows socket inherited nonblocking listener before request headers', state: active}

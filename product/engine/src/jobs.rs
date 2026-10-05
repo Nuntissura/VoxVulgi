@@ -37530,6 +37530,7 @@ EOF
                     Err(error) => panic!("bounded fixture accept: {error}"),
                 }
             };
+            stream.set_nonblocking(false).expect("blocking accepted fixture stream");
             stream.set_read_timeout(Some(Duration::from_secs(3))).expect("bounded read");
             let mut request = [0; 4096];
             stream.read(&mut request).expect("request headers");
