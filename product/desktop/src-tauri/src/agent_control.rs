@@ -205,9 +205,31 @@ fn require_localization_mutation_ready() -> Result<(), String> {
     Ok(())
 }
 
+pub(super) fn admit_original_phase2_install(state: &AppState, force: bool, nonce: Option<&str>) -> Result<(jobs::JobRow,Option<Value>),String> {
+    let headless=agent_bridge_state().lock().unwrap().agent_headless;
+    if !headless {
+        if nonce.is_some() { return Err("Private installer proof requires headless".into()); }
+        let row=jobs::enqueue_install_phase2_packs_v1_with_options(&state.paths,force).map_err(|e|e.to_string())?;
+        return Ok((row,None));
+    }
+    if state.safe_mode_enabled.load(Ordering::SeqCst) {return Err("Safe Mode blocks private installer actions".into());}
+    let owner=state.install_proof.as_ref().ok_or("Explicit private installer owner required")?;
+    let _submission=owner.acquire_phase2_submission(&state.paths,nonce)?;
+    if state.safe_mode_enabled.load(Ordering::SeqCst) {return Err("Safe Mode blocks private installer actions".into());}
+    let row=jobs::enqueue_install_phase2_packs_v1_private_exact(&state.paths,force).map_err(|e|e.to_string())?;
+    let dispatch=localization_dispatch_receipt(&state.paths,json!({"job":safe_job(row.clone()),"force":force,"scope":"owned mutable install proof; original phase2 journal"}));
+    // Durable original admission remains visible on paused/start/readback failures.
+    append_diagnostics_trace_row_best_effort(&state.paths,"phase2_install_dispatch",json!({"job_id":row.id,"attempt_no":row.attempt_no,"dispatch":dispatch}),"info");
+    Ok((row,Some(dispatch)))
+}
+
 fn localization_dispatch_receipt(paths: &AppPaths, admission: Value) -> Value {
     // Admission is already durable; an unavailable runner must retain its original IDs.
     let runner_error = ensure_explicit_headless_runner(paths).err();
+    localization_dispatch_receipt_with_runner_error(paths,admission,runner_error)
+}
+
+fn localization_dispatch_receipt_with_runner_error(paths: &AppPaths, admission: Value, runner_error: Option<String>) -> Value {
     let queue = jobs::get_queue_control(paths).map_err(|e|e.to_string());
     let safe_mode = AGENT_APP_HANDLE.get().is_none_or(|app| app.try_state::<AppState>().is_none_or(|state| state.safe_mode_enabled.load(Ordering::SeqCst)));
     let held = safe_mode || runner_error.is_some() || queue.as_ref().map_or(true, |q|q.paused);
@@ -289,12 +311,9 @@ fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, St
             let state = app.try_state::<AppState>().ok_or("startup not ready")?;
             let lease = state.install_proof.as_ref().ok_or("Explicit install proof startup required")?.clone();
             let nonce = request["proof_nonce"].as_str().ok_or("proof_nonce required")?;
-            lease.phase2_admission_ready(paths, nonce)?;
             let force = request["force"].as_bool().ok_or("force bool required")?;
-            let row = jobs_enqueue_install_phase2_packs_v1(state, Some(force))?;
-            // Preserve the canonical original ID on runner/start/paused failures; no
-            // automatic global resume, replacement, or journal fabrication.
-            Ok(localization_dispatch_receipt(paths, json!({"job":safe_job(row),"force":force,"scope":"owned mutable install proof; original phase2 journal"})))
+            let (_row,dispatch)=admit_original_phase2_install(&state,force,Some(nonce))?;
+            Ok(dispatch.ok_or("Private installer dispatch receipt missing")?)
         }
         "tools.install_pack" => {
             require_localization_mutation_ready()?;
@@ -306,8 +325,10 @@ fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, St
             let lease = state.install_proof.as_ref().ok_or("Explicit owned install proof startup required")?.clone();
             let nonce = request["proof_nonce"].as_str().ok_or("proof_nonce required")?;
             lease.phase2_admission_ready(paths, nonce)?;
-            let _install_permit = lease.acquire(paths, nonce)?;
             let pack = request["pack"].as_str().ok_or("pack required")?;
+            // Neural's original handler now owns its physical lease in its actual worker.
+            let _submission_permit = if pack=="tts_neural_local_v1" { None } else { Some(lease.acquire_phase2_submission(paths,Some(nonce))?) };
+            let _install_permit = if pack=="tts_neural_local_v1" { None } else { Some(lease.acquire(paths, nonce)?) };
             // Invoke the original async handlers, preserving their actual timer names.
             // Keep the session lease on this synchronous receipt worker until return.
             let value = tauri::async_runtime::block_on(async {
@@ -733,6 +754,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn wp0229_private_ui_runner_failure_retains_canonical_job_and_pause() {
+        let root=tempfile::tempdir().unwrap(); let paths=AppPaths::new(root.path().to_path_buf());
+        db::ensure_schema(&paths).unwrap(); jobs::set_queue_paused(&paths,true).unwrap();
+        let row=jobs::enqueue_install_phase2_packs_v1_with_options(&paths,false).unwrap();
+        let result=localization_dispatch_receipt_with_runner_error(&paths,json!({"job":safe_job(row.clone()),"force":false}),Some("owned runner startup failed".into()));
+        assert_eq!(result["admission"]["job"]["id"],row.id);
+        assert_eq!(result["held"],true);
+        assert_eq!(result["runner_start_error"],"owned runner startup failed");
+        assert!(jobs::get_queue_control(&paths).unwrap().paused);
+        let original=jobs::get_job(&paths,&row.id).unwrap().unwrap();
+        assert_eq!(original.status,jobs::JobStatus::Queued); assert_eq!(original.attempt_no,row.attempt_no);
+        let conn=db::open_readonly(&paths).unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM job",[],|row|row.get::<_,i64>(0)).unwrap(),1);
+    }
     #[test]
     fn wp0329_localization_admission_survives_queue_observation_error() {
         let directory = tempfile::tempdir().unwrap();

@@ -2240,6 +2240,27 @@ pub fn enqueue_install_phase2_packs_v1_with_options(
     enqueue(paths, JobType::InstallPhase2PacksV1, params_json)
 }
 
+/// Explicit private installer admission: canonical emptiness and original enqueue
+/// share the same counted FIFO writer and SQLite transaction. Normal enqueue is unchanged.
+pub fn enqueue_install_phase2_packs_v1_private_exact(paths: &AppPaths, force: bool) -> Result<JobRow> {
+    enqueue_install_phase2_private_with_boundary(paths,force,|| {})
+}
+
+fn enqueue_install_phase2_private_with_boundary(paths: &AppPaths, force: bool, before_insert: impl FnOnce()) -> Result<JobRow> {
+    let params_json=serde_json::to_string(&InstallPhase2PacksV1Params {force,..InstallPhase2PacksV1Params::default()})?;
+    let mut conn=db::write_context(paths)?;
+    let tx=conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let pending:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM job WHERE status IN ('queued','running'))",[],|row|row.get(0))?;
+    if pending {return Err(EngineError::InstallFailed("Exact private installer admission refuses unfinished canonical jobs".into()));}
+    // Production passes a no-op; the owning test synchronizes at this actual writer boundary.
+    before_insert();
+    let kind=JobType::InstallPhase2PacksV1; let track=JobTrack::for_type(&kind);
+    let row=enqueue_with_type_item_batch_track_and_id_conn(&tx,paths,kind,params_json,None,None,track,Uuid::new_v4().to_string())?;
+    tx.commit()?; drop(conn);
+    let _=subscriptions::refresh_subscription_activity_rollup_for_job(paths,&row.id);
+    Ok(row)
+}
+
 /// WP-0227: return true when the app should auto-enqueue a Phase2 voice-pack
 /// install at startup. Reasons to auto-install:
 ///   * No `latest.json` exists yet (fresh install — packs never attempted).
@@ -44562,5 +44583,43 @@ mod install_proof_dispatch_tests {
         assert_eq!(actual.status,JobStatus::Failed);
         assert!(actual.error.unwrap().contains("actual worker root changed"));
         assert!(!paths.install_logs_dir().join("phase2").exists(),"no installer or journal work before actual worker guard");
+    }
+}
+
+#[cfg(test)]
+mod private_phase2_admission_tests {
+    use super::*;
+    #[test]
+    fn wp0229_private_phase2_atomic_empty_check_cannot_interleave_with_real_import_writer() {
+        let temp=tempfile::tempdir().unwrap(); let paths=AppPaths::new(temp.path().join("app")); db::ensure_schema(&paths).unwrap();
+        let input=temp.path().join("source.mkv"); std::fs::write(&input,b"owned import fixture").unwrap();
+        let (checked_tx,checked_rx)=std::sync::mpsc::channel(); let (release_tx,release_rx)=std::sync::mpsc::channel();
+        let installer_paths=paths.clone();
+        let installer=std::thread::spawn(move || enqueue_install_phase2_private_with_boundary(&installer_paths,true,|| {
+            checked_tx.send(()).unwrap(); release_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        }));
+        checked_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let (entered_tx,entered_rx)=std::sync::mpsc::channel(); let (import_tx,import_rx)=std::sync::mpsc::channel();
+        let import_paths=paths.clone(); let input_path=input.to_string_lossy().into_owned();
+        let importer=std::thread::spawn(move || { entered_tx.send(()).unwrap(); let result=enqueue_import_local(&import_paths,input_path,false,false); import_tx.send(result).unwrap(); });
+        entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        let runtime=db::AppDatabase::for_paths(&paths).unwrap(); let deadline=Instant::now()+Duration::from_secs(2);
+        while runtime.snapshot().waiting_writers==0 && Instant::now()<deadline { std::thread::sleep(Duration::from_millis(5)); }
+        let waiting=runtime.snapshot(); assert!(waiting.writer_active && waiting.waiting_writers>0,"real import reached counted FIFO admission behind checked transaction");
+        assert!(matches!(import_rx.try_recv(),Err(std::sync::mpsc::TryRecvError::Empty)),"competing real writer has no completed enqueue before transaction release");
+        release_tx.send(()).unwrap(); let original=installer.join().unwrap().unwrap();
+        let imported=import_rx.recv_timeout(Duration::from_secs(3)).unwrap().unwrap(); importer.join().unwrap();
+        assert_ne!(original.id,imported.id); assert_eq!(get_job(&paths,&original.id).unwrap().unwrap().attempt_no,original.attempt_no);
+        let conn=db::open_readonly(&paths).unwrap(); assert_eq!(conn.query_row("SELECT COUNT(*) FROM job",[],|row|row.get::<_,i64>(0)).unwrap(),2);
+        assert!(enqueue_install_phase2_packs_v1_private_exact(&paths,false).is_err());
+    }
+    #[test]
+    fn wp0229_private_phase2_atomic_admission_refuses_import_committed_first() {
+        let temp=tempfile::tempdir().unwrap(); let paths=AppPaths::new(temp.path().join("app")); db::ensure_schema(&paths).unwrap();
+        let input=temp.path().join("source.mkv"); std::fs::write(&input,b"owned import fixture").unwrap();
+        let imported=enqueue_import_local(&paths,input.to_string_lossy().into_owned(),false,false).unwrap();
+        assert!(enqueue_install_phase2_packs_v1_private_exact(&paths,true).is_err());
+        let row=get_job(&paths,&imported.id).unwrap().unwrap(); assert_eq!(row.params_json,imported.params_json); assert_eq!(row.status,JobStatus::Queued);
+        let conn=db::open_readonly(&paths).unwrap(); assert_eq!(conn.query_row("SELECT COUNT(*) FROM job",[],|row|row.get::<_,i64>(0)).unwrap(),1);
     }
 }

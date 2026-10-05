@@ -12238,11 +12238,14 @@ pub fn tts_neural_local_v1_pack_status(paths: &AppPaths) -> TtsNeuralLocalV1Pack
         };
     }
 
-    let package_version = python_distribution_version(&venv_python, "kokoro");
-    let transformers_version = python_distribution_version(&venv_python, "transformers");
-    let huggingface_hub_version = python_distribution_version(&venv_python, "huggingface-hub")
-        .or_else(|| python_distribution_version(&venv_python, "huggingface_hub"));
-    let spacy_model_version = python_distribution_version(&venv_python, "en-core-web-sm");
+    let metadata = python_distribution_versions_strict(&venv_python, &[
+        "kokoro", "transformers", "huggingface-hub", "huggingface_hub", "en-core-web-sm",
+    ]);
+    let version = |name: &str| metadata.get(name).cloned().flatten();
+    let package_version = version("kokoro");
+    let transformers_version = version("transformers");
+    let huggingface_hub_version = version("huggingface-hub").or_else(|| version("huggingface_hub"));
+    let spacy_model_version = version("en-core-web-sm");
     let spacy_model_ready = spacy_model_version.as_deref()
         == Some(
             pinned_dependency_manifest::manifest()
@@ -12447,13 +12450,17 @@ pub fn tts_voice_preserving_local_v1_pack_status(
         };
     }
 
-    let kokoro_version = python_distribution_version(&venv_python, "kokoro");
+    let metadata = python_distribution_versions_strict(&venv_python, &[
+        "kokoro", "MyShell-OpenVoice", "openvoice", "cosyvoice",
+    ]);
+    let version = |name: &str| metadata.get(name).cloned().flatten();
+    let kokoro_version = version("kokoro");
     let openvoice_runtime_available = python_module_available(&venv_python, "openvoice.api");
     let cosyvoice_runtime_available = python_module_available(&venv_python, "cosyvoice");
-    let openvoice_version = python_distribution_version(&venv_python, "MyShell-OpenVoice")
-        .or_else(|| python_distribution_version(&venv_python, "openvoice"))
+    let openvoice_version = version("MyShell-OpenVoice")
+        .or_else(|| version("openvoice"))
         .or_else(|| openvoice_runtime_available.then(|| "installed (module only)".to_string()));
-    let cosyvoice_version = python_distribution_version(&venv_python, "cosyvoice")
+    let cosyvoice_version = version("cosyvoice")
         .or_else(|| cosyvoice_runtime_available.then(|| "installed (module only)".to_string()));
     let openvoice_patch_applied =
         vendor_patches::openvoice_api_patch_applied(&venv_python).unwrap_or(false);
@@ -12827,6 +12834,24 @@ fn python_module_available(python: &std::path::Path, module: &str) -> bool {
         .unwrap_or(false)
 }
 
+// One fresh child for related metadata reads; no cache or filesystem fallback.
+fn python_distribution_versions_strict(
+    python: &Path,
+    distributions: &[&str],
+) -> HashMap<String, Option<String>> {
+    let names = distributions.iter().map(|name| (*name).to_string()).collect::<Vec<_>>();
+    let code = python_distribution_versions_code(&names);
+    let Ok(output) = crate::cmd::command(python).args(["-c", &code]).owned_output() else {
+        return HashMap::new();
+    };
+    strict_distribution_versions_result(output.status.success(), &output.stdout)
+}
+
+fn strict_distribution_versions_result(success: bool, stdout: &[u8]) -> HashMap<String, Option<String>> {
+    if !success { return HashMap::new(); }
+    serde_json::from_slice(stdout).unwrap_or_default()
+}
+
 fn python_distribution_version(python: &std::path::Path, distribution: &str) -> Option<String> {
     let code = format!("import importlib.metadata as m\nprint(m.version({distribution:?}))\n");
     let output = crate::cmd::command(python)
@@ -13101,6 +13126,56 @@ mod tests {
         let escaped = probe(&foreign);
         assert!(!escaped.status.success());
         assert!(String::from_utf8_lossy(&escaped.stderr).contains("escaped the governed runtime"));
+    }
+
+    #[test]
+    fn wp0229_strict_metadata_batch_preserves_versions_missing_and_failed_child() {
+        let raw = br#"{"kokoro":"0.9.4","missing":null,"huggingface_hub":"0.27.1"}"#;
+        let versions = strict_distribution_versions_result(true, raw);
+        assert_eq!(versions["kokoro"].as_deref(), Some("0.9.4"));
+        assert_eq!(versions["missing"], None);
+        assert_eq!(versions["huggingface_hub"].as_deref(), Some("0.27.1"));
+        assert!(strict_distribution_versions_result(false, raw).is_empty());
+        assert!(strict_distribution_versions_result(true, b"malformed").is_empty());
+    }
+
+    #[test]
+    fn wp0229_strict_metadata_real_child_partial_missing_and_failure_are_honest() {
+        let base = tempfile::tempdir().unwrap();
+        let metadata = base.path().join("vv_metadata_fixture-1.2.3.dist-info");
+        std::fs::create_dir_all(&metadata).unwrap();
+        std::fs::write(metadata.join("METADATA"), "Name: vv-metadata-fixture\nVersion: 1.2.3\n").unwrap();
+        let names = vec!["vv-metadata-fixture".to_string(), "vv-definitely-missing-metadata-fixture".to_string()];
+        let code = format!("import sys\nsys.path.insert(0, {})\n{}",
+            serde_json::to_string(&base.path().to_string_lossy()).unwrap(), python_distribution_versions_code(&names));
+        let python = std::env::var_os("VOXVULGI_TEST_PYTHON").unwrap_or_else(|| "python".into());
+        let run = |code: &str| {
+            let mut command = crate::cmd::command(&python);
+            command.args(["-I", "-S", "-c", code]);
+            crate::cmd::run_owned_output(&mut command, std::time::Duration::from_secs(15), || false).unwrap()
+        };
+        let output = run(&code);
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        let values = strict_distribution_versions_result(output.status.success(), &output.stdout);
+        assert_eq!(values[&names[0]].as_deref(), Some("1.2.3"));
+        assert_eq!(values[&names[1]], None);
+        let malformed = run("print('malformed')");
+        assert!(malformed.status.success());
+        assert!(strict_distribution_versions_result(true, &malformed.stdout).is_empty());
+        let failed = run("import sys; print('{\"kokoro\":\"0.9.4\"}'); sys.exit(7)");
+        assert_eq!(failed.status.code(), Some(7));
+        assert!(strict_distribution_versions_result(false, &failed.stdout).is_empty());
+    }
+
+    #[test]
+    fn wp0229_strict_metadata_batch_never_falls_back_to_filesystem_without_python() {
+        let base = tempfile::tempdir().unwrap();
+        let python = base.path().join("Scripts/python.exe");
+        let metadata = base.path().join("Lib/site-packages/kokoro-0.9.4.dist-info");
+        std::fs::create_dir_all(&metadata).unwrap();
+        std::fs::write(metadata.join("METADATA"), "Name: kokoro\nVersion: 0.9.4\n").unwrap();
+        assert_eq!(python_distribution_version_from_site_packages(&python, "kokoro").as_deref(), Some("0.9.4"));
+        assert!(python_distribution_versions_strict(&python, &["kokoro"]).is_empty());
     }
 
     #[test]

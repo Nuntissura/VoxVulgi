@@ -5,7 +5,7 @@
   "id": "WP-0335",
   "version": 1,
   "title": "Selected queue read amplification",
-  "status": "NEEDS_VALIDATION",
+  "status": "DONE",
   "owner": "Codex",
   "board": "../TASK_BOARD.md",
   "refinement": "WP-0335_SELECTED_QUEUE_READ_AMPLIFICATION_v1_REFINEMENT.md",
@@ -157,6 +157,17 @@
         "product/desktop/build_target/tool_artifacts/wp_runs/WP-0335/20261005/exact_21_retry_d066e3c_01/final21_source_attempt_subtitle_manifest_01.json",
         ".local/proofVVRemaining/wp0335_normal_close_230588_01/close_preflight.json",
         ".local/proofVVRemaining/wp0335_normal_close_230588_01/native_close_terminal.json"
+      ]
+    },
+    {
+      "date": "2026-10-05",
+      "status": "DONE",
+      "note": "A01-A07 accepted: unchanged bundled equivalence/VFS and additive schema62 proof, source-closed installed normal30min attribution/latency; current164b8365 Core/Update preserve version0.1.205 and protected data/runtime. Owned normal215864 settled Jobs paused-rest and same93 left/right readable controls directly opened by root and independent reviewer. Actual10poll requests batch context and no individual library/item calls retained. Canonical21 unchanged/pause1/0running/0grants. Bounded sampling/unassigned other reads remain; no universal read_admission_timeout resolution.",
+      "evidence": [
+        "product\\desktop\\build_target\\tool_artifacts\\wp_runs\\WP-0335\\20261005\\normal_jobs_164b8365_01\\independent_A01_A07_review_03.json",
+        "product\\desktop\\build_target\\tool_artifacts\\wp_runs\\WP-0335\\20261005\\normal_jobs_164b8365_01\\root_visual_acceptance.json",
+        ".local/proofVVRemaining/core_update_164b8365_01/native_update_result.json",
+        ".local/proofVVRemaining/wp0330_core_only_164b8365_01/managed_core_build_result.json"
       ]
     }
   ],

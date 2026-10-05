@@ -13906,7 +13906,20 @@ async fn tools_tts_neural_local_v1_install(
 ) -> Result<tools::TtsNeuralLocalV1PackStatus, String> {
     let _timer = InvokeTimer::start(state.paths.clone(), "tools_tts_neural_local_v1_install");
     let paths = state.paths.clone();
+    let owner = if agent_bridge_state().lock().unwrap().agent_headless {
+        if state.safe_mode_enabled.load(Ordering::SeqCst) { return Err("Safe Mode blocks private installer actions".into()); }
+        Some(state.install_proof.as_ref().ok_or("Explicit private installer owner required")?.clone())
+    } else { None };
+    let private_safe_mode=state.safe_mode_enabled.clone();
+    // Acquire and retain the original physical-root lease inside the actual worker.
     tauri::async_runtime::spawn_blocking(move || {
+        let _install_permit = if let Some(owner)=owner {
+            if private_safe_mode.load(Ordering::SeqCst) { return Err("Safe Mode blocks private installer actions".into()); }
+            let _submission=owner.acquire_phase2_submission(&paths,None)?;
+            let permit=owner.acquire(&paths, &owner.nonce_for_internal_admission())?;
+            if private_safe_mode.load(Ordering::SeqCst) { return Err("Safe Mode blocks private installer actions".into()); }
+            Some(permit)
+        } else { None };
         tools::install_tts_neural_local_v1_pack(&paths).map_err(|e| e.to_string())
     })
     .await
@@ -16354,9 +16367,11 @@ fn jobs_enqueue_import_local(
 fn jobs_enqueue_install_phase2_packs_v1(
     state: State<'_, AppState>,
     force: Option<bool>,
-) -> Result<jobs::JobRow, String> {
-    jobs::enqueue_install_phase2_packs_v1_with_options(&state.paths, force.unwrap_or(false))
-        .map_err(|e| e.to_string())
+) -> Result<serde_json::Value, String> {
+    let (row, dispatch)=agent_control::admit_original_phase2_install(&state,force.unwrap_or(false),None)?;
+    let mut value=serde_json::to_value(row).map_err(|e|e.to_string())?;
+    if let Some(dispatch)=dispatch { value["install_dispatch"]=dispatch; }
+    Ok(value)
 }
 
 #[tauri::command]

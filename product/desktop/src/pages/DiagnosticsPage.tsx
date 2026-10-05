@@ -1,5 +1,6 @@
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { createDiagnosticsInstallConfirmation } from "../lib/diagnosticsInstallConfirmation";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { usePollingLoop } from "../lib/activity";
 import {
@@ -1225,7 +1226,33 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const [jobs, setJobs] = useState<JobRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [busy, setBusyState] = useState(false);
+  const [installConfirmation, setInstallConfirmation] = useState<{ title: string; message: string } | null>(null);
+  const busyRef = useRef(false);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const installConfirmationGate = useMemo(() => createDiagnosticsInstallConfirmation(
+    () => visibleRef.current && !busyRef.current,
+    setInstallConfirmation,
+  ), []);
+  function setBusy(value: boolean) {
+    busyRef.current = value;
+    if (value) installConfirmationGate.cancel();
+    setBusyState(value);
+  }
+  useEffect(() => {
+    if (!visible) installConfirmationGate.cancel();
+  }, [visible, installConfirmationGate]);
+  useEffect(() => () => installConfirmationGate.cancel(), [installConfirmationGate]);
+  useEffect(() => {
+    if (visible && installConfirmation) document.getElementById("diagnostics-install-confirmation")?.scrollIntoView({ behavior: "auto", block: "center" });
+  }, [visible, installConfirmation]);
+  function requestInstallConfirmation(title: string, message: string): Promise<boolean> {
+    return installConfirmationGate.request({ title, message });
+  }
+  function resolveInstallConfirmation(approved: boolean) {
+    installConfirmationGate.resolve(approved);
+  }
   const [freezeSelfTestRunning, setFreezeSelfTestRunning] = useState(false);
   const [readSweepRunning, setReadSweepRunning] = useState(false);
   const [providerTitleRepairBusy, setProviderTitleRepairBusy] = useState(false);
@@ -2163,6 +2190,11 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   }
 
   async function installTtsNeuralLocalV1Pack() {
+    const approved = await requestInstallConfirmation(
+      ttsNeuralLocalV1?.installed ? "Reinstall Neural TTS" : "Install neural TTS (Kokoro) pack",
+      "Install or reinstall the Neural TTS local pack now? This may download large dependencies and writes under app data.",
+    );
+    if (!approved || !installConfirmationGate.canStart()) return;
     setBusy(true);
     setError(null);
     setNotice(
@@ -2307,13 +2339,13 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   }
 
   async function enqueueInstallPhase2Packs(force = false) {
-    const ok = await confirm(
+    const ok = await requestInstallConfirmation(
+      force ? "Force reinstall all packs" : "Install Voice cloning packages",
       force
         ? "Force reinstall all voice cloning packages now?\n\nThis deliberately reruns every installer even when the packs are already present. It can take several minutes and writes under app data."
         : "Install Voice cloning packages now?\n\nThis downloads large dependencies (multiple GB) and writes under app data. Installs only after this explicit click.",
-      { title: force ? "Force reinstall all packs" : "Install Voice cloning packages", kind: "warning" },
     );
-    if (!ok) return;
+    if (!ok || !installConfirmationGate.canStart()) return;
 
     setBusy(true);
     setError(null);
@@ -2323,7 +2355,10 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         : "Queued Voice cloning packages installer. Already-installed packs will be skipped; see progress below.",
     );
     try {
-      await invoke("jobs_enqueue_install_phase2_packs_v1", { force });
+      const admitted = await invoke<{ id: string; install_dispatch?: { held: boolean; runner_start_error?: string | null; queue_error?: string | null } }>("jobs_enqueue_install_phase2_packs_v1", { force });
+      if (admitted.install_dispatch?.held) {
+        setNotice(`Original installer ${admitted.id} is queued and held: ${admitted.install_dispatch.runner_start_error ?? admitted.install_dispatch.queue_error ?? "global queue remains paused"}.`);
+      }
       await refresh();
     } catch (e) {
       setError(String(e));
@@ -3001,6 +3036,16 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   return (
     <section className="diagnostics-page">
       <h1>Diagnostics</h1>
+      {installConfirmation ? (
+        <div id="diagnostics-install-confirmation" role="dialog" aria-modal="false" aria-labelledby="diagnostics-install-confirmation-title" data-testid="diagnostics-install-confirmation">
+          <h2 id="diagnostics-install-confirmation-title">{installConfirmation.title}</h2>
+          <p style={{ whiteSpace: "pre-line" }}>{installConfirmation.message}</p>
+          <div className="row">
+            <button type="button" disabled={busy || !visible} data-agent-action-id="diagnostics.install-confirm" data-agent-effect-class="reversible_state_change" onClick={() => resolveInstallConfirmation(true)}>Confirm installation</button>
+            <button type="button" data-agent-action-id="diagnostics.install-cancel" data-agent-effect-class="reversible_state_change" onClick={() => resolveInstallConfirmation(false)}>Cancel</button>
+          </div>
+        </div>
+      ) : null}
 
       {error ? <details className="error"><summary>Diagnostics action or check failed — show details</summary><pre>{error}</pre></details> : null}
       {notice ? <div className="diagnostics-notice" role="status">{notice}</div> : null}
@@ -4642,13 +4687,16 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           </button>
           <button
             type="button"
-            disabled={busy || !!ttsNeuralLocalV1?.installed}
+            disabled={busy || installConfirmation !== null}
+            data-agent-action-id="diagnostics.neural-tts.install" data-agent-effect-class="reversible_state_change"
             onClick={installTtsNeuralLocalV1Pack}
             title={ttsNeuralLocalV1?.status_detail ?? "Install the local Kokoro TTS runtime."}
           >
-            {ttsNeuralLocalV1?.repair_required
-              ? "Repair neural TTS (Kokoro) pack"
-              : "Install neural TTS (Kokoro) pack"}
+            {ttsNeuralLocalV1?.installed
+              ? "Reinstall Neural TTS"
+              : ttsNeuralLocalV1?.repair_required
+                ? "Repair neural TTS (Kokoro) pack"
+                : "Install neural TTS (Kokoro) pack"}
           </button>
           <button
             type="button"
@@ -4678,10 +4726,10 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
         </div>
 
         <div className="row" style={{ flexWrap: "wrap" }}>
-          <button type="button" disabled={busy} onClick={() => enqueueInstallPhase2Packs(false)}>
+          <button type="button" disabled={busy || installConfirmation !== null} data-agent-action-id="diagnostics.phase2.install" data-agent-effect-class="reversible_state_change" onClick={() => enqueueInstallPhase2Packs(false)}>
             Install Voice cloning packages
           </button>
-          <button type="button" disabled={busy} onClick={() => enqueueInstallPhase2Packs(true)}>
+          <button type="button" disabled={busy || installConfirmation !== null} data-agent-action-id="diagnostics.phase2.force" data-agent-effect-class="reversible_state_change" onClick={() => enqueueInstallPhase2Packs(true)}>
             Force reinstall all packs
           </button>
           <button type="button" disabled={busy} onClick={() => void loadPhase2Section(true)}>

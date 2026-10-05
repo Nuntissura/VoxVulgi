@@ -2,7 +2,7 @@
 
 ## Status
 
-NEEDS_VALIDATION
+IN_PROGRESS
 
 ## Base Scope
 
@@ -336,5 +336,15 @@ Evidence: `.local/proofVVRemaining/wp0330_actual_force_d066e3c_02/{result.json,c
 The exact original forced job `b0ac5736-cda5-4f90-aa7e-6390e094074a`, attempt1/force=true, naturally succeeded: 1791172387226–1791173837982 (1,450,756ms), all eight journal steps done/error=null. The native observer recorded37 actual `pip install` subcommands. The unchanged forced full-pip-output criterion remains **RED**: all eight per-step logs contain only85–123bytes of begin/install/completed lines, with no pip output. Successful installation and child observation do not replace that log criterion. No force retry or status promotion occurred.
 
 Evidence: `.local/proofVVRemaining/wp0330_actual_force_d066e3c_02/{result,canonical_terminal,actual_journal,original_job_step_logs,owned_children_observed_on_failure}.json`. Original force01 preflight failure remains retained; it performed no product install. Separate original six direct handlers naturally returned installed=true with exact command_completed timing evidence in `.local/proofVVRemaining/wp0330_actual_direct_d066e3c_01/six_original_handler_timers.json`; those belong to WP0245 and do not close WP0229.
+
+</topic>
+
+<topic id="wp0229-current-normal-timing-red-164b8365" wp="WP-0229" status="RED" updated_at="2026-10-05">
+
+Current installed 0.1.205/source164b8365 original normal job `5f99ddeb-5e4e-4c67-8eb8-676edacc15f8` naturally succeeded, but its unchanged timing criterion remains RED: canonical30,583ms; request-to-terminal31,876ms. All eight prior successful step timestamps were retained; no pip INSTALL was observed and no new installer step output was produced. Evidence: `.local/proofVVRemaining/wp0229_normal_164b8365_02/` original result, terminal operation, canonical rows, journal, logs and native child observations.
+
+The actual trace records9,814ms full physical-root/descendant ownership validation. Original job-log status timings total20,150ms, including Cosy13,305ms, OpenVoice3,977ms and Kokoro1,774ms. Preserve the complete ownership/readiness controls; optimize verified repeated metadata child work, then prove the original timing again. Normal01 failed before installation because the audit saw a loading DOM; its evidence is retained separately.
+
+The original literal UI proof also remains open: Phase2 uses native confirmation outside the semantic bridge; healthy Neural TTS has a disabled install button. Scoped quiet confirmation, deliberate Neural reinstall and guarded original private UI admission candidates are under review. No force rerun on unchanged code, completion claim or acceptance narrowing. Packet status is IN_PROGRESS while these recorded defects are remediated.
 
 </topic>

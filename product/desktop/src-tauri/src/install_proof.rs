@@ -14,6 +14,7 @@ pub(super) struct InstallProof {
     identity: OfflineProofDirectoryIdentity,
     _exclusive_owner: std::fs::File,
     active_install: AtomicBool,
+    phase2_submission: AtomicBool,
     original_owner_sha256: String,
     original_owner_pid: u32,
     reattached: bool,
@@ -72,6 +73,17 @@ impl InstallProof {
         }
         self.revalidate(paths,nonce)?;
         Ok(self.original_owner_pid)
+    }
+    pub(super) fn nonce_for_internal_admission(&self) -> String { self.nonce.clone() }
+    pub(super) fn acquire_phase2_submission(self: &Arc<Self>, paths: &AppPaths, nonce: Option<&str>) -> Result<Phase2SubmissionPermit,String> {
+        self.phase2_submission.compare_exchange(false,true,Ordering::SeqCst,Ordering::SeqCst)
+            .map_err(|_| "Another original installer admission is in progress")?;
+        let permit = Phase2SubmissionPermit(self.clone());
+        self.phase2_admission_ready(paths, nonce.unwrap_or(&self.nonce))?;
+        let conn=db::open_readonly(paths).map_err(|e|e.to_string())?;
+        let pending:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM job WHERE status IN ('queued','running'))",[],|row|row.get(0)).map_err(|e|e.to_string())?;
+        if pending { return Err("Exact private installer admission refuses other unfinished jobs".into()); }
+        Ok(permit)
     }
     pub(super) fn phase2_admission_ready(&self, paths: &AppPaths, nonce: &str) -> Result<(),String> {
         if self.workflow {return Err("Private workflow mode refuses installer commands".into());}
@@ -216,6 +228,8 @@ impl InstallProof {
     pub(super) fn interrupted_recovery_ready(&self,_:&AppPaths,_:&str,_:&str)->Result<u32,String>{Err("Install proof requires Windows".into())}
     pub(super) fn provenance(&self) -> serde_json::Value { serde_json::Value::Null }
     pub(super) fn start_explicit_runner(self:&Arc<Self>, _: &AppPaths, _: Arc<AtomicBool>) -> voxvulgi_engine::Result<jobs::JobRunnerHandle> {Err(voxvulgi_engine::EngineError::InstallFailed("Install proof requires Windows".into()))}
+    pub(super) fn nonce_for_internal_admission(&self) -> String { String::new() }
+    pub(super) fn acquire_phase2_submission(self: &Arc<Self>, _: &AppPaths, _: Option<&str>) -> Result<Phase2SubmissionPermit,String> { Err("Install proof requires Windows".into()) }
     pub(super) fn phase2_admission_ready(&self, _: &AppPaths, _: &str) -> Result<(),String> { Err("Install proof requires Windows".into()) }
     pub(super) fn revalidate(&self, _: &AppPaths, _: &str) -> Result<(), String> { Err("Install proof requires Windows".into()) }
     pub(super) fn revalidate_fast(&self, _: &AppPaths, _: &str) -> Result<(), String> { Err("Install proof requires Windows".into()) }
@@ -229,6 +243,12 @@ impl InstallProof {
     pub(super) fn acquire(self: &Arc<Self>, _: &AppPaths, _: &str) -> Result<InstallProofPermit,String> { Err("Install proof requires Windows".into()) }
 }
 
+pub(super) struct Phase2SubmissionPermit(Arc<InstallProof>);
+impl Drop for Phase2SubmissionPermit {
+    fn drop(&mut self) {
+        #[cfg(windows)] self.0.phase2_submission.store(false,Ordering::SeqCst);
+    }
+}
 pub(super) struct InstallProofPermit(Arc<InstallProof>);
 impl Drop for InstallProofPermit {
     fn drop(&mut self) {
@@ -323,7 +343,7 @@ pub(super) fn prepare(args: &[String], headless: bool, root: &Path, protected: &
             (file,hex::encode(sha2::Sha256::digest(&bytes)),std::process::id())
         };
         let owner=Arc::new(InstallProof {root:root.clone(),nonce:nonce.clone(),directory,identity,
-            _exclusive_owner:exclusive_owner,active_install:AtomicBool::new(false),
+            _exclusive_owner:exclusive_owner,active_install:AtomicBool::new(false),phase2_submission:AtomicBool::new(false),
             original_owner_sha256,original_owner_pid,reattached:reattach_requested,workflow});
         // Reattachment must validate the entire preexisting tree before database/startup
         // mutation. Fresh mode retains its existing preparation behavior.
@@ -335,6 +355,55 @@ pub(super) fn prepare(args: &[String], headless: bool, root: &Path, protected: &
 #[cfg(all(test, windows))]
 mod tests {
     use super::*;
+    #[test]
+    fn wp0229_direct_pack_submission_blocks_concurrent_phase2_admission() {
+        let nonce=uuid::Uuid::new_v4().simple().to_string(); let root=std::env::temp_dir().join(format!("voxvulgi_install_proof_{nonce}"));
+        let args=vec![FLAG.into(),"--agent-install-proof-nonce".into(),nonce.clone()]; let owner=prepare(&args,true,&root,&[]).unwrap().unwrap();
+        let paths=AppPaths::new(root); db::ensure_schema(&paths).unwrap();
+        let (entered_tx,entered_rx)=std::sync::mpsc::channel(); let (release_tx,release_rx)=std::sync::mpsc::channel();
+        let direct_owner=owner.clone(); let direct_paths=paths.clone();
+        let direct=std::thread::spawn(move || {
+            let _submission=direct_owner.acquire_phase2_submission(&direct_paths,Some(&nonce)).unwrap();
+            let _install=direct_owner.acquire(&direct_paths,&nonce).unwrap();
+            entered_tx.send(()).unwrap(); release_rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+        });
+        entered_rx.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+        assert!(owner.acquire_phase2_submission(&paths,None).is_err());
+        let conn=db::open_readonly(&paths).unwrap(); assert_eq!(conn.query_row("SELECT COUNT(*) FROM job",[],|row|row.get::<_,i64>(0)).unwrap(),0); drop(conn);
+        release_tx.send(()).unwrap(); direct.join().unwrap(); assert!(owner.acquire_phase2_submission(&paths,None).is_ok());
+    }
+    #[test]
+    fn wp0229_private_ui_admission_serializes_and_preserves_original_attempt() {
+        let nonce=uuid::Uuid::new_v4().simple().to_string();
+        let root=std::env::temp_dir().join(format!("voxvulgi_install_proof_{nonce}"));
+        let args=vec![FLAG.into(),"--agent-install-proof-nonce".into(),nonce.clone()];
+        let owner=prepare(&args,true,&root,&[]).unwrap().unwrap();
+        let paths=AppPaths::new(root); db::ensure_schema(&paths).unwrap();
+        assert!(owner.acquire_phase2_submission(&paths,Some("wrong")).is_err());
+        let permit=owner.acquire_phase2_submission(&paths,None).unwrap();
+        assert!(owner.acquire_phase2_submission(&paths,None).is_err());
+        let row=jobs::enqueue_install_phase2_packs_v1_with_options(&paths,true).unwrap();
+        drop(permit);
+        assert!(owner.acquire_phase2_submission(&paths,None).is_err());
+        let original=jobs::get_job(&paths,&row.id).unwrap().unwrap();
+        assert_eq!(original.id,row.id); assert_eq!(original.attempt_no,row.attempt_no);
+        assert_eq!(original.status,jobs::JobStatus::Queued);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&original.params_json).unwrap()["force"],true);
+    }
+    #[test]
+    fn wp0229_private_ui_admission_refuses_unrelated_pending_work_without_rewriting_it() {
+        let nonce=uuid::Uuid::new_v4().simple().to_string();
+        let root=std::env::temp_dir().join(format!("voxvulgi_install_proof_{nonce}"));
+        let args=vec![FLAG.into(),"--agent-install-proof-nonce".into(),nonce];
+        let owner=prepare(&args,true,&root,&[]).unwrap().unwrap();
+        let paths=AppPaths::new(root); db::ensure_schema(&paths).unwrap();
+        let conn=db::write_context(&paths).unwrap();
+        conn.execute("INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path) VALUES('unrelated','download_direct_url','queued',0,'{}',1,'owned')",[]).unwrap(); drop(conn);
+        assert!(owner.acquire_phase2_submission(&paths,None).is_err());
+        let conn=db::open_readonly(&paths).unwrap();
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM job",[],|row|row.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(conn.query_row("SELECT status FROM job WHERE id='unrelated'",[],|row|row.get::<_,String>(0)).unwrap(),"queued");
+    }
     #[test]
     fn install_proof_requires_explicit_headless_fresh_root_and_nonce() {
         let nonce = "a".repeat(32);
