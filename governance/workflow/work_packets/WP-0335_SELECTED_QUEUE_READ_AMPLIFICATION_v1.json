@@ -1,0 +1,144 @@
+{
+  "file_id": "WP-0335-v1",
+  "file_kind": "work_packet",
+  "updated_at": "2026-10-05",
+  "id": "WP-0335",
+  "version": 1,
+  "title": "Selected queue read amplification",
+  "status": "IN_PROGRESS",
+  "owner": "Codex",
+  "board": "../TASK_BOARD.md",
+  "refinement": "WP-0335_SELECTED_QUEUE_READ_AMPLIFICATION_v1_REFINEMENT.md",
+  "operator_request": "Continue the remaining repairs autonomously with subagents, retain newly observed work in WPs, and change each WP status before moving to the next.",
+  "dependencies": [
+    "WP-0324",
+    "WP-0334",
+    "WP-0333"
+  ],
+  "recorded_failure": {
+    "candidate_source": "a0bb600141fffcfb1f7274189917af11b17e562a",
+    "app_version": "0.1.205",
+    "native_pid": 211564,
+    "trace_evidence": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0324/20261005/normal_io_prearmed_a0bb600_01/forced_fresh_execution_and_bounded_heavy_reads.json",
+    "samples": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0324/20261005/normal_io_prearmed_a0bb600_01/samples.jsonl",
+    "readonly_eqp": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0324/20261005/normal_io_prearmed_a0bb600_01/hot_query_plans_live_readonly.json",
+    "observed_call_sites": [
+      "jobs.rs:11530 selected-pending read context",
+      "jobs.rs:11906 queued-track fetch read context",
+      "jobs.rs:5385 operator activity read context"
+    ],
+    "finding": "Normal installed runtime VFS evidence attributes repeated substantial database reads to these read contexts. Read-only SQLite3.50.4 EQP shows selected existence searching job by status before grant lookup, paused fetch starting job by track/status with LEFT JOIN and a sorter, and activity's bounded inner page using a non-covering status index and a sorter.",
+    "proof_limit": "The read-only EQP file declares EQP_ONLY_NOT_RUNTIME_PROOF. It does not establish the bundled product engine plan, candidate VFS improvement, physical disk ownership, hardware cause, or resolved read-admission timeout. No candidate implementation has passed proof yet."
+  },
+  "spec_anchors": [
+    {
+      "path": "governance/spec/PRODUCT_SPEC.md",
+      "anchor": "Selected foreground downloads VV-0334-POLICY-001 through004; Jobs/Queue line464; bounded database runtime line241; section8.2 responsiveness/attribution"
+    },
+    {
+      "path": "governance/spec/TECHNICAL_DESIGN.md",
+      "anchor": "Selected foreground admission; startup-only transactional migration/shared runtime lines65-72; indexed current-work-first Jobs lines623-628"
+    }
+  ],
+  "scope": [
+    "Repair confirmed selected-existence and paused queued-track read amplification through sparse grant-first lookup with exact attempt/status matching",
+    "Keep candidate selection and ordering before LIMIT; retrieve payload only for the exact bounded candidate set where bundled proof establishes improvement",
+    "Evaluate an activity covering index candidate only after bundled-engine old/new ordered-result equivalence and counted-VFS proof; preserve the existing bounded rowid-page design",
+    "If an index is proven necessary, introduce only an additive index through the canonical numbered transactional startup migration; never modify or compact existing job/user rows",
+    "Independently verify rebuilt installed normal runtime with selected-only work and the rest paused; retain WP-0324 provider integrity and attribution acceptance"
+  ],
+  "files": [
+    "product/engine/src/jobs.rs",
+    "product/engine/src/db.rs",
+    "product/engine/src/database_runtime.rs tests only if needed to reuse counted-VFS proof"
+  ],
+  "constraints": [
+    "No direct user SQL edits. Index changes only through canonical additive numbered transactional startup migration; preserve all rows, identities, attempts, history, parameters, timestamps, subscriptions/library metadata and media.",
+    "Freeze AppDatabase admission, limits, timeouts, retries, connection lifetime, cancellation, checkpoint and durability policy. Keep version0.1.205 and BUILD_CHANGELOG.md unchanged.",
+    "Retain WP-0334 only/continue_all, exact attempt grants, atomic claims, Safe Mode, Pause all, provider/auth/storage/MKV gates, restart paused-rest intent, lane fairness/budgets/pacing, recurring cohort ordering and bounded legacy fallback.",
+    "Activity preserves exact source/view predicates, canonical totals, offset/limit bounds, running-first and created_at_ms DESC,id DESC ties. No rowid substitution.",
+    "Root coordinates one canonical warm cargo_cache and compatible test/build batch. No foreign process interruption, foreground input, blanket resume or weakened VFS proof producer."
+  ],
+  "research_basis": {
+    "sources": [
+      {
+        "url": "https://www.sqlite.org/optoverview.html"
+      },
+      {
+        "url": "https://www.sqlite.org/queryplanner.html"
+      },
+      {
+        "url": "https://www.sqlite.org/rowidtable.html"
+      },
+      {
+        "url": "https://www.sqlite.org/lang_with.html"
+      },
+      {
+        "url": "https://www.sqlite.org/eqp.html"
+      },
+      {
+        "url": "https://www.sqlite.org/c3ref/stmt_status.html"
+      }
+    ],
+    "reuse": [
+      "WP-0324 counted VFS/call-site receipts; WP-0333 shared readonly leases/startup gate; WP-0334 grants/atomic claims; existing activity rowid-page and quiet bridge/native observer"
+    ],
+    "selected_approach": "First prove old/new exact semantics and bundled VFS reads on disposable fixtures. Use sparse-grant-first SQL for the confirmed selected paths; preserve ordinary unpaused behavior. Adopt only the minimal activity index/projection needed to prove reduced reads while keeping exact ordering and totals.",
+    "rejected_options": [
+      "Reader-limit/timeout increases, live SQL writes, rowid tie substitution, lost attempt matching, payload indexes, blanket resume and Python-plan-only acceptance"
+    ],
+    "validation_plan": "Root-controlled bundled-engine old/new ordered-equivalence and VFS regression tests, startup migration preservation tests, independent review, retained-version managed build/Update, then fresh quiet installed normal runtime proof and canonical before/after reconciliation."
+  },
+  "acceptance": [
+    {
+      "id": "WP0335-A01",
+      "requirement": "Bundled-engine tests prove exact old/new selected existence, eligible fetch IDs/order/types/payloads for empty, stale, queued/running/terminal and mixed-track grants, paused and unpaused states, type optionality, equal timestamps/ordinals and limit boundaries."
+    },
+    {
+      "id": "WP0335-A02",
+      "requirement": "Counted-VFS tests use large unrelated queued payloads and establish that empty or sparse paused selections avoid reads proportional to that unrelated queue; verify actual output and lower reads together."
+    },
+    {
+      "id": "WP0335-A03",
+      "requirement": "Activity old/new equivalence covers every source and now/attention/history view, canonical totals, empty pages, varied offsets/limits, retry replacement filtering, equal timestamp/id ties and mixed statuses; reject candidate if equivalence or counted-VFS improvement fails."
+    },
+    {
+      "id": "WP0335-A04",
+      "requirement": "Any adopted index is index-only, additive and transactionally startup-migrated. Independent before/after row and protected-data reconciliation proves identities, attempts, params, timestamps and user data retained; no post-ready migration exception."
+    },
+    {
+      "id": "WP0335-A05",
+      "requirement": "Existing WP-0334 selection/priority/claim/Safe Mode/pause/restart and legacy/fairness regressions pass without weaker limits or provider policy."
+    },
+    {
+      "id": "WP0335-A06",
+      "requirement": "Fresh retained-version installed normal runtime under actual authorized selected dispatch independently proves reduced affected read-context amplification, actual jobs_track_runtime_get p50 below1second over the WP-0324 approximately30minute window, no unrelated paused dispatch, truthful provider hash attribution and canonical attempt reconciliation."
+    },
+    {
+      "id": "WP0335-A07",
+      "requirement": "Root opens paired Jobs snapshot/dump and checks readable state and paused-rest semantics through the product bridge; independent review and PROOF_STANDARD.md requirements pass before DONE."
+    }
+  ],
+  "verification": [
+    "Root chooses exact bundled-engine test commands after reviewing implementation; existing green proof is reused only for unchanged inputs/assertions",
+    "Bind test/build/update/runtime receipts to exact source, installed binary, database root and tool identities",
+    "Retain all before/failing evidence; compare same immutable fixture candidate inputs and independent canonical results",
+    "Record command exit, counted-VFS bytes, ordered equivalence and real command timing; EQP alone never closes acceptance"
+  ],
+  "non_goals": [
+    "Offline ISO packaging or clean-profile acceptance",
+    "Provider cache/security changes",
+    "Database backend replacement",
+    "Physical disk/hardware diagnosis",
+    "UI redesign or general queue cleanup",
+    "Claiming read_admission_timeout universally resolved"
+  ],
+  "status_updates": [
+    {
+      "date": "2026-10-05",
+      "state": "IN_PROGRESS",
+      "note": "Normal installed WP-0324 evidence identified remaining SQL read contexts. Current primary-source research and read-only EQP retained; root review, bundled VFS/equivalence, implementation and installed proof remain pending. Update this WP and board before advancing."
+    }
+  ],
+  "proof": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0335/summary.md"
+}

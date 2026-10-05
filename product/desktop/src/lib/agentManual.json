@@ -1022,6 +1022,110 @@
         },
         "additionalProperties": false
       }
+    },
+    {
+      "name": "tools.install_pack",
+      "description": "Invoke one original governed installer only inside explicit fresh owned mutable install-proof startup. Launch --agent-headless --agent-install-proof --agent-install-proof-nonce <32hex>, with VOXVULGI_AGENT_HEADLESS_BASE_DIR equal to its fresh native Temp child voxvulgi_install_proof_<nonce>. The source owner retains the lease; prepare prerequisite tools only inside this mutable owned root. Separate tools.install_phase2 invokes original force/journal job; neither action automatically resumes a paused queue.",
+      "read_only": false,
+      "effect": "dependency_install",
+      "input": {
+        "pack": "one exact governed pack",
+        "proof_nonce": "exact current startup nonce"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "operation_id",
+          "proof_nonce",
+          "pack"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "tools.install_pack"
+          },
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "proof_nonce": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 32
+          },
+          "pack": {
+            "type": "string",
+            "enum": [
+              "spleeter",
+              "demucs",
+              "diarization",
+              "tts_preview",
+              "tts_neural_local_v1",
+              "tts_voice_preserving_local_v1"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "tools.install_phase2",
+      "description": "Enqueue exact original phase2 normal/force journal work only in the explicit owned mutable install-proof session; start its guarded headless runner, retain original canonical job on pause/start failure, and inspect jobs/logs to terminal. No automatic queue resume.",
+      "read_only": false,
+      "effect": "dependency_install",
+      "input": {
+        "force": "explicit boolean",
+        "proof_nonce": "exact current startup nonce"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "operation_id",
+          "proof_nonce",
+          "force"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "tools.install_phase2"
+          },
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "proof_nonce": {
+            "type": "string",
+            "minLength": 32,
+            "maxLength": 32
+          },
+          "force": {
+            "type": "boolean"
+          }
+        }
+      }
     }
   ],
   "endpoints": [

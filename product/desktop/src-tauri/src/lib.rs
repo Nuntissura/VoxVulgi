@@ -1,4 +1,5 @@
 mod agent_control;
+mod install_proof;
 use base64::Engine as _;
 #[cfg(target_os = "windows")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -3271,6 +3272,7 @@ struct ArtifactVoiceCloneMeta {
 
 #[derive(Debug)]
 struct AppState {
+    install_proof: Option<Arc<install_proof::InstallProof>>,
     paths: AppPaths,
     database: db::AppDatabase,
     checkpoint_maintenance: Mutex<Option<db::CheckpointMaintenanceGuard>>,
@@ -18537,14 +18539,20 @@ pub fn run() {
             let runtime_root = app.path().app_local_data_dir()?.join("runtime");
             let normalized_base = AppPaths::normalize_base_dir(&base_dir);
             let normalized_runtime = AppPaths::normalize_base_dir(&runtime_root);
-            let paths = AppPaths::installed(
+            let install_proof = install_proof::prepare(
+                &cli_args, cli_agent_headless, &base_dir,
+                &[app.path().app_data_dir()?, app.path().app_local_data_dir()?, runtime_root.clone()],
+            ).map_err(std::io::Error::other)?;
+            let paths = if install_proof.is_some() {
+                AppPaths::new(normalized_base.clone())
+            } else { AppPaths::installed(
                 normalized_base.clone(),
                 normalized_runtime.clone(),
                 &app.package_info().version.to_string(),
             )
             .unwrap_or_else(|error| {
                 AppPaths::invalid_managed(normalized_base, normalized_runtime, error)
-            });
+            }) };
             #[cfg(not(target_os = "windows"))]
             if cli_offline_localization_proof.is_some()
                 || cli_offline_update_preservation_seed.is_some()
@@ -19156,6 +19164,7 @@ pub fn run() {
             // it correctly carries forward any previously-completed steps
             // rather than restarting from scratch.
             app.manage(AppState {
+                install_proof,
                 paths,
                 database,
                 checkpoint_maintenance: Mutex::new(Some(checkpoint_maintenance)),

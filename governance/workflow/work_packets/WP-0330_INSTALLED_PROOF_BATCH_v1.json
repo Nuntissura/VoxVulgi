@@ -1,15 +1,68 @@
 {
-  "file_id": "WP-0330-v1", "file_kind": "work_packet", "updated_at": "2026-10-03",
-  "id": "WP-0330", "version": 1, "title": "Installed proof batch", "status": "IN_PROGRESS",
-  "board": "../TASK_BOARD.md", "owner": "Codex",
+  "file_id": "WP-0330-v1",
+  "file_kind": "work_packet",
+  "updated_at": "2026-10-05",
+  "id": "WP-0330",
+  "version": 1,
+  "title": "Installed proof batch",
+  "status": "IN_PROGRESS",
+  "board": "../TASK_BOARD.md",
+  "owner": "Codex",
   "operator_request": "Complete proposed item 6: close remaining proof gaps in batches; preserve every existing requirement",
-  "scope": ["Inventory every NEEDS_VALIDATION packet from the canonical board", "Group compatible existing acceptance scenarios for the installed candidate", "Run permitted scenarios; record exact unresolved dependencies per packet", "Synchronize packet and board only from proof"],
-  "files": ["governance/workflow/TASK_BOARD.md", "governance/workflow/work_packets", "product/desktop/build_target/tool_artifacts/wp_runs"],
-  "dependencies": ["WP-0323", "WP-0327", "WP-0328", "WP-0329", "WP-0331"],
-  "constraints": ["Do not replace existing acceptance criteria", "No historical DONE promotion from source inspection", "No user-data deletion or provider cooldown override", "Foreign process stops require exact PID approval", "No duplicate compiler runs or cache deletion"],
-  "acceptance": ["Every currently NEEDS_VALIDATION packet has its remaining acceptance and proof dependency recorded", "Every authorized compatible scenario exercised on the exact candidate", "DONE only under PROOF_STANDARD; blocked scenarios retain original scope"],
-  "verification": ["Canonical board/packet status agreement", "Scenario receipts and independent canonical rereads", "Visual snapshots inspected for UI scenarios"],
-  "status_updates": [{"date": "2026-10-03", "note": "Opened for operator-approved all-items implementation; inventory and proof execution pending"},{"date":"2026-10-03","note":"Final9f8a137 ownedheadless Options cleanup audit proved fixture path inputs and Start/Continue inventory exposed only scroll_into_view, with no cleanup backend path. Root authorized minimum existing-handler semantic IDs/text effect classes to unblock disposable read-only filesystem inventory proof. Quarantine, reconciliation and rollback activation restrictions unchanged; packaged rebuild and audit/fixture proof remain required."}],
+  "scope": [
+    "Inventory every NEEDS_VALIDATION packet from the canonical board",
+    "Group compatible existing acceptance scenarios for the installed candidate",
+    "Run permitted scenarios; record exact unresolved dependencies per packet",
+    "Synchronize packet and board only from proof"
+  ],
+  "files": [
+    "governance/workflow/TASK_BOARD.md",
+    "governance/workflow/work_packets",
+    "product/desktop/build_target/tool_artifacts/wp_runs",
+    "product/desktop/src-tauri/src/install_proof.rs",
+    "product/desktop/src-tauri/src/lib.rs",
+    "product/desktop/src-tauri/src/agent_control.rs",
+    "product/desktop/src/lib/agentManual.json",
+    "product/engine/src/jobs.rs"
+  ],
+  "dependencies": [
+    "WP-0323",
+    "WP-0327",
+    "WP-0328",
+    "WP-0329",
+    "WP-0331"
+  ],
+  "constraints": [
+    "Do not replace existing acceptance criteria",
+    "No historical DONE promotion from source inspection",
+    "No user-data deletion or provider cooldown override",
+    "Foreign process stops require exact PID approval",
+    "No duplicate compiler runs or cache deletion"
+  ],
+  "acceptance": [
+    "Every currently NEEDS_VALIDATION packet has its remaining acceptance and proof dependency recorded",
+    "Every authorized compatible scenario exercised on the exact candidate",
+    "DONE only under PROOF_STANDARD; blocked scenarios retain original scope"
+  ],
+  "verification": [
+    "Canonical board/packet status agreement",
+    "Scenario receipts and independent canonical rereads",
+    "Visual snapshots inspected for UI scenarios"
+  ],
+  "status_updates": [
+    {
+      "date": "2026-10-03",
+      "note": "Opened for operator-approved all-items implementation; inventory and proof execution pending"
+    },
+    {
+      "date": "2026-10-03",
+      "note": "Final9f8a137 ownedheadless Options cleanup audit proved fixture path inputs and Start/Continue inventory exposed only scroll_into_view, with no cleanup backend path. Root authorized minimum existing-handler semantic IDs/text effect classes to unblock disposable read-only filesystem inventory proof. Quarantine, reconciliation and rollback activation restrictions unchanged; packaged rebuild and audit/fixture proof remain required."
+    },
+    {
+      "date": "2026-10-05",
+      "note": "Applied explicit fresh native-Temp/nonce/exclusive-owner install-proof startup and guarded bridge tools.install_pack/tools.install_phase2 to invoke original handlers and original force/journal worker in an isolated mutable root. No automatic unpause or installed-runtime generation writes. Compatible focused validation batched with WP0335; source implementation alone closes no existing scenario."
+    }
+  ],
   "session_review_20261003": {
     "record_id": "WP-0330-REVIEW-20261003-01",
     "date": "2026-10-03",

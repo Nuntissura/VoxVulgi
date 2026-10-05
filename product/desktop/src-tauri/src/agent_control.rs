@@ -22,7 +22,13 @@ pub(super) fn ensure_explicit_headless_runner(paths: &AppPaths) -> Result<(), St
     drop(state);
     if explicit_allowed {
         let mut runner = EXPLICIT_HEADLESS_RUNNER.get_or_init(Default::default).lock().unwrap();
-        if runner.is_none() { *runner = Some(jobs::start_runner(paths.clone()).map_err(|e|e.to_string())?); }
+        if runner.is_none() {
+            let proof = AGENT_APP_HANDLE.get().and_then(|app|app.try_state::<AppState>()).and_then(|state|state.install_proof.clone().map(|owner|(owner,state.safe_mode_enabled.clone())));
+            *runner = Some(match proof {
+                Some((owner,safe_mode)) => jobs::start_runner_with_install_proof_guard(paths.clone(), owner.runner_guard(safe_mode)),
+                None => jobs::start_runner(paths.clone()),
+            }.map_err(|e|e.to_string())?);
+        }
     }
     Ok(())
 }
@@ -200,6 +206,48 @@ fn localization_dispatch_receipt(paths: &AppPaths, admission: Value) -> Value {
 
 fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, String> {
     match command {
+        "tools.install_phase2" => {
+            require_localization_mutation_ready()?;
+            if !agent_bridge_state().lock().unwrap().agent_headless { return Err("Install proof requires headless".into()); }
+            let app = AGENT_APP_HANDLE.get().ok_or("application unavailable")?;
+            let state = app.try_state::<AppState>().ok_or("startup not ready")?;
+            let lease = state.install_proof.as_ref().ok_or("Explicit install proof startup required")?.clone();
+            let nonce = request["proof_nonce"].as_str().ok_or("proof_nonce required")?;
+            lease.phase2_admission_ready(paths, nonce)?;
+            let force = request["force"].as_bool().ok_or("force bool required")?;
+            let row = jobs_enqueue_install_phase2_packs_v1(state, Some(force))?;
+            // Preserve the canonical original ID on runner/start/paused failures; no
+            // automatic global resume, replacement, or journal fabrication.
+            Ok(localization_dispatch_receipt(paths, json!({"job":safe_job(row),"force":force,"scope":"owned mutable install proof; original phase2 journal"})))
+        }
+        "tools.install_pack" => {
+            require_localization_mutation_ready()?;
+            if !agent_bridge_state().lock().unwrap().agent_headless {
+                return Err("Install proof requires its explicit headless startup".into());
+            }
+            let app = AGENT_APP_HANDLE.get().ok_or("application unavailable")?;
+            let state = app.try_state::<AppState>().ok_or("startup not ready")?;
+            let lease = state.install_proof.as_ref().ok_or("Explicit owned install proof startup required")?.clone();
+            let nonce = request["proof_nonce"].as_str().ok_or("proof_nonce required")?;
+            lease.phase2_admission_ready(paths, nonce)?;
+            let _install_permit = lease.acquire(paths, nonce)?;
+            let pack = request["pack"].as_str().ok_or("pack required")?;
+            // Invoke the original async handlers, preserving their actual timer names.
+            // Keep the session lease on this synchronous receipt worker until return.
+            let value = tauri::async_runtime::block_on(async {
+                match pack {
+                    "spleeter" => tools_spleeter_install(state).await.and_then(|v|serde_json::to_value(v).map_err(|e|e.to_string())),
+                    "demucs" => tools_demucs_install(state).await.and_then(|v|serde_json::to_value(v).map_err(|e|e.to_string())),
+                    "diarization" => tools_diarization_install(state).await.and_then(|v|serde_json::to_value(v).map_err(|e|e.to_string())),
+                    "tts_preview" => tools_tts_preview_install(state).await.and_then(|v|serde_json::to_value(v).map_err(|e|e.to_string())),
+                    "tts_neural_local_v1" => tools_tts_neural_local_v1_install(state).await.and_then(|v|serde_json::to_value(v).map_err(|e|e.to_string())),
+                    "tts_voice_preserving_local_v1" => tools_tts_voice_preserving_local_v1_install(state).await.and_then(|v|serde_json::to_value(v).map_err(|e|e.to_string())),
+                    _ => Err("Unknown governed install proof pack".into()),
+                }
+            })?;
+            lease.revalidate_fast(paths, nonce)?;
+            Ok(json!({"pack":pack,"status":value,"completion":"original handler returned; independently inspect readiness and command_completed timing"}))
+        }
         "media.import_local" => {
             require_localization_mutation_ready()?;
             let path = request["media_path"].as_str().ok_or("media_path required")?;
@@ -260,7 +308,13 @@ fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, St
         "queue.resume" => {
             if agent_bridge_state().lock().unwrap().agent_headless {
                 let mut runner = EXPLICIT_HEADLESS_RUNNER.get_or_init(Default::default).lock().unwrap();
-                if runner.is_none() { *runner = Some(jobs::start_runner(paths.clone()).map_err(|e|e.to_string())?); }
+                if runner.is_none() {
+            let proof = AGENT_APP_HANDLE.get().and_then(|app|app.try_state::<AppState>()).and_then(|state|state.install_proof.clone().map(|owner|(owner,state.safe_mode_enabled.clone())));
+            *runner = Some(match proof {
+                Some((owner,safe_mode)) => jobs::start_runner_with_install_proof_guard(paths.clone(), owner.runner_guard(safe_mode)),
+                None => jobs::start_runner(paths.clone()),
+            }.map_err(|e|e.to_string())?);
+        }
             }
             jobs::set_recurring_paused(paths, false).map_err(|e|e.to_string())?;
             let control = jobs::set_queue_paused(paths, false).map_err(|e|e.to_string())?;

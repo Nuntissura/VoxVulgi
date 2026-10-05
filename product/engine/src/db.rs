@@ -20,7 +20,7 @@ pub use database_runtime::{
     WRITER_QUEUE_CAPACITY,
 };
 
-const CURRENT_SCHEMA_VERSION: u32 = 61;
+const CURRENT_SCHEMA_VERSION: u32 = 62;
 /// WP-0321 S6: bounded archived-attempt history kept in `job_attempt` per surviving `job` row
 /// once it is superseded by a later attempt for the same video (`job.target_key`). Older
 /// superseded rows beyond this count are still deduped and deleted during the v58 migration, but
@@ -280,8 +280,12 @@ pub(crate) const MIGRATION_STEPS: &[MigrationStep] = &[
         apply: apply_schema_v60,
     },
     MigrationStep {
-        version: CURRENT_SCHEMA_VERSION,
+        version: 61,
         apply: apply_schema_v61,
+    },
+    MigrationStep {
+        version: CURRENT_SCHEMA_VERSION,
+        apply: apply_schema_v62,
     },
 ];
 
@@ -3421,6 +3425,13 @@ fn apply_schema_v60(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// WP-0335: cover activity candidate predicates and text-id ties without indexing payloads.
+fn apply_schema_v62(conn: &Connection) -> Result<()> {
+    conn.execute_batch("CREATE INDEX IF NOT EXISTS idx_job_activity_candidates
+        ON job(status,created_at_ms,id,track,retry_replacement_job_id);")?;
+    Ok(())
+}
+
 fn ensure_column(conn: &Connection, table: &str, column: &str, column_def: &str) -> Result<()> {
     let table_exists: bool = conn.query_row(
         "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type='table' AND name=?1",
@@ -3454,6 +3465,120 @@ pub fn ensure_schema(paths: &AppPaths) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
+    fn wp0335_schema61(conn: &Connection) {
+        for step in MIGRATION_STEPS.iter().filter(|step| step.version <= 61) {
+            let tx = conn.unchecked_transaction().unwrap();
+            (step.apply)(&tx).unwrap();
+            tx.pragma_update(None, "user_version", step.version).unwrap();
+            upsert_schema_version_meta(&tx, step.version).unwrap();
+            tx.commit().unwrap();
+        }
+    }
+
+    fn wp0335_rows(conn: &Connection, sql: &str) -> Vec<Vec<rusqlite::types::Value>> {
+        let mut stmt = conn.prepare(sql).unwrap();
+        let columns = stmt.column_count();
+        stmt.query_map([], |row| (0..columns).map(|column| row.get(column)).collect())
+            .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+    }
+
+    fn wp0335_protected_rows(conn: &Connection) -> std::collections::BTreeMap<String, Vec<Vec<rusqlite::types::Value>>> {
+        let tables = conn.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+            .unwrap().query_map([], |row| row.get::<_, String>(0)).unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        tables.into_iter().map(|table| {
+            let quoted = table.replace('"', "\"\"");
+            let stmt = conn.prepare(&format!("SELECT * FROM \"{quoted}\" LIMIT 0")).unwrap();
+            let order = (1..=stmt.column_count()).map(|column| column.to_string()).collect::<Vec<_>>().join(",");
+            drop(stmt);
+            let predicate = if table == "meta" { " WHERE key <> 'schema_version'" } else { "" };
+            let rows = wp0335_rows(conn, &format!("SELECT * FROM \"{quoted}\"{predicate} ORDER BY {order}"));
+            (table, rows)
+        }).collect()
+    }
+
+    fn wp0335_activity_fixture(conn: &Connection, count: usize, payload_bytes: usize) {
+        let tracks = ["youtube_single", "youtube_recurring", "instagram_single", "instagram_recurring", "instagram", "tiktok_single", "tiktok_recurring", "other_video", "image_archive", "localization"];
+        let statuses = ["queued", "running", "failed", "succeeded", "canceled"];
+        let tx = conn.unchecked_transaction().unwrap();
+        for n in 0..count {
+            tx.execute("INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path,track,attempt_no,retry_replacement_job_id) VALUES(?1,'download_direct_url',?2,0,?3,?4,'fixture.log',?5,?6,?7)",
+                params![format!("fixture-{:05}", count-n), statuses[(n/tracks.len())%statuses.len()], format!("{{\"payload\":\"{}\"}}", "x".repeat(payload_bytes)), (n/11) as i64, tracks[n%tracks.len()], (n%3+1) as i64, if n%13 == 0 {Some("retained-replacement")} else {None}]).unwrap();
+        }
+        tx.commit().unwrap();
+    }
+
+    fn wp0335_activity_result(conn: &Connection, tracks: &str, statuses: &str, offset: usize, limit: usize) -> (i64, Vec<Vec<rusqlite::types::Value>>) {
+        let total = conn.query_row(&format!("SELECT COUNT(*) FROM job WHERE {tracks} AND {statuses}"), [], |row| row.get(0)).unwrap();
+        // Exact existing product candidate-page ordering and full-row retrieval.
+        let rows = wp0335_rows(conn, &format!("SELECT j.* FROM (SELECT rowid FROM job WHERE {tracks} AND {statuses} ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,created_at_ms DESC,id DESC LIMIT {limit} OFFSET {offset}) AS page JOIN job AS j ON j.rowid=page.rowid ORDER BY CASE j.status WHEN 'running' THEN 0 ELSE 1 END,j.created_at_ms DESC,j.id DESC"));
+        (total, rows)
+    }
+
+    #[test]
+    fn wp0335_activity_index_migration62_preserves_schema61_rows_and_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        wp0335_schema61(&conn);
+        wp0335_activity_fixture(&conn, 121, 64);
+        conn.execute("INSERT INTO meta(key,value) VALUES('operator-preference','retained')", []).unwrap();
+        let before = wp0335_protected_rows(&conn);
+        migrate(&conn).unwrap();
+        assert_eq!(schema_user_version(&conn).unwrap(), 62);
+        assert_eq!(before, wp0335_protected_rows(&conn));
+        migrate(&conn).unwrap();
+        assert_eq!(before, wp0335_protected_rows(&conn));
+        let columns = conn.prepare("PRAGMA index_info(idx_job_activity_candidates)").unwrap()
+            .query_map([], |row| row.get::<_, String>(2)).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+        assert_eq!(columns, ["status", "created_at_ms", "id", "track", "retry_replacement_job_id"]);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE name='idx_job_activity_candidates'", [], |row|row.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn wp0335_activity_index_preserves_all_sources_views_totals_offsets_and_text_ties() {
+        let conn = Connection::open_in_memory().unwrap();
+        wp0335_schema61(&conn);
+        wp0335_activity_fixture(&conn, 221, 128);
+        let sources = ["1=1", "track IN ('youtube_single','youtube_recurring')", "track IN ('instagram_single','instagram_recurring','instagram')", "track IN ('tiktok_single','tiktok_recurring')", "track='other_video'", "track='image_archive'", "track='localization'"];
+        let views = ["status IN ('running','queued')", "status='failed' AND retry_replacement_job_id IS NULL", "status IN ('succeeded','failed','canceled')"];
+        let mut before = Vec::new();
+        for source in sources { for view in views { for offset in [0, 1, 49, 220, 1_000_000] { for limit in [1, 7, 50] {
+            before.push(wp0335_activity_result(&conn, source, view, offset, limit));
+        }}}}
+        apply_schema_v62(&conn).unwrap();
+        let mut cases = before.into_iter();
+        for source in sources { for view in views { for offset in [0, 1, 49, 220, 1_000_000] { for limit in [1, 7, 50] {
+            assert_eq!(cases.next().unwrap(), wp0335_activity_result(&conn, source, view, offset, limit), "source={source}; view={view}; offset={offset}; limit={limit}");
+        }}}}
+        assert!(cases.next().is_none());
+    }
+
+    #[test]
+    fn wp0335_activity_covering_index_reduces_counted_vfs_reads_with_large_unrelated_payloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut observations = Vec::new();
+        for candidate in [false, true] {
+            let paths = AppPaths::new(dir.path().join(if candidate {"candidate"} else {"baseline"}));
+            let conn = open(&paths).unwrap();
+            wp0335_schema61(&conn);
+            wp0335_activity_fixture(&conn, 2000, 16*1024);
+            if candidate { apply_schema_v62(&conn).unwrap(); }
+            drop(conn);
+            let database = AppDatabase::for_paths(&paths).unwrap();
+            let read = database.read_context(DatabaseOperationContext::new("wp0335", "activity_covering_index")).unwrap();
+            let result = wp0335_activity_result(&read, "1=1", "status='failed' AND retry_replacement_job_id IS NULL", 11, 5);
+            let plan = wp0335_rows(&read, "EXPLAIN QUERY PLAN SELECT rowid FROM job WHERE status='failed' AND retry_replacement_job_id IS NULL ORDER BY CASE status WHEN 'running' THEN 0 ELSE 1 END,created_at_ms DESC,id DESC LIMIT 5 OFFSET 11");
+            drop(read);
+            let snapshot = database.snapshot();
+            let receipt = snapshot.recent_receipts.iter().find(|receipt| receipt.operation == "activity_covering_index").unwrap();
+            let bytes = receipt.file_bytes_read.expect("counted bundled SQLite VFS receipt");
+            observations.push((result, bytes, plan));
+        }
+        assert_eq!(observations[0].0, observations[1].0);
+        eprintln!("WP0335 activity baseline_bytes={} candidate_bytes={} baseline_plan={:?} candidate_plan={:?}", observations[0].1, observations[1].1, observations[0].2, observations[1].2);
+        assert!(observations[0].1 > 0 && observations[1].1 > 0);
+        assert!(observations[1].1 < observations[0].1, "reject index without actual counted-VFS improvement");
+    }
+
     #[test]
     fn subscription_activity_index_accepts_legacy_invalid_json_and_is_idempotent() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();

@@ -4,11 +4,11 @@ file_kind: work_packet
 updated_at: 2026-10-05
 ---
 
-<topic id="contract" status="IN_PROGRESS" version="v1" wp="WP-0329" updated_at="2026-10-03">
+<topic id="contract" status="NEEDS_VALIDATION" version="v1" wp="WP-0329" updated_at="2026-10-05">
 
 # Runtime readiness repair
 
-Status: IN_PROGRESS. Owner: runtime_restore. Board: ../TASK_BOARD.md WP-0329. Refinement: WP-0329_RUNTIME_READINESS_REPAIR_v1_REFINEMENT.md. Dependencies: WP-0262, WP-0239, WP-0316. Preserve original localization/voice acceptance.
+Status: NEEDS_VALIDATION. Owner: runtime_restore. Board: ../TASK_BOARD.md WP-0329. Refinement: WP-0329_RUNTIME_READINESS_REPAIR_v1_REFINEMENT.md. Dependencies: WP-0262, WP-0239, WP-0316. Preserve original localization/voice acceptance.
 
 Scope: correct proven capability probe and generated-child flaws in engine tools.rs; diagnose legacy Python/model/cache failure; restore required components via governed controls; investigate qualified-runtime mismatch without bypass. Excludes user media, SQLite edits, new version, changelog changes, process stops and simultaneous Cargo jobs.
 
@@ -211,5 +211,17 @@ Focused DIAG006 batch PASS at pushed a7d8fc73ef9d6ea33a819e086a2699394a5f2fea: `
 Independent native read `.local/proofVVRemaining/vendor_patch_native_read_07.json` PASS (15700 unpackaged) binds current pointer6d640c29, manifest2b712189 and Python5f7b89a6. Actual runtime_main/Lib/site-packages/openvoice/api.py is7867B SHA00c870aea27bffdba2f3c9f0f93be03a719ef1f7b794d9a393587bc50cc83efb and contains the real newline pop/super and `if enable_watermark` patch. Wrong parent package file is absent. Zero imports/mutations. Missing-patch diagnosis was a probe path false negative; immutable payload repair/requalification is not needed.
 
 Selected remediation reuses the product portable runtime_* interpreter layout: package root is the executable parent for runtime_*/python.exe, and parent.parent for Scripts/python.exe or bin/python. Reject unrecognized layouts and foreign-parent fallback. Validate owning root-layout/foreign-package fixtures plus existing vendor-patch transform regressions; independently inspect installed Diagnostics after the one new core build. Preserve actual package/model readiness criteria and all payload bytes. Tools refresh still intentionally performs full-byte integrity validation; measured latency is not proof of a missing package or successful readiness. WP remains IN_PROGRESS until installed pipeline and required package proof pass.
+
+</topic>
+
+<topic id="installed-runtime-workflow-proof-20261005" status="NEEDS_VALIDATION" wp="WP-0329" updated_at="2026-10-05">
+
+Installed core source a0bb600141fffcfb1f7274189917af11b17e562a, physical SHA a197ae258a379124b8797f00d0559ec5496c8c6fcbe1b840379de0e036faad11, version0.1.205 and unchanged qualified runtime7ea19cb688095cd14dfbc84e passed actual isolated Haerin workflow. Independent canonical reread shows all10 jobs succeeded: import, ASR, translation, diarization, cloned dub, separation, mixing, MKV mux, QC and export. Original input SHA328e555ab418eb37b6ca0cb7656497b2cef2684816dfa47257f69c1825001676 unchanged. Clone report converted1/fallback0 with294 CPU FP32 parameters; independent waveform check finite/nonzero. MKV SHA1d3f175c72d4fd8f059fc05b0df1d4b98263da22145f5a79275ad14cfa261575 contains English cloned/original audio plus eng/kor embedded subtitles; export ZIP SHA970154acbf896582c4d02a4870be3b83304e8216ef5ab9fa06450a6ea3079bb9 passed CRC and exact media identity. Proof: product/desktop/build_target/tool_artifacts/wp_runs/WP-0329/20261005/actual_localization_a0bb600/independent_validation.json. Export provenance can retain its own earlier running projection; fresh canonical terminal state is authoritative. No subjective translation or voice-similarity claim.
+
+Focused vendor batch5/5 passed at a0bb600; managed Core build and silent native NSIS Update passed,14 protected tables and11 runtime assets preserved. Core-only changes reused qualified runtime without new freeze, qualification or ISO. Original failure/replay records are retained.
+
+Installed Diagnostics four semantic actions settled: Tools30,252/18,175ms with logical app reads6,564,357,933/6,527,996,195B; Voice2,043/2,024ms with116,111/116,335B. Root directly inspected paired screenshots and08_readonly_reason_0/1/2: Voice packages Installed, FFmpeg Ready, neural TTS ready, OpenVoice ready and default CosyVoice managed_ready, queued/loading/stale/failed0, startup100%. Storage/recent failures were not checked. Measurement: product/desktop/build_target/tool_artifacts/wp_runs/WP-0329/20261005/diagnostics_measured_a0bb600_01/result.json. These are logical process reads excluding child processes, not physical disk IO. Full-byte explicit refresh remains costly; no numeric latency criterion or weakened hash verification is introduced.
+
+Status transitions to NEEDS_VALIDATION before moving to WP0324. Installed runtime/product workflow gates pass; original exact final clean offline ISO qualification/activation/isolation acceptance remains mandatory and the ONE final attempt is unused.
 
 </topic>

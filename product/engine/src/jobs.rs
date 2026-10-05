@@ -7189,7 +7189,7 @@ fn selected_download_allowed_conn(conn: &rusqlite::Connection, job_id: &str) -> 
 }
 
 fn has_selected_downloads_conn(conn: &rusqlite::Connection) -> Result<bool> {
-    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM job_selected_download s JOIN job j
+    Ok(conn.query_row("SELECT EXISTS(SELECT 1 FROM job_selected_download s CROSS JOIN job j
         ON j.id=s.job_id AND j.attempt_no=s.attempt_no WHERE j.status IN ('queued','running'))", [], |r| r.get(0))?)
 }
 
@@ -9813,7 +9813,24 @@ fn reap_finished_worker_handles(
     unfinished_count
 }
 
+#[derive(Clone)]
+pub struct InstallProofDispatchGuard {
+    pub check: Arc<dyn Fn(&AppPaths, &str) -> Result<()> + Send + Sync>,
+    pub targets: Arc<dyn Fn(&AppPaths, &[PathBuf]) -> Result<()> + Send + Sync>,
+    pub enter: Arc<dyn Fn(&AppPaths, &str) -> Result<Box<dyn Send + Sync>> + Send + Sync>,
+}
+
 pub fn start_runner(paths: AppPaths) -> Result<JobRunnerHandle> {
+    start_runner_inner(paths, None)
+}
+
+/// Explicit disposable install-proof owner; production/default callers use no hook.
+pub fn start_runner_with_install_proof_guard(paths: AppPaths, guard: InstallProofDispatchGuard) -> Result<JobRunnerHandle> {
+    (guard.check)(&paths, "install_phase2_packs_v1")?;
+    start_runner_inner(paths, Some(guard))
+}
+
+fn start_runner_inner(paths: AppPaths, dispatch_guard: Option<InstallProofDispatchGuard>) -> Result<JobRunnerHandle> {
     JOB_RUNNER_SHUTDOWN_REQUESTED.store(false, Ordering::SeqCst);
     paths.ensure_dirs()?;
     let conn = db::write_context(&paths)?;
@@ -9848,6 +9865,7 @@ pub fn start_runner(paths: AppPaths) -> Result<JobRunnerHandle> {
             stop_thread,
             runtime_state_thread,
             runner_worker_joins,
+            dispatch_guard,
         )
     });
 
@@ -11311,6 +11329,7 @@ fn runner_loop(
     stop: Arc<AtomicBool>,
     runtime_state: Arc<Mutex<JobTrackRunnerRuntimeState>>,
     worker_joins: Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
+    dispatch_guard: Option<InstallProofDispatchGuard>,
 ) {
     let mut stall_seen: std::collections::HashMap<String, JobProgressMark> =
         std::collections::HashMap::new();
@@ -11690,6 +11709,7 @@ fn runner_loop(
                         params_json,
                         track,
                         &worker_joins,
+                        &dispatch_guard,
                     );
                     if !spawned
                         && adaptive_scheduler_policy
@@ -11808,6 +11828,7 @@ fn runner_loop(
                             params_json,
                             JobTrack::YoutubeRecurring,
                             &worker_joins,
+                            &dispatch_guard,
                         );
                         if !spawned
                             && adaptive_scheduler_policy
@@ -11879,6 +11900,7 @@ fn runner_loop(
                     params_json,
                     track,
                     &worker_joins,
+                    &dispatch_guard,
                 ) {
                     dispatched_any = true;
                 }
@@ -11895,6 +11917,15 @@ fn runner_loop(
     update_youtube_gate_runtime(&runtime_state, "ready", None, None);
 }
 
+// Select sparse attempt-bound grants and the ordered IDs before retrieving payloads.
+const PAUSED_SELECTED_QUEUE_SQL: &str = "SELECT j.id,j.type,j.params_json FROM (
+    SELECT j.rowid,s.ordinal,j.created_at_ms,j.id FROM job_selected_download s CROSS JOIN job j
+      ON j.id=s.job_id AND j.attempt_no=s.attempt_no
+    WHERE j.status='queued' AND j.track=?1 AND (?2 IS NULL OR j.type=?2)
+    ORDER BY s.ordinal,j.created_at_ms,j.id LIMIT ?3
+  ) AS selected CROSS JOIN job j ON j.rowid=selected.rowid
+  ORDER BY selected.ordinal,selected.created_at_ms,selected.id";
+
 fn fetch_queued_jobs_for_track_inner(
     paths: &AppPaths,
     wanted_track: JobTrack,
@@ -11906,6 +11937,12 @@ fn fetch_queued_jobs_for_track_inner(
     let conn = db::open_readonly(paths)?;
     let mut result = Vec::with_capacity(limit);
     let paused = is_queue_paused_conn(&conn)?;
+    if paused {
+        let mut stmt = conn.prepare(PAUSED_SELECTED_QUEUE_SQL)?;
+        return Ok(stmt.query_map(params![wanted_track.as_str(), wanted_type, limit as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<Vec<_>>>()?);
+    }
     if paused || (matches!(wanted_track, JobTrack::YoutubeSingle | JobTrack::OtherVideo)
         && wanted_type.is_none_or(|kind| kind == JobType::DownloadDirectUrl.as_str())
         && has_selected_downloads_conn(&conn)?) {
@@ -12600,7 +12637,14 @@ fn claim_and_spawn_for_track(
     params_json: String,
     track: JobTrack,
     worker_joins: &Arc<Mutex<Vec<thread::JoinHandle<()>>>>,
+    dispatch_guard: &Option<InstallProofDispatchGuard>,
 ) -> bool {
+    if let Some(guard) = dispatch_guard {
+        if let Err(error) = (guard.check)(paths, &type_str) {
+            append_engine_diagnostics_trace_row_best_effort(paths, "install_proof_dispatch_refused", "error", serde_json::json!({"job_id":job_id,"error":error.to_string()}));
+            return false;
+        }
+    }
     let outcome = match claim_job_for_track(paths, &job_id, track) {
         Ok(outcome) => outcome,
         Err(_) => return false,
@@ -12660,17 +12704,26 @@ fn claim_and_spawn_for_track(
         // Construct the guard before handing it to the worker. If OS thread creation panics,
         // unwinding drops the captured guard and cannot strand this job in the envelope map.
         let envelope_guard = JobCausalEnvelopeGuard::new(job_id.clone());
+        let worker_guard = dispatch_guard.clone();
         let worker = thread::spawn(move || {
             let _envelope_guard = envelope_guard;
             let _execution_context =
                 CurrentJobExecutionGuard::enter(paths_worker.clone(), job_id.clone());
-            let result = execute_job(
+            // Revalidate outside writer admission and before execution filesystem work.
+            // This worker closure owns the lease through actual terminal persistence.
+            let mut proof_permit: Option<Box<dyn Send + Sync>> = None;
+            let entered = match worker_guard.as_ref() {
+                Some(guard) => (guard.enter)(&paths_worker, &job_type).map(|permit| {proof_permit=Some(permit);}),
+                None => Ok(()),
+            };
+            let result = entered.and_then(|_|execute_job(
                 &paths_worker,
                 &job_id,
                 &job_type,
                 &durable_params_json,
                 &envelope,
-            );
+                worker_guard.as_ref(),
+            ));
             if let Err(e) = result {
                 // WP-0322 B1: a background subscription refresh or direct download that fails
                 // only because the shared database writer/reader lane was briefly saturated
@@ -12713,6 +12766,7 @@ fn claim_and_spawn_for_track(
                     let _ = set_failed(&paths_worker, &job_id, &err_text);
                 }
             }
+            drop(proof_permit);
         });
         worker_joins
             .lock()
@@ -13913,6 +13967,7 @@ fn execute_job(
     type_str: &str,
     params_json: &str,
     envelope: &JobCausalEnvelope,
+    install_proof_guard: Option<&InstallProofDispatchGuard>,
 ) -> Result<()> {
     let _download_execution = if type_str == "download_direct_url" {
         let key = download_execution_key(paths, job_id);
@@ -20861,16 +20916,19 @@ if __name__ == "__main__":
             )?;
         }
         JobType::InstallPhase2PacksV1 => {
+            fn checked_phase2_log_line(paths: &AppPaths, guard: Option<&InstallProofDispatchGuard>, job_id: &str, level: &str, event: &str, data: serde_json::Value) -> Result<()> {
+                if let Some(guard)=guard { (guard.targets)(paths,&[paths.job_logs_dir().join(format!("{job_id}.jsonl"))])?; }
+                log_line(paths,job_id,level,event,data)
+            }
             let p: InstallPhase2PacksV1Params =
                 serde_json::from_str(params_json).unwrap_or_default();
 
             if is_canceled(paths, job_id)? {
-                log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+                checked_phase2_log_line(paths, install_proof_guard, job_id, "info", "job_canceled", serde_json::json!({}))?;
                 return Ok(());
             }
 
-            log_line(
-                paths,
+            checked_phase2_log_line(paths, install_proof_guard,
                 job_id,
                 "info",
                 "install_phase2_packs_begin",
@@ -20878,6 +20936,9 @@ if __name__ == "__main__":
             )?;
 
             let install_root = paths.install_logs_dir().join("phase2").join(job_id);
+            if let Some(guard)=install_proof_guard {
+                (guard.targets)(paths,&[install_root.join("state.json"),paths.install_logs_dir().join("phase2").join("latest.json")])?;
+            }
             std::fs::create_dir_all(&install_root)?;
             let state_path = install_root.join("state.json");
             let latest_path = paths.install_logs_dir().join("phase2").join("latest.json");
@@ -20911,7 +20972,8 @@ if __name__ == "__main__":
                 steps: Vec<Phase2InstallStep>,
             }
 
-            fn write_state(path: &Path, latest: &Path, state: &Phase2InstallState) -> Result<()> {
+            fn write_state(paths: &AppPaths, guard: Option<&InstallProofDispatchGuard>, path: &Path, latest: &Path, state: &Phase2InstallState) -> Result<()> {
+                if let Some(guard)=guard { (guard.targets)(paths,&[path.to_path_buf(),latest.to_path_buf()])?; }
                 let json = serde_json::to_string_pretty(state)?;
                 std::fs::write(path, format!("{json}\n"))?;
                 // Best-effort copy to a stable "latest" location.
@@ -20919,7 +20981,8 @@ if __name__ == "__main__":
                 Ok(())
             }
 
-            fn append_log_line(path: &Path, line: &str) {
+            fn append_log_line(paths: &AppPaths, guard: Option<&InstallProofDispatchGuard>, path: &Path, line: &str) -> Result<()> {
+                if let Some(guard)=guard { (guard.targets)(paths,&[path.to_path_buf()])?; }
                 if let Ok(mut file) = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
@@ -20927,6 +20990,7 @@ if __name__ == "__main__":
                 {
                     let _ = writeln!(file, "{}", line.trim_end());
                 }
+                Ok(())
             }
 
             let started_at_ms = now_ms();
@@ -21012,7 +21076,7 @@ if __name__ == "__main__":
                 updated_at_ms: now_ms(),
                 steps,
             };
-            write_state(&state_path, &latest_path, &state)?;
+            write_state(paths, install_proof_guard, &state_path, &latest_path, &state)?;
 
             let total_steps = state
                 .steps
@@ -21025,8 +21089,12 @@ if __name__ == "__main__":
             let mut completed_steps = state.steps.iter().filter(|s| s.status == "done").count();
 
             for step_index in 0..state.steps.len() {
+                // Before running-state mutation, cancellation logging, or filesystem writes.
+                if let Some(guard)=install_proof_guard {
+                    (guard.targets)(paths,&[state_path.clone(),latest_path.clone(),PathBuf::from(&state.steps[step_index].log_path)])?;
+                }
                 if is_canceled(paths, job_id)? {
-                    log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+                    checked_phase2_log_line(paths, install_proof_guard, job_id, "info", "job_canceled", serde_json::json!({}))?;
                     return Ok(());
                 }
                 if state.steps[step_index].status == "skipped" {
@@ -21047,13 +21115,13 @@ if __name__ == "__main__":
                     (step.id.clone(), step.title.clone(), step.log_path.clone())
                 };
 
-                write_state(&state_path, &latest_path, &state)?;
+                write_state(paths, install_proof_guard, &state_path, &latest_path, &state)?;
 
                 let log_path = PathBuf::from(&step_log_path);
                 append_log_line(
-                    &log_path,
+                    paths, install_proof_guard, &log_path,
                     &format!("begin step={step_id} title={step_title}"),
-                );
+                )?;
 
                 let before = crate::diagnostics::directory_size_bytes_best_effort(
                     &paths.python_toolchain_dir(),
@@ -21062,21 +21130,21 @@ if __name__ == "__main__":
                     "portable_python_win64" => {
                         let status = tools::python_toolchain_status(paths);
                         if status.base_available {
-                            append_log_line(&log_path, "skip: base python already available");
+                            append_log_line(paths, install_proof_guard, &log_path, "skip: base python already available")?;
                             Ok(())
                         } else {
-                            append_log_line(&log_path, "install: portable python");
+                            append_log_line(paths, install_proof_guard, &log_path, "install: portable python")?;
                             let _ = tools::install_portable_python(paths)?;
                             Ok(())
                         }
                     }
                     "python_toolchain" => {
-                        append_log_line(&log_path, "install: python toolchain");
+                        append_log_line(paths, install_proof_guard, &log_path, "install: python toolchain")?;
                         let _ = tools::install_python_toolchain(paths)?;
                         Ok(())
                     }
                     "spleeter" => {
-                        append_log_line(&log_path, "install: spleeter pack");
+                        append_log_line(paths, install_proof_guard, &log_path, "install: spleeter pack")?;
                         if p.force {
                             let _ = tools::install_spleeter_pack(paths)?;
                         } else {
@@ -21085,7 +21153,7 @@ if __name__ == "__main__":
                         Ok(())
                     }
                     "diarization" => {
-                        append_log_line(&log_path, "install: diarization pack");
+                        append_log_line(paths, install_proof_guard, &log_path, "install: diarization pack")?;
                         if p.force {
                             let _ = tools::install_diarization_pack(paths)?;
                         } else {
@@ -21094,7 +21162,7 @@ if __name__ == "__main__":
                         Ok(())
                     }
                     "tts_preview" => {
-                        append_log_line(&log_path, "install: tts preview pack");
+                        append_log_line(paths, install_proof_guard, &log_path, "install: tts preview pack")?;
                         if p.force {
                             let _ = tools::install_tts_preview_pack(paths)?;
                         } else {
@@ -21103,7 +21171,7 @@ if __name__ == "__main__":
                         Ok(())
                     }
                     "tts_neural_local_v1" => {
-                        append_log_line(&log_path, "install: neural tts local v1 pack");
+                        append_log_line(paths, install_proof_guard, &log_path, "install: neural tts local v1 pack")?;
                         if p.force {
                             let _ = tools::install_tts_neural_local_v1_pack(paths)?;
                         } else {
@@ -21112,7 +21180,7 @@ if __name__ == "__main__":
                         Ok(())
                     }
                     "tts_voice_preserving_local_v1" => {
-                        append_log_line(&log_path, "install: voice-preserving dub pack");
+                        append_log_line(paths, install_proof_guard, &log_path, "install: voice-preserving dub pack")?;
                         if p.force {
                             let _ = tools::install_tts_voice_preserving_local_v1_pack(paths)?;
                         } else {
@@ -21122,7 +21190,7 @@ if __name__ == "__main__":
                         Ok(())
                     }
                     "voice_clone_cosyvoice_v1" => {
-                        append_log_line(&log_path, "install: CosyVoice 2 voice-clone pack");
+                        append_log_line(paths, install_proof_guard, &log_path, "install: CosyVoice 2 voice-clone pack")?;
                         if p.force {
                             let _ = tools::install_voice_clone_cosyvoice_v1_pack(paths)?;
                         } else {
@@ -21149,7 +21217,7 @@ if __name__ == "__main__":
                             step.delta_bytes = Some(delta_bytes);
                             step.finished_at_ms = Some(finished_at_ms);
                         }
-                        append_log_line(&log_path, "done");
+                        append_log_line(paths, install_proof_guard, &log_path, "done")?;
                         completed_steps += 1;
                     }
                     Err(err) => {
@@ -21160,23 +21228,22 @@ if __name__ == "__main__":
                             step.finished_at_ms = Some(finished_at_ms);
                             step.error = Some(err.to_string());
                         }
-                        append_log_line(&log_path, &format!("failed: {}", err.to_string()));
+                        append_log_line(paths, install_proof_guard, &log_path, &format!("failed: {}", err.to_string()))?;
                         state.updated_at_ms = now_ms();
-                        write_state(&state_path, &latest_path, &state)?;
+                        write_state(paths, install_proof_guard, &state_path, &latest_path, &state)?;
                         return Err(err);
                     }
                 }
 
                 state.updated_at_ms = now_ms();
-                write_state(&state_path, &latest_path, &state)?;
+                write_state(paths, install_proof_guard, &state_path, &latest_path, &state)?;
 
                 let progress = 0.10 + 0.85 * ((completed_steps as f32) / (total_steps as f32));
                 set_progress(paths, job_id, progress)?;
             }
 
             set_progress(paths, job_id, 0.98)?;
-            log_line(
-                paths,
+            checked_phase2_log_line(paths, install_proof_guard,
                 job_id,
                 "info",
                 "install_phase2_packs_done",
@@ -21189,11 +21256,10 @@ if __name__ == "__main__":
 
             if let Some(resume_request) = p.resume_localization_run {
                 if is_canceled(paths, job_id)? {
-                    log_line(paths, job_id, "info", "job_canceled", serde_json::json!({}))?;
+                    checked_phase2_log_line(paths, install_proof_guard, job_id, "info", "job_canceled", serde_json::json!({}))?;
                     return Ok(());
                 }
-                log_line(
-                    paths,
+                checked_phase2_log_line(paths, install_proof_guard,
                     job_id,
                     "info",
                     "install_phase2_resume_localization_begin",
@@ -21203,8 +21269,7 @@ if __name__ == "__main__":
                     }),
                 )?;
                 let summary = enqueue_localization_run_v1(paths, resume_request)?;
-                log_line(
-                    paths,
+                checked_phase2_log_line(paths, install_proof_guard,
                     job_id,
                     "info",
                     "install_phase2_resume_localization_queued",
@@ -33186,6 +33251,146 @@ mod tests {
         (dir, paths)
     }
 
+    const WP0335_OLD_SELECTED_EXISTS_SQL: &str = "SELECT EXISTS(SELECT 1 FROM job_selected_download s JOIN job j
+        ON j.id=s.job_id AND j.attempt_no=s.attempt_no WHERE j.status IN ('queued','running'))";
+    const WP0335_OLD_PAUSED_FETCH_SQL: &str = "SELECT j.id,j.type,j.params_json FROM job j
+        LEFT JOIN job_selected_download s ON s.job_id=j.id AND s.attempt_no=j.attempt_no
+        WHERE j.status='queued' AND j.track=?1 AND (?2 IS NULL OR j.type=?2)
+          AND (?3=0 OR s.job_id IS NOT NULL)
+        ORDER BY CASE WHEN s.job_id IS NULL THEN 1 ELSE 0 END,s.ordinal,j.created_at_ms,j.id LIMIT ?4";
+
+    #[test]
+    fn wp0335_selected_exists_matches_legacy_truth_cases() {
+        let (_dir, paths) = selected_queue_fixture();
+        let conn = db::open(&paths).unwrap();
+        for (status, grant_attempt, expected) in [("queued", 1, true), ("running", 1, true),
+            ("succeeded", 1, false), ("failed", 1, false), ("canceled", 1, false), ("queued", 2, false)] {
+            conn.execute("DELETE FROM job_selected_download", []).unwrap();
+            assert!(!has_selected_downloads_conn(&conn).unwrap());
+            conn.execute("UPDATE job SET status=?1 WHERE id='recurring'", [status]).unwrap();
+            conn.execute("INSERT INTO job_selected_download(job_id,attempt_no,ordinal) VALUES('recurring',?1,0)", [grant_attempt]).unwrap();
+            let old: bool = conn.query_row(WP0335_OLD_SELECTED_EXISTS_SQL, [], |r| r.get(0)).unwrap();
+            assert_eq!(old, expected);
+            assert_eq!(has_selected_downloads_conn(&conn).unwrap(), old);
+        }
+        // Existence intentionally retains any attempt-bound active grant; eligibility is elsewhere.
+        conn.execute("UPDATE job SET track='image_archive',type='image_batch' WHERE id='selected'", []).unwrap();
+        conn.execute("INSERT INTO job_selected_download(job_id,attempt_no,ordinal) VALUES('selected',1,1)", []).unwrap();
+        assert!(has_selected_downloads_conn(&conn).unwrap());
+        assert_eq!(has_selected_downloads_conn(&conn).unwrap(), conn.query_row(WP0335_OLD_SELECTED_EXISTS_SQL, [], |r| r.get::<_, bool>(0)).unwrap());
+    }
+
+    #[test]
+    fn wp0335_paused_fetch_matches_legacy_selection_order() {
+        let (_dir, paths) = selected_queue_fixture();
+        let conn = db::open(&paths).unwrap();
+        conn.execute("INSERT INTO meta(key,value) VALUES('jobs_queue_paused','1') ON CONFLICT(key) DO UPDATE SET value='1'", []).unwrap();
+        conn.execute("UPDATE job SET created_at_ms=100 WHERE id IN ('selected','second')", []).unwrap();
+        conn.execute("INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path,track) VALUES('alpha','youtube_subscription_refresh_v1','queued',0,'{\"distinct\":true}',100,'','youtube_single')", []).unwrap();
+        conn.execute("INSERT INTO job_selected_download(job_id,attempt_no,ordinal) VALUES('selected',1,0),('second',1,0),('alpha',1,0),('recurring',1,1),('older',2,2)", []).unwrap();
+        drop(conn);
+        for track in [JobTrack::YoutubeSingle, JobTrack::YoutubeRecurring, JobTrack::OtherVideo] {
+            for kind in [None, Some("download_direct_url"), Some("youtube_subscription_refresh_v1")] {
+                for limit in [0usize, 1, 2, 20] {
+                    let conn = db::open_readonly(&paths).unwrap();
+                    let old = conn.prepare(WP0335_OLD_PAUSED_FETCH_SQL).unwrap().query_map(
+                        params![track.as_str(), kind, 1, limit.max(1) as i64],
+                        |r| Ok((r.get::<_,String>(0)?, r.get::<_,String>(1)?, r.get::<_,String>(2)?)))
+                        .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap();
+                    drop(conn);
+                    let mut cursors = LegacyTrackFallbackCursors::default();
+                    cursors.by_key.insert(LegacyTrackFallbackCursors::key(track, kind), LegacyTrackCursor { created_at_ms: 7, id: "unchanged-cursor".into() });
+                    let before = format!("{:?}", cursors.by_key);
+                    let actual = fetch_queued_jobs_for_track_inner(&paths, track, kind, limit, &mut cursors).unwrap();
+                    assert_eq!(actual, old, "track={track:?} kind={kind:?} limit={limit}");
+                    assert_eq!(format!("{:?}", cursors.by_key), before, "paused selection must not advance legacy cursors");
+                }
+            }
+        }
+        let conn = db::open(&paths).unwrap();
+        conn.execute("UPDATE job SET status='running' WHERE id='second'", []).unwrap();
+        conn.execute("UPDATE job SET status='succeeded' WHERE id='selected'", []).unwrap();
+        drop(conn);
+        assert_eq!(fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 20).unwrap().iter().map(|r|r.0.as_str()).collect::<Vec<_>>(), vec!["alpha"]);
+        let conn = db::open(&paths).unwrap();
+        conn.execute("DELETE FROM job_selected_download", []).unwrap();
+        drop(conn);
+        assert!(fetch_queued_jobs_for_track(&paths, JobTrack::YoutubeSingle, 20).unwrap().is_empty());
+    }
+
+    #[test]
+    fn wp0335_selected_query_counterfactual_uses_bundled_vfs() {
+        let (_dir, paths) = selected_queue_fixture();
+        let mut conn = db::open(&paths).unwrap();
+        assert_eq!(conn.query_row("SELECT sqlite_version()", [], |r|r.get::<_,String>(0)).unwrap(), "3.53.2");
+        conn.execute("DELETE FROM job", []).unwrap();
+        let payload = format!("{{\"padding\":\"{}\"}}", "x".repeat(8192));
+        {
+            let tx = conn.transaction().unwrap();
+            let mut insert = tx.prepare("INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path,track) VALUES(?1,'download_direct_url','queued',0,?2,?3,'','youtube_recurring')").unwrap();
+            for index in 0..2048 {
+                insert.execute(params![format!("unselected-{index:04}"), payload, index]).unwrap();
+            }
+            drop(insert);
+            tx.execute("INSERT INTO job(id,type,status,progress,params_json,created_at_ms,logs_path,track) VALUES('chosen','download_direct_url','queued',0,'{\"selected\":true}',9999,'','youtube_recurring')", []).unwrap();
+            tx.commit().unwrap();
+        }
+        drop(conn);
+        let database = db::AppDatabase::for_paths(&paths).unwrap();
+        let cold = || {
+            database.read(db::DatabaseOperationContext::new("test", "wp0335_cold_setup"), |c| {
+                c.execute_batch("PRAGMA shrink_memory")?;
+                Ok(())
+            }).unwrap();
+        };
+        let bytes = |operation: &str| database.snapshot().recent_receipts.iter().rev()
+            .find(|r|r.operation == operation).unwrap().file_bytes_read.expect("counted VFS coverage");
+        for selected in [false, true] {
+            database.write(db::DatabaseOperationContext::new("test", "wp0335_grant_setup"), TransactionBehavior::Immediate, |c| {
+                c.execute("DELETE FROM job_selected_download", [])?;
+                if selected { c.execute("INSERT INTO job_selected_download(job_id,attempt_no,ordinal) VALUES('chosen',1,0)", [])?; }
+                Ok(())
+            }).unwrap();
+            for new_first in [false, true] {
+                let mut exists_bytes = [0u64; 2];
+                let mut fetch_bytes = [0u64; 2];
+                for new in if new_first {[true, false]} else {[false, true]} {
+                    cold();
+                    let operation = if new {"wp0335_exists_new"} else {"wp0335_exists_old"};
+                    let exists = database.read(db::DatabaseOperationContext::new("test", operation), |c| {
+                        if new { has_selected_downloads_conn(c) }
+                        else { Ok(c.query_row(WP0335_OLD_SELECTED_EXISTS_SQL, [], |r|r.get::<_,bool>(0))?) }
+                    }).unwrap();
+                    assert_eq!(exists, selected);
+                    exists_bytes[new as usize] = bytes(operation);
+                    cold();
+                    let operation = if new {"wp0335_fetch_new"} else {"wp0335_fetch_old"};
+                    let rows = database.read(db::DatabaseOperationContext::new("test", operation), |c| {
+                        let (sql, args) = if new {(PAUSED_SELECTED_QUEUE_SQL, vec![rusqlite::types::Value::Text("youtube_recurring".into()), rusqlite::types::Value::Text("download_direct_url".into()), rusqlite::types::Value::Integer(1)])}
+                        else {(WP0335_OLD_PAUSED_FETCH_SQL, vec![rusqlite::types::Value::Text("youtube_recurring".into()), rusqlite::types::Value::Text("download_direct_url".into()), rusqlite::types::Value::Integer(1), rusqlite::types::Value::Integer(1)])};
+                        let mut stmt = c.prepare(sql)?;
+                        let rows = stmt.query_map(rusqlite::params_from_iter(args), |r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?)))?.collect::<rusqlite::Result<Vec<_>>>()?;
+                        Ok(rows)
+                    }).unwrap();
+                    let expected = if selected {vec![("chosen".to_string(), "download_direct_url".to_string(), "{\"selected\":true}".to_string())]} else {Vec::new()};
+                    assert_eq!(rows, expected, "only the bounded selected payload may become a candidate");
+                    fetch_bytes[new as usize] = bytes(operation);
+                }
+                assert!(exists_bytes[0] > exists_bytes[1].saturating_mul(8), "selected={selected} new_first={new_first} exists old/new={exists_bytes:?}");
+                assert!(fetch_bytes[0] > fetch_bytes[1].saturating_mul(8), "selected={selected} new_first={new_first} fetch old/new={fetch_bytes:?}");
+                println!("WP0335 selected={selected} new_first={new_first} VFS exists_old_new={exists_bytes:?} fetch_old_new={fetch_bytes:?}");
+            }
+        }
+        database.read(db::DatabaseOperationContext::new("test", "wp0335_bundled_plan"), |c| {
+            let mut stmt = c.prepare(&format!("EXPLAIN QUERY PLAN {PAUSED_SELECTED_QUEUE_SQL}"))?;
+            let plan = stmt.query_map(params!["youtube_recurring", "download_direct_url", 1], |r|r.get::<_,String>(3))?.collect::<rusqlite::Result<Vec<_>>>()?;
+            assert!(plan.iter().any(|s|s.contains("SCAN s")), "grant-first bundled plan: {plan:?}");
+            assert!(plan.iter().any(|s|s.contains("sqlite_autoindex_job_1")), "job identity lookup: {plan:?}");
+            println!("WP0335 bundled paused plan={plan:?}");
+            Ok(())
+        }).unwrap();
+    }
+
     #[test]
     fn selected_downloads_filter_before_limit_and_claim_hold_unrelated_work() {
         let (_dir, paths) = selected_queue_fixture();
@@ -44161,5 +44366,67 @@ VV_MEDIA_POST:{"requested_subtitles":null}"#;
         assert_eq!(plan.len(), 1);
         assert_eq!(plan[0].stream_index, 1);
         assert_eq!(plan[0].language, "ko");
+    }
+}
+
+
+#[cfg(test)]
+mod install_proof_dispatch_tests {
+    use super::*;
+    #[test]
+    fn install_proof_refusal_precedes_startup_mutation_and_claim() {
+        let temp = tempfile::tempdir().unwrap();
+        let absent = temp.path().join("absent");
+        let denied = InstallProofDispatchGuard {
+            check:Arc::new(|_,_|Err(EngineError::InstallFailed("owned root changed".into()))),
+            targets:Arc::new(|_,_|Err(EngineError::InstallFailed("owned target changed".into()))),
+            enter:Arc::new(|_,_|Err(EngineError::InstallFailed("owned root changed".into()))),
+        };
+        assert!(start_runner_with_install_proof_guard(AppPaths::new(absent.clone()), denied.clone()).is_err());
+        assert!(!absent.exists());
+        let paths = AppPaths::new(temp.path().join("app"));
+        db::ensure_schema(&paths).unwrap();
+        let row = enqueue_install_phase2_packs_v1_with_options(&paths, true).unwrap();
+        let joins = Arc::new(Mutex::new(Vec::new()));
+        assert!(!claim_and_spawn_for_track(&paths,row.id.clone(),row.job_type.clone(),row.params_json.clone(),JobTrack::Localization,&joins,&Some(denied)));
+        let actual = get_job(&paths,&row.id).unwrap().unwrap();
+        assert_eq!(actual.status,JobStatus::Queued);
+        assert_eq!(actual.attempt_no,row.attempt_no);
+        assert_eq!(actual.params_json,row.params_json);
+        assert!(joins.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn install_proof_worker_rechecks_and_retains_owner_to_terminal() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(temp.path().join("app"));
+        db::ensure_schema(&paths).unwrap();
+        let row = enqueue_install_phase2_packs_v1(&paths).unwrap();
+        let owner = Arc::new(()); let weak = Arc::downgrade(&owner);
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_rx = Mutex::new(release_rx);
+        let enter = Arc::new(move |_: &AppPaths,kind: &str| -> Result<Box<dyn Send + Sync>> {
+            let _held = &owner;
+            assert_eq!(kind,"install_phase2_packs_v1");
+            assert_eq!(calls.fetch_add(1,Ordering::SeqCst),0);
+            entered_tx.send(()).unwrap();
+            release_rx.lock().unwrap().recv_timeout(Duration::from_secs(5)).unwrap();
+            Err(EngineError::InstallFailed("actual worker root changed".into()))
+        });
+        let guard = InstallProofDispatchGuard {check:Arc::new(|_,_|Ok(())),targets:Arc::new(|_,_|Ok(())),enter};
+        let joins = Arc::new(Mutex::new(Vec::new()));
+        let optional = Some(guard);
+        assert!(claim_and_spawn_for_track(&paths,row.id.clone(),row.job_type.clone(),row.params_json.clone(),JobTrack::Localization,&joins,&optional));
+        entered_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        drop(optional);
+        assert!(weak.upgrade().is_some(),"worker must retain owner after caller returns");
+        release_tx.send(()).unwrap();
+        for worker in std::mem::take(&mut *joins.lock().unwrap()) { worker.join().unwrap(); }
+        assert!(weak.upgrade().is_none(),"terminal joined worker releases its owner");
+        let actual = get_job(&paths,&row.id).unwrap().unwrap();
+        assert_eq!(actual.status,JobStatus::Failed);
+        assert!(actual.error.unwrap().contains("actual worker root changed"));
+        assert!(!paths.install_logs_dir().join("phase2").exists(),"no installer or journal work before actual worker guard");
     }
 }

@@ -155,3 +155,15 @@ Counters are scoped to the current root generation, not process-lifetime totals.
 - WP-0324-CACHE-005: Expose the memory-only counters as additive optional `provider_file_identity_diagnostics` on the existing canonical `JobTracksRuntimeSnapshot` / `/agent/jobs_tracks` surface, populated after the existing YouTube gate projection. Do not add an identity/provider recomputation, database query, endpoint or readiness predicate. Existing frontend consumers may ignore the field; counter types retain snapshot equality compatibility.
 
 </topic>
+
+<topic id="normal-selected-runner-read-amplification-20261005" status="NEEDS_VALIDATION" wp="WP-0324" updated_at="2026-10-05">
+
+Actual installed sourcea0bb600/nativeSHAa197ae258a379124b8797f00d0559ec5496c8c6fcbe1b840379de0e036faad11/version0.1.205 normal background PID211564 creation1791162730491; canonical global pause retained. Five exact prior failed originals were reopened through downloads.enqueue without mode, same IDs/attempt2/new foreground batch0631f980-304e-48b6-875b-d7c3a1f0dc2e, archived failed attempt1 preserved. Native observer187224 armed before start_selected only request1791163101894; receipt heldfalse/pausedtrue/rest_pausedtrue, exact5 grants. Independent canonical read/snapshot confirmed four running/fifth queued, no foreign running; later native plan snapshot shows first4 succeeded/fifth running. Full1800-second observation remains in progress; no30minute PASS yet.
+
+Provider forced-fresh23 then stable while polling/cache hits continue. Four actual yt-dlp launch receipts follow four groups of5 forced execution scans, as source ensure/append_runtime_args/run_yt_dlp requires. This observed segment does not show ongoing per-tick rehashing. Full source/receipt reconciliation: product/desktop/build_target/tool_artifacts/wp_runs/WP-0324/20261005/normal_io_prearmed_a0bb600_01/forced_fresh_execution_and_bounded_heavy_reads.json.
+
+Separate VFS attribution in bounded current trace segment: selected_pending18,500,505,600bytes/808 receipts; fetch_queued_jobs_for_track_inner34,688,180,224/1490; operator_activity_page3,006,590,976/128; four claim contexts3,177,234,432bytes. Logical context reads, not physical disk IO, exact statement or timeout root-cause proof. Native read-only metadata plans at hot_query_plans_live_readonly.json (Python SQLite3.50.4, not bundled3.53.2) show selected-existence optimizer drives job status index; paused fetch drives queued job index then LEFT JOIN/sort; activity inner page is non-covering because text id is absent from existing sort indexes. Metadata-only plans executed under RO/query_only/BEGIN/WAL, no SQL mutation or full query benchmark.
+
+Follow-up WP0335 owns minimal measured selected-query/activity read amplification remediation and its actual bundled-VFS/order-equivalence/installed proof; WP0323 retains existing older activity payload-before-pagination remediation. Original provider30minute/candidate/Tauri p50/VFS acceptance remains unchanged. Status remains NEEDS_VALIDATION before parallel follow-up implementation; do not infer completion from plans or launch-only evidence.
+
+</topic>
