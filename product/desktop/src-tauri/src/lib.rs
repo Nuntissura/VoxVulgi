@@ -13782,6 +13782,33 @@ fn tools_phase2_packs_setup_estimate() -> tools::Phase2PacksSetupEstimate {
     tools::phase2_packs_setup_estimate()
 }
 
+/// Exact canonical install + existing per-job journal; shared by original Tauri and token-authenticated read route.
+pub(crate) fn phase2_transfer_status_readback(paths: &AppPaths, job_id: &str) -> Result<serde_json::Value, String> {
+        uuid::Uuid::parse_str(&job_id).map_err(|_| "invalid exact install job ID".to_string())?;
+        let canonical=jobs::get_job(&paths,&job_id).map_err(|e|e.to_string())?
+            .filter(|job|job.job_type=="install_phase2_packs_v1");
+        let Some(job)=canonical else {return Ok(serde_json::json!({"canonical_install":null,"owner":null,"transfer":null}));};
+        let receipt=serde_json::json!({"id":job.id,"job_type":job.job_type,"attempt_no":job.attempt_no,"status":job.status,"progress":job.progress,"error":job.error});
+        if job.status!=jobs::JobStatus::Running {return Ok(serde_json::json!({"canonical_install":receipt,"owner":null,"transfer":null}));}
+        let path=paths.install_logs_dir().join("phase2").join(&job_id).join("state.json");
+        let journal=std::fs::File::open(&path).ok().and_then(|file| {
+            use std::io::Read;
+            let mut bytes=Vec::new();file.take(1_048_577).read_to_end(&mut bytes).ok()?;
+            if bytes.len()>1_048_576{return None;}serde_json::from_slice::<serde_json::Value>(&bytes).ok()
+        });
+        let step=journal.as_ref().filter(|state|state["job_id"].as_str()==Some(job_id))
+            .and_then(|state|state["steps"].as_array()).and_then(|steps|steps.iter().find(|s|s["status"]=="running"))
+            .and_then(|s|s["id"].as_str());
+        let owner=step.map(|step|serde_json::json!({"job_id":job_id,"attempt_no":job.attempt_no,"job_type":"install_phase2_packs_v1","job_status":"running","step_id":step,"step_status":"running"}));
+        let transfer=step.and_then(|step|voxvulgi_engine::phase2_transfer_live::snapshot(&paths,&job_id,job.attempt_no,step));
+        Ok(serde_json::json!({"canonical_install":receipt,"owner":owner,"transfer":transfer}))
+}
+
+#[tauri::command]
+async fn tools_phase2_transfer_status(state: State<'_, AppState>, job_id: String) -> Result<serde_json::Value, String> {
+    let paths=state.paths.clone();
+    tauri::async_runtime::spawn_blocking(move || phase2_transfer_status_readback(&paths,&job_id)).await.map_err(|e|e.to_string())?
+}
 #[tauri::command]
 async fn tools_phase2_packs_install_latest_state(
     state: State<'_, AppState>,
@@ -19588,6 +19615,7 @@ pub fn run() {
             tools_phase2_packs_install_plan,
             tools_phase2_packs_setup_estimate,
             tools_phase2_packs_install_latest_state,
+            tools_phase2_transfer_status,
             tools_pack_integrity_manifest_generate,
             tools_pack_integrity_manifest_status,
             tools_performance_tier_status,

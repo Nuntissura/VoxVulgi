@@ -1,0 +1,162 @@
+{
+  "file_id": "WP0230B_TRANSFER_PROGRESS_EXECUTION_CONTRACT_V3",
+  "status": "NEEDS_VALIDATION",
+  "version": 3,
+  "wp_id": "WP-0230b",
+  "title": "Phase2 real transfer bytes, speed and remaining-transfer ETA",
+  "refinement": {
+    "path": "governance\\workflow\\work_packets\\WP-0230b_PHASE2_TRANSFER_BYTES_SPEED_ETA_v3_REFINEMENT.json",
+    "sha256": "f73a68b8d62890c70b02642a31f25dce06af44a5cce2e9ad96d11412cef6cc6d"
+  },
+  "parent_wp": "WP-0230",
+  "consumer_wp": "WP-0235",
+  "operator_authorization": "Operator 2026-10-05: focus on WP-0230b and work and finish it; preceding stop-testing instruction remains in effect",
+  "source_head": "f692cadf864402736042875a22a763d68a7938b3",
+  "scope": [
+    "WP0230 original base five honest headlines, real completed-step progress, per-pack icon and one-second elapsed display remain required.",
+    "WP0230b carried extension: real pip wheel and HF model bytes/speed/ETA per-pack; same feed consumed by existing WP0235 Localization first-run setup; no new modal/route/cards/header notifications.",
+    "Retain assigned version0.1.205, runtime dependencies, original install behavior and operator data; implement telemetry only"
+  ],
+  "acceptance": [
+    {
+      "id": "WP0230b-A01",
+      "requirement": "Original WP0230 base and genuine crash recovery proof remain intact; no DONE from candidate or build."
+    },
+    {
+      "id": "WP0230b-A02",
+      "requirement": "Original real pip/HF transfer produces successive bytes before child terminal. Independent raw producer/callback receipts reconcile byte values and timings; cached/local-only steps show no fake transfer."
+    },
+    {
+      "id": "WP0230b-A03",
+      "requirement": "No known total => indeterminate, no percent/ETA. Zero/nonpositive measured rate => no ETA. Count reset, resumed bytes, retry, stale restart, malformed frames, unknown-total and file-count callbacks cannot inflate current-transfer speed/total."
+    },
+    {
+      "id": "WP0230b-A04",
+      "requirement": "Unknown or mismatched pip/HF source support is explicit unavailable. No dependency upgrades or library-file mutation. Source-pinned ephemeral original-child adapters may observe the original pip raw generator and HF HTTP progress-context reference only; original chunks, arguments, calls, results, cache, concurrency and visibility are preserved."
+    },
+    {
+      "id": "WP0230b-A05",
+      "requirement": "Parallel original install observer scopes do not cross roots/jobs/attempts/steps; bounded coalescing no drain deadlock or per-chunk DB writer."
+    },
+    {
+      "id": "WP0230b-A06",
+      "requirement": "Original mandatory genuine pip channel logging and sticky failure behavior preserved across success, caught-retry, timeout,cancel,panic,nested/concurrent scopes."
+    },
+    {
+      "id": "WP0230b-A07",
+      "requirement": "Same actual tracked original installer appears in Diagnostics and existing Localization first-run with equal real transfer stats; root opens paired fresh UI audit/dump/snapshot and canonical attempt/journal; no fabricated8% transfer."
+    },
+    {
+      "id": "WP0230b-A08",
+      "requirement": "Byte total completion never marks pack installed; original validated artifact/setup success remains canonical; ETA is remaining-current-transfer only, not entire install or verification duration."
+    },
+    {
+      "id": "WP0230b-A09",
+      "requirement": "Original callback clock, eligible malformed/oversized frame and queue-loss invalidation are enforced. Cross bar rates/total and resume rollback cannot claim aggregate transfer or a known install ETA."
+    },
+    {
+      "id": "WP0230b-A10",
+      "requirement": "Built-in manual/capabilities expose tools.phase2_transfer_status as authenticated read-only exact canonical install/journal/current owned transfer; SQL/mutation inputs refused, no installs/process/package probes/DB writes."
+    }
+  ],
+  "dependencies": [
+    "Preserve current WP-0230 initial0/M and live CSS/native accessible progress remediation",
+    "Use independently inspected actual deployed pip/HF source pins; unsupported sources retain original install without invented progress"
+  ],
+  "microtasks": [
+    {
+      "id": "WP0230B-MT01",
+      "scope": "Verify actual private selected pip/HF distribution and exact source pins against reviewed artifacts; no upgrade or source-file modification. Select pip raw only if supported, explicit scoped pinned HTTP telemetry exception only if all source/owner guards pass.",
+      "files": [
+        "product/engine/src/tools.rs",
+        "product/engine/resources"
+      ],
+      "proof": "Primary-source exact version/source reconciliation; no upgrade/install as research.",
+      "status": "IMPLEMENTED_NEEDS_VALIDATION"
+    },
+    {
+      "id": "WP0230B-MT02",
+      "scope": "Optional scoped nonblocking live owned-output byte frames + anchored pip/HF byte transfer parser/projection; preserve lifecycle and authentic mandatory log capture.",
+      "files": [
+        "product/engine/src/cmd.rs",
+        "product/engine/src/jobs.rs",
+        "product/engine/src/tools.rs",
+        "product/engine/src/job_activity.rs"
+      ],
+      "proof": "Owning focused stream-before-exit + full stdout/stderr/sticky-error/cancellation/timeout/nested/thread isolation negatives; genuine supported pip/HF original download after installed candidate.",
+      "status": "IMPLEMENTED_NEEDS_VALIDATION"
+    },
+    {
+      "id": "WP0230B-MT03",
+      "scope": "One typed shared transfer shape through original canonical exact-job/per-job-journal readback and existing Diagnostics/Localization setup surfaces, no route/card change.",
+      "files": [
+        "product/desktop/src-tauri/src/lib.rs",
+        "product/desktop/src/pages/DiagnosticsPage.tsx",
+        "product/desktop/src/App.tsx",
+        "product/desktop/src/lib/phase2Progress.ts"
+      ],
+      "proof": "Known/unknown totals, stale/retry/terminal/reset, rate/ETA and shared feed contracts; actual same original install pair UI audit/dump/snapshot canonical job/journal plus source/candidate binding.",
+      "status": "IMPLEMENTED_NEEDS_VALIDATION"
+    }
+  ],
+  "proof_limits": [
+    "Parser tests cannot prove real network transfer.",
+    "Bytes read from local cache or disk reconstruction never constitute observed network transfer.",
+    "Transfer completion cannot declare installed/succeeded; existing original validation/job authority determines status.",
+    "Off-tree candidate review does not satisfy installed GUI/original download acceptance."
+  ],
+  "status_updates": "Retain carried scope in WP0230 until canonical WP0230b promotion; synchronize original dependency links/microtasks/board only through root reviewed canonical edits. No DONE until all original acceptance and PROOF_STANDARD required installed/independent proof pass.",
+  "version_policy": "Keep assigned0.1.205 and changelog immutable during build/proof; release designation separate.",
+  "instrumentation_controls": [
+    "Caller/root proves exact owned process/private interpreter/site-packages before adapter; source pins must come from reviewed wheel/source provenance and be independently rechecked, never self-certified compatibility.",
+    "Only original huggingface_hub.file_download._get_progress_bar_context reference is scoped temporarily. Six reviewed effective module hashes + exact installed versions must match before arming. Original context manager/progress object, disable/name handling, returned values/errors and genuine HTTP/aggregate update_transfer are forwarded. Observe only actual HTTP update(len(chunk)); do not alter global tqdm class aliases or aggregate reconstruction totals.",
+    "Disabled human bars remain disabled; numeric delta records count actual original HTTP progress.update(len(chunk)) arguments independently of disabled tqdm.n. This is response payload bytes, not wire/TLS/compressed transport bytes.",
+    "Telemetry queue max128, nonwaiting publication; lock/queue loss emits a gap and clears parent rate/ETA. Scope exit disables observer and restores only its exact owned context function reference.",
+    "Each actual bar instance generation is separate; recursive retry is new generation/resumed baseline. No descriptor/filename/URL/token emission, multi-file summation or global remaining-install ETA.",
+    "No network step/no observed bar means no observed transfer, not independently proven cache hit. Existing canonical hash/setup/job terminal status remains authoritative.",
+    "Root/job/attempt/step/command/bar source identity must match canonical current journal before shared UI projection; UI stale/terminal/restart clears rate/ETA.",
+    "Require actual original HF_HUB_DISABLE_XET true and HF_HUB_ENABLE_HF_TRANSFER false; otherwise telemetry unavailable without changing original transport. A fast-path completion update(total) is not chunk transfer proof.",
+    "HF rate uses original callback emitted monotonic timestamps with command clock/order guards; parent queue/read delay never determines HF transfer rate. Source frames bounded4096 and live bars128.",
+    "Concurrent same-bar lock refusal makes command-wide telemetry invalidation sticky until original command terminal; source callbacks never wait for queue/IO/DB.",
+    "pip26.2.1 effective module/source checks run in same original owned child before raw CLI flag; original -m pip entrypoint is executed through original runpy module, scoped mandatory pip logging preserved by explicit original-pip marker. Unknown/mismatch uses original arguments, with telemetry unavailable.",
+    "Explicit09 pip exception: temporarily replace only source-pinned pip._internal.cli.progress_bars._raw_progress_bar reference, delegate original generator exactly once and observe original yielded chunks. Restore exact owned reference in finally; unsupported effective imports retain original args/function.",
+    "Shared Windows GetTickCount64 source age is checked at every measurement snapshot. monotonic callback delta drives rate; receipt time never proves transfer freshness. Missing/future/stale source age clears speed/ETA.",
+    "Independent shared UI freshness timer clears speed/ETA while canonical read is pending, with generation-owned cleanup and source age included."
+  ],
+  "correction_09": {
+    "authority": "Root authorizes minimum original pip raw-renderer function-reference exception for existing full live transfer scope; no source/module-file edits.",
+    "research": [
+      "Actual pip26.2.1 independently pinned progress_bars.py97-155 original generator yields identical byte chunks after its genuine counted/flushed raw output; get_download_progress_renderer dynamically selects _raw_progress_bar.",
+      "https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-gettickcount64: shared system-start milliseconds, unaffected by time adjustment; typical10-16ms resolution; source/parent use only for age, monotonic_ns drives rate.",
+      "https://docs.python.org/3/reference/expressions.html#yield-expressions: GeneratorExit and close cleanup."
+    ],
+    "controls": [
+      "Same original effective four pip module pins before temporary raw generator adaptation; genuine generator/args/chunks/output/errors/close retained.",
+      "HF and pip numeric callbacks include shared Windows boot tick; absent/future/stale clock age refuses speed and ETA while retaining bytes.",
+      "UI independently expires speed and ETA at remaining freshness deadline even when subsequent singleflight read remains pending; canonical status/bytes retained."
+    ],
+    "tests": "Owning source-clock delayed/future/failure, true original generator delegation/close, UI pending-read expiry and visibility cleanup tests written but UNRUN."
+  },
+  "refinement_proposal_sha256": "77cc95787c7e3b10b703608c1de678f59fa8d43b2006a32b594c7812b58b2289",
+  "correction_10": {
+    "reason": "Source age sampled before IPC delivery; recording receipt time alone omits transport and can relabel old sample fresh.",
+    "control": "Actual shared poller measures monotonic request-start to resolve elapsed and conservatively adds full duration to source age before commit. Missing/nonfinite/backward clock refuses rate/ETA, bytes and canonical status preserved. Existing independent local expiry remains.",
+    "proof": "Owning actual poller delayed-resolution plus invalid-clock negatives written UNRUN; actual packaged React pending/IPC delay remains required.",
+    "callback_clock_order": "Capture boot tick first, then counter/monotonic frame fields; later preparation delay counts against freshness.",
+    "genuine_retry": "Original shared bar remains; nonwaiting telemetry-only generation/baseline reset+gap on genuine recursive context preserves A03."
+  },
+  "taskboard": "governance/workflow/TASK_BOARD.md#WP-0230b",
+  "verification_execution": {
+    "status": "NOT_RUN_BY_OPERATOR_DIRECTION",
+    "reason": "Operator stopped testing on 2026-10-05",
+    "completion_limit": "Implementation does not establish packaged runtime acceptance or authorize DONE"
+  },
+  "implementation": {
+    "status": "IMPLEMENTED",
+    "date": "2026-10-05",
+    "files": "19 product files: engine observers/adapters, Tauri and bridge readback, shared frontend feed and both consumers",
+    "preservation": "f692cad initial0/M and CSS/native progress retained; original install and assigned0.1.205 unchanged",
+    "tests": "Prepared owning regression cases present, not executed",
+    "installed": "No new build or installation"
+  }
+}

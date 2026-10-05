@@ -55,7 +55,7 @@ fn is_scoped_pip_command(command: &Command) -> std::io::Result<bool> {
         .map_err(|_| std::io::Error::other("pip output scope unavailable"))??;
     let Some(context)=context else {return Ok(false);};
     let args: Vec<_> = command.get_args().collect();
-    let pip=args.windows(2).any(|args| args[0] == OsStr::new("-m") && args[1] == OsStr::new("pip"));
+    let pip=args.windows(2).any(|args| args[0] == OsStr::new("-m") && args[1] == OsStr::new("pip")) || command.get_envs().any(|(key,value)|key==OsStr::new("VOXVULGI_ORIGINAL_SCOPED_PIP") && value==Some(OsStr::new("1")));
     if pip {if let Some(error)=context.failures.borrow().error() {return Err(error);}}
     Ok(pip)
 }
@@ -160,6 +160,7 @@ where
     configure_owned_launch(command);
     let mut child = command.spawn()?;
     let child_pid = child.id();
+    let transfer_scope = crate::phase2_transfer_live::begin_command(command, child_pid);
     #[cfg(windows)]
     let lifecycle_job = match WindowsChildLifecycleJob::new().and_then(|job| {
         job.assign(&child)?;
@@ -191,14 +192,14 @@ where
         .ok_or_else(|| std::io::Error::other("owned child stderr pipe missing"))?;
     let (stdout_sender, stdout_receiver) = std::sync::mpsc::sync_channel(1);
     let (stderr_sender, stderr_receiver) = std::sync::mpsc::sync_channel(1);
+    let stdout_transfer = transfer_scope.observer();
     std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = std::io::BufReader::new(stdout).read_to_end(&mut bytes);
+        let bytes = crate::phase2_transfer_live::capture(std::io::BufReader::new(stdout), stdout_transfer, false);
         let _ = stdout_sender.send(bytes);
     });
+    let stderr_transfer = transfer_scope.observer();
     std::thread::spawn(move || {
-        let mut bytes = Vec::new();
-        let _ = std::io::BufReader::new(stderr).read_to_end(&mut bytes);
+        let bytes = crate::phase2_transfer_live::capture(std::io::BufReader::new(stderr), stderr_transfer, true);
         let _ = stderr_sender.send(bytes);
     });
     let started = Instant::now();

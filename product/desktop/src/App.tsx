@@ -14,6 +14,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { confirm, open } from "@tauri-apps/plugin-dialog";
 import html2canvas from "html2canvas";
 import "./App.css";
+import { usePhase2Transfer } from "./lib/usePhase2Transfer";
 import { useDesktopActivity, usePageActivity, usePollingLoop } from "./lib/activity";
 import {
   diagnosticsTrace,
@@ -1039,6 +1040,10 @@ function LocalizationStudioHome({
   const [voiceSetupEstimate, setVoiceSetupEstimate] = useState<LocalizationVoiceSetupEstimate | null>(null);
   const [voiceSetupStatusError, setVoiceSetupStatusError] = useState<string | null>(null);
   const [voiceSetupJob, setVoiceSetupJob] = useState<PendingImportJobRow | null>(null);
+  const voiceTransfer = usePhase2Transfer(voiceSetupJob?.id ?? null, pageVisible);
+  const voiceSetupReadOwner = useRef({ id: voiceSetupJob?.id ?? null, visible: pageVisible, mounted: true });
+  voiceSetupReadOwner.current = { ...voiceSetupReadOwner.current, id: voiceSetupJob?.id ?? null, visible: pageVisible };
+  useEffect(() => { voiceSetupReadOwner.current.mounted = true; return () => { voiceSetupReadOwner.current.mounted = false; }; }, []);
   const [voiceSetupFailure, setVoiceSetupFailure] = useState<string | null>(null);
   const [voiceSetupDeferred, setVoiceSetupDeferred] = useState(
     () => safeSessionStorageGet(VOICE_SETUP_LATER_SESSION_KEY) === "1",
@@ -1248,18 +1253,19 @@ function LocalizationStudioHome({
   async function refreshVoiceSetupJob() {
     const jobId = voiceSetupJob?.id;
     if (!jobId) return;
-    const jobs = await invoke<PendingImportJobRow[]>("jobs_list", { limit: 80, offset: 0 }).catch(
-      () => [],
-    );
-    const next = jobs.find((job) => job.id === jobId) ?? voiceSetupJob;
+    const mayCommit = () => voiceSetupReadOwner.current.mounted && voiceSetupReadOwner.current.visible && voiceSetupReadOwner.current.id === jobId;
+    const next = voiceTransfer.receipt?.canonical_install;
+    if (!next || next.id !== jobId || !mayCommit()) return;
     setVoiceSetupJob(next);
     if (next.status === "succeeded") {
       await refreshVoiceSetupStatus();
+      if (!mayCommit()) return;
       setNotice("Voice cloning setup finished. You can start English dub runs now.");
       setVoiceSetupFailure(null);
       setVoiceSetupJob(null);
     } else if (next.status === "failed") {
       await refreshVoiceSetupStatus();
+      if (!mayCommit()) return;
       const message = next.error ? summarizeErrorMessage(next.error) : "No error detail was recorded.";
       setVoiceSetupFailure(message);
       setError(`Voice cloning setup failed: ${message}`);
@@ -1270,14 +1276,7 @@ function LocalizationStudioHome({
     }
   }
 
-  usePollingLoop(
-    refreshVoiceSetupJob,
-    {
-      enabled: pageActive && Boolean(voiceSetupJob?.id),
-      intervalMs: 2500,
-      initialDelayMs: 1200,
-    },
-  );
+  useEffect(() => { void refreshVoiceSetupJob(); }, [voiceTransfer.receipt]);
 
   useEffect(() => {
     invoke<BatchOnImportRules>("config_batch_on_import_get")
@@ -2085,12 +2084,16 @@ function LocalizationStudioHome({
                 ) : null}
                 {voiceSetupJob ? (
                   <div className="loc-setup-progress-wrap">
+                    {voiceSetupJob.status === "running" && <div aria-live="polite">
+                      <span>{voiceTransfer.view.text}</span>
+                      <progress aria-label="Current download transfer" max={1} {...(voiceTransfer.view.fraction === null ? {} : {value: voiceTransfer.view.fraction})} />
+                    </div>}
                     <div className="loc-setup-progress-meta">
                       <span>Voice setup job: {voiceSetupJob.status}</span>
                       <span>{voiceSetupJobProgressPct}%</span>
                     </div>
                     <div className="loc-setup-progress" aria-label={`Voice setup progress ${voiceSetupJobProgressPct}%`}>
-                      <div style={{ width: `${Math.max(voiceSetupJob.status === "running" ? 8 : 0, voiceSetupJobProgressPct ?? 0)}%` }} />
+                      <div style={{ width: `${(voiceSetupJobProgressPct ?? 0)}%` }} />
                     </div>
                   </div>
                 ) : null}

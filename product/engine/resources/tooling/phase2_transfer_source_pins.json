@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "pip": [
+    {
+      "version": "26.2.1",
+      "raw_progress_supported": true,
+      "files": {
+        "pip/__init__.py": "04aa76ceab0f4341e292daae35637f2f8718b183313cc2fb588d1304cb9c0443",
+        "pip/_internal/cli/cmdoptions.py": "681371688cb8615e007e302aac6f11a1915cbfb9305b3440ce0e669d998e183c",
+        "pip/_internal/cli/progress_bars.py": "d77537018dc36307442303d82ed527e41e107292540292d60a47c9faefcfab36",
+        "pip/_internal/cli/spinners.py": "109cd921937252d2658e9dfe5a372cc88aeac56f8752c7d6ce1b96f389ff4eac"
+      },
+      "provenance": "Independent actual installed module/RECORD reconciliation fb9a30d0; effective imports rechecked in same original child"
+    }
+  ],
+  "huggingface": [
+    {
+      "huggingface_hub": "0.34.4",
+      "tqdm": "4.68.3",
+      "files": {
+        "huggingface_hub/utils/tqdm.py": "c4029cc9f9cd1ec67b2f4f56b84339130e7e3038626a12c009b6cddb332670bb",
+        "huggingface_hub/file_download.py": "13e35638dd35a69adb02cc3b2b3e3bec95fa7fc1d35ac76911d400b40dfbb797",
+        "huggingface_hub/constants.py": "9c82ec780a78aea2eefca413643a4f18e85ea5500f6a70fb6b36e8980be8be3d",
+        "tqdm/std.py": "fd3f8e288d4f0442b2fc95803960aaf4c38e60c8f1a95abc969af7cff6085540",
+        "tqdm/utils.py": "a3f7f4577d87ff0ae7d179919e8de3f6927dc65a79c4bd1f1d3de0b6a2fe939f",
+        "tqdm/auto.py": "9c365f963ea9db32a48c108d068babae14bcd7361f672d7f750bdb724add5bca"
+      },
+      "modules": {
+        "huggingface_hub.utils.tqdm": "c4029cc9f9cd1ec67b2f4f56b84339130e7e3038626a12c009b6cddb332670bb",
+        "huggingface_hub.file_download": "13e35638dd35a69adb02cc3b2b3e3bec95fa7fc1d35ac76911d400b40dfbb797",
+        "huggingface_hub.constants": "9c82ec780a78aea2eefca413643a4f18e85ea5500f6a70fb6b36e8980be8be3d",
+        "tqdm.std": "fd3f8e288d4f0442b2fc95803960aaf4c38e60c8f1a95abc969af7cff6085540",
+        "tqdm.utils": "a3f7f4577d87ff0ae7d179919e8de3f6927dc65a79c4bd1f1d3de0b6a2fe939f",
+        "tqdm.auto": "9c365f963ea9db32a48c108d068babae14bcd7361f672d7f750bdb724add5bca"
+      },
+      "provenance": "independent source mapping bfded644; effective module path/hash verified inside original selected child before arming"
+    },
+    {
+      "huggingface_hub": "1.33.0",
+      "tqdm": "4.70.1",
+      "files": {
+        "huggingface_hub/utils/tqdm.py": "c578ca1b2db2da032aa4a78c52a5dc41673ae9bb96dfd370913af7865587e8c6",
+        "huggingface_hub/file_download.py": "2ee4e4898858191f67bbcd3667c4ceb3a699cacfecefc5ab69c07e638ab7ca58",
+        "huggingface_hub/constants.py": "7b846aeb03e6381c6143fe0026df84ef0465d83f43ea41dcc9ad65cfa09ee67c",
+        "tqdm/std.py": "dd76d965de52c590819dec376644220cb35dc4831e40efb4c30944884fc57d86",
+        "tqdm/utils.py": "a3f7f4577d87ff0ae7d179919e8de3f6927dc65a79c4bd1f1d3de0b6a2fe939f",
+        "tqdm/auto.py": "9c365f963ea9db32a48c108d068babae14bcd7361f672d7f750bdb724add5bca"
+      },
+      "modules": {
+        "huggingface_hub.utils.tqdm": "c578ca1b2db2da032aa4a78c52a5dc41673ae9bb96dfd370913af7865587e8c6",
+        "huggingface_hub.file_download": "2ee4e4898858191f67bbcd3667c4ceb3a699cacfecefc5ab69c07e638ab7ca58",
+        "huggingface_hub.constants": "7b846aeb03e6381c6143fe0026df84ef0465d83f43ea41dcc9ad65cfa09ee67c",
+        "tqdm.std": "dd76d965de52c590819dec376644220cb35dc4831e40efb4c30944884fc57d86",
+        "tqdm.utils": "a3f7f4577d87ff0ae7d179919e8de3f6927dc65a79c4bd1f1d3de0b6a2fe939f",
+        "tqdm.auto": "9c365f963ea9db32a48c108d068babae14bcd7361f672d7f750bdb724add5bca"
+      },
+      "provenance": "independent source mapping bfded644; effective module path/hash verified inside original selected child before arming"
+    }
+  ],
+  "status": "Reviewed installed HF main/Cosy and pip source pins; original effective imports and installed UI/acquisition proof still required"
+}

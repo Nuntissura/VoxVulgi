@@ -28,6 +28,8 @@ This WP delivers the truthfulness half today; WP-0230b delivers the byte-level s
 
 ## Scope Extension (2026-05-18)
 
+Current extension tracking: `WP-0230b_PHASE2_TRANSFER_BYTES_SPEED_ETA_v3.json` and its v3 refinement preserve the full pip/Hugging Face bytes, speed and transfer-ETA scope plus the existing WP-0235 consumer. Implementation applied 2026-10-05; tests/build/runtime proof were not run because the operator stopped testing. WP-0230b is NEEDS_VALIDATION; the original WP-0230 base criteria and status remain unchanged.
+
 Operator follow-up 2026-05-18: "we are sure the downloading happens? this is the selling feature. and the app must stay non technical and user freindly". The original WP-0230 scope (top-level progress bar + truthful badge) is necessary but insufficient — for non-technical users to trust the install, the progress must show *real bytes / sec / ETA* during the long Python-wheel-and-model-download steps. Promote the previously-out-of-scope item:
 
 - In scope (added): parse pip's stdout for download lines (`Downloading <name> (<size>): <bytes>/<bytes> [<percent>%]`) and emit progress events to the frontend so the per-pack row shows bytes downloaded + speed + ETA during pip install.

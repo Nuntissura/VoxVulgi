@@ -662,6 +662,12 @@ ROI-25. Migration hardening: scan existing download folders to seed dedupe archi
 3) Primary differentiator: voice-preserving dubbing (multi-speaker) + background preservation, focused on Korean/Japanese -> English.
 4) Include downloading for educational use.
 
+## WP-0230b voice-package transfer progress
+
+- [VV-0230B-PRODUCT-001] Diagnostics and the existing first-run voice-package setup consume the same real pip/model transfer feed, showing readable downloaded size, known total, measured speed and remaining-current-transfer ETA.
+- [VV-0230B-PRODUCT-002] Unknown totals remain indeterminate; unsupported measurement, stale rate and missing telemetry are explicit. Cache reuse, preparation and transfer completion must not invent download progress or declare installation complete.
+- [VV-0230B-PRODUCT-003] Preserve canonical installation status, original job/attempt/step identity, supported-plan counts, previous history and existing installation/recovery workflows; introduce no new setup route or card.
+
 ## WP-0317 user manual and quiet agent operation
 
 Options includes a searchable User manual covering normal workflows, quiet startup, navigation, visual inspection, semantic interactions, backend tools, availability, failures and recovery. The app publishes the same catalog through its localhost bridge. Agents use product-owned controls without raising windows or simulating desktop input. Exact download restart preserves records and destination choices, applies current pacing, and reports replacement lineage for independent verification. Computer Use remains a last resort requiring operator authorization.

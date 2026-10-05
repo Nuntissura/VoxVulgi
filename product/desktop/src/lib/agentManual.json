@@ -67,6 +67,43 @@
       }
     },
     {
+      "name": "tools.phase2_transfer_status",
+      "description": "Read one exact canonical Phase2 install job and its original per-job journal, plus only currently matching original owned-child transfer observations. Includes actual source and byte/rate/remaining-transfer ETA; unknown total/source/stale/terminal is indeterminate. Transfer completion never proves installed. No installs, queue actions, package probe, subprocess or database writes.",
+      "read_only": true,
+      "effect": "read_only",
+      "input": {
+        "job_id": "Exact canonical install job UUID"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "job_id"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "maxLength": 80,
+            "minLength": 1,
+            "type": "string"
+          },
+          "command": {
+            "const": "tools.phase2_transfer_status"
+          },
+          "job_id": {
+            "maxLength": 36,
+            "minLength": 36,
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "tools.voice_readiness",
       "description": "Read one explicitly selected original Kokoro neural-TTS or OpenVoice voice-preserving pack status. A separate try/busy admission permits one probe; competing requests return busy without spawning another probe. A poisoned admission returns unavailable/readiness unknown and starts no probe; poison is never cleared automatically. Existing read-command errors use HTTP400, including busy and unavailable. No UI/global mutation lock is held. Original file checks and Python child timeout remain unchanged and can be slow; this is not bounded-duration readiness or inference proof. Never installs, repairs, warms up or admits jobs. CosyVoice selection invokes the original cosyvoice_pack_status with the same nonwaiting admission gate; it never installs, warms up, or enqueues.",
       "read_only": true,

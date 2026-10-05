@@ -21213,6 +21213,10 @@ if __name__ == "__main__":
                 let before = crate::diagnostics::directory_size_bytes_best_effort(
                     &paths.python_toolchain_dir(),
                 ) as i64;
+                // Optional telemetry obtains canonical identity before child/FS work; its failure cannot fail installation.
+                let transfer_scope = get_job(paths, job_id).ok().flatten()
+                    .filter(|job| job.job_type == "install_phase2_packs_v1" && job.status == JobStatus::Running)
+                    .map(|job| crate::phase2_transfer_live::enter_step(paths, job_id, job.attempt_no, &step_id));
                 let result = run_phase2_logged_install(
                     phase2_pip_output_sink(paths.clone(), install_proof_guard.cloned(), log_path.clone()),
                     || -> Result<()> { match step_id.as_str() {
@@ -21291,6 +21295,7 @@ if __name__ == "__main__":
                         "unknown phase2 pack step id: {other}"
                     ))),
                 } });
+                drop(transfer_scope);
 
                 let after = crate::diagnostics::directory_size_bytes_best_effort(
                     &paths.python_toolchain_dir(),

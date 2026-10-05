@@ -20,6 +20,7 @@ import { loadYoutubeProtectionSnapshot } from "../lib/youtubeProtectionSnapshot"
 import { RootRebindControl } from "../components/RootRebindControl";
 import { collectDiagnosticsFieldResults, DiagnosticReadErrors, settleDiagnosticDemands, diagnosticPendingText, capabilityIsVerified } from "../lib/diagnosticsResults";
 import { phase2ProgressTotal, phase2StatusIcon } from "../lib/phase2Progress";
+import { usePhase2Transfer } from "../lib/usePhase2Transfer";
 import "./DiagnosticsPage.css";
 
 type RuntimeProvenance = {
@@ -1173,6 +1174,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
   const [portablePython, setPortablePython] = useState<PortablePythonStatus | null>(null);
   const [phase2Plan, setPhase2Plan] = useState<Phase2PackPlanItem[] | null>(null);
   const [phase2Latest, setPhase2Latest] = useState<Phase2InstallLatestState | null>(null);
+  const phase2Transfer = usePhase2Transfer(phase2Latest?.canonical_install?.id ?? (typeof phase2Latest?.state?.job_id === "string" ? phase2Latest.state.job_id : null), visible);
   const [phase2Admission, setPhase2Admission] = useState<Phase2Admission | null>(null);
   const phase2AdmissionRef = useRef<Phase2Admission | null>(null);
   const phase2CanonicalGenerationRef = useRef<DemandGeneration | null>(null);
@@ -4803,6 +4805,12 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <div className="k">{phase2HistoryIsPrevious ? "Previous installation attempt" : "Latest installation attempt"}</div>
           <div className="v">
             <div>{phase2HeadlineLabel}</div>
+            {phase2Transfer.receipt?.canonical_install?.status === "running" && (
+              <div aria-live="polite">
+                <span>{phase2Transfer.view.text}</span>
+                <progress aria-label="Current download transfer" max={1} {...(phase2Transfer.view.fraction === null ? {} : {value: phase2Transfer.view.fraction})} />
+              </div>
+            )}
             {phase2ProgressSteps > 0 && (
               <div style={{ marginTop: 6 }}>
                 <progress

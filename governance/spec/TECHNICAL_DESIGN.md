@@ -853,6 +853,12 @@ Subscription export JSON shape (v1):
   - SQLite migrations
   - "golden file" subtitle outputs
 
+## WP-0230b bounded transfer observation
+
+- [VV-0230B-DESIGN-001] Observe original pip/Hugging Face child transfer callbacks through source-pinned ephemeral adapters; preserve original acquisition, chunks, results, logging and errors. Source/import mismatch leaves installation unchanged and telemetry unavailable.
+- [VV-0230B-DESIGN-002] Keep bounded nonblocking telemetry in process memory, keyed by app root and canonical job/attempt/step/command; never write SQLite per chunk. Invalid frames, lost samples, retry resets and stale clocks clear speed/ETA without inventing totals.
+- [VV-0230B-DESIGN-003] `tools_phase2_transfer_status` and authenticated read-only `tools.phase2_transfer_status` match canonical job and per-job journal before projecting live counters. Diagnostics and first-run setup share one formatter and generation-owned poller that ignores late results and independently expires rates.
+
 ## WP-0317 quiet agent controls
 
 The built-in Options User manual and `/agent/manual` share `product/desktop/src/lib/agentManual.json`. `/agent/capabilities` adds current runtime availability. Typed `/agent/command` requests authenticate the sidecar token and enforce the catalog schema. Backend mutations serialize, admit at most four operations, persist atomic attributed receipts, and retain exact job retry lineage. Live token-authenticated actions default enabled; an explicit `VOXVULGI_AGENT_LIVE_ACTIONS=0` disables live mutations. No arbitrary IPC, script or SQL execution is provided. Process interruption remains subject to operator process-stop authority.

@@ -1,0 +1,89 @@
+{
+  "file_id": "WP0230B_TRANSFER_PROGRESS_REFINEMENT_V3",
+  "status": "ACTIVE",
+  "version": 3,
+  "wp_id": "WP-0230b",
+  "preserved_v2_path": ".local/wp0230b_transfer_progress_candidate_05/WP0230b_TRANSFER_PROGRESS_v2_REFINEMENT_PROPOSAL.json",
+  "preserved_v2_sha256": "8eed5b266008f0883a2bcdffe45e084f14a6bc1c4083e11b8a8b6b640891aa56",
+  "original_scope": "Entire preserved WP0230b pip+HF bytes/rate/remaining-transfer ETA and shared WP0235 setup consumer; all original WP0230 headline/progress/icons/elapsed/crash proof remain",
+  "source_head": "f692cadf864402736042875a22a763d68a7938b3",
+  "spec_anchors": [
+    "PRODUCT_SPEC.md:632 ROI01 Phase2 progress",
+    "PRODUCT_SPEC.md:671 reported transfer/unknown total/completion distinction",
+    "WP-0230:25-39 carved extension + shared WP0235"
+  ],
+  "research_sources": [
+    "https://raw.githubusercontent.com/pypa/pip/26.2.1/src/pip/_internal/cli/progress_bars.py",
+    "https://raw.githubusercontent.com/pypa/pip/26.2.1/src/pip/_internal/cli/cmdoptions.py",
+    "https://raw.githubusercontent.com/huggingface/huggingface_hub/v1.33.0/src/huggingface_hub/utils/tqdm.py",
+    "https://raw.githubusercontent.com/huggingface/huggingface_hub/v1.33.0/src/huggingface_hub/utils/_xet_progress_reporting.py"
+  ],
+  "actual_source_evidence": {
+    "hf_mapping": ".local/proofVVRemaining/wp0230b_private_module_provenance_75159d7_01/independent_source_pin_mapping.json",
+    "hf_mapping_sha256": "bfded644789cd2205994e61e8455b850c76af8c98ff5a7252915f9c18e632dcc",
+    "pip_mapping": ".local/proofVVRemaining/wp0230b_private_pip_provenance_9080e12_01/independent_pip_source_pin_mapping.json",
+    "pip_mapping_sha256": "fb9a30d037e31d23df370ae31fe4e5d40e81f0f9ec1f6f3f67a5848e30115616",
+    "actual_patterns": [
+      "Main0.34 original file_download.py451 context callback; real HTTP chunk update498, fast HFtransfer disabled required",
+      "Cosy1.33 original snapshot437-527 separate transfer/reconstruction aggregate; file_download447-467 actual per-file original context+update(lenchunk)+forwarded update_transfer; negative Range rollback405-416",
+      "Cosyutils324-343 dynamic original tqdm subclass identity means class swapping can change original name/disable behavior; scoped original context reference is smaller safe observer point",
+      "pipactual26.2.1 raw current/total stdout flushed and RateLimiter0.25; size0unknown and raw install renderer iter; no final unknown-total completion inference"
+    ]
+  },
+  "selected_approach": "Source-bound original child, scoped context reference/unchanged original acquisition code; numeric nonwaiting bounded handoff; callback-origin clock; exact canonical job/attempt+journal step projection; shared generation-owned hook and formatter in BOTH existing consumers",
+  "rejected": [
+    "Global tqdm class swap for Cosy1.33 alias/issubclass risk",
+    "Aggregated reconstruction/transfer parent totals for HTTP byte proof: duplicate counters/artificial transfer denominator",
+    "Disk/cache growth as network bytes",
+    "Version-only or independently installed-files-only effective import proof",
+    "Per-chunk DB/journal writes or blocking network observer callback",
+    "Standalone alternate downloader/child interpreter/install workflow"
+  ],
+  "red_team": [
+    "Effective import shadowing => same original child resolves six/four module paths+hashes, mismatch unavailable",
+    "Queue/bar-lock loss => gap resets baseline; concurrent bar loss sticky invalidation, no blocking callback",
+    "Malformed/oversized/clock/nonce/bar/current job mismatch => unavailable, reset rates/ETA",
+    "Original source script error/cancel/timeout => source outcomes remain original, observed bytes never mark installed",
+    "Hidden/unmounted/owner-switch => shared poller ignores late reads, mounted terminal status consumer rejects old identity",
+    "Mandatory full pip log closure remains original sticky sink error with explicit transformed original-pip marker; original lifecycle/full suite proof still required"
+  ],
+  "owning_validation": [
+    "Engine numeric4 + live capture/clock/bar/malformed/scopes/original owned child beforeexit8 tests, UNRUN",
+    "Python actual context forwarding/rollback/unknown source/nonwaiting/sticky invalidation3 tests, UNRUN",
+    "Shared formatter+actual polling lifecycle/canonical mismatch/manual6 tests, UNRUN",
+    "Desktop backend exact canonical type/read-only catalog/no SQL tests, UNRUN",
+    "Required original cmd full-log/cancel/timeout lifecycle regression owning target, UNRUN",
+    "Actual pinned pip/HF cold/cache/resume/concurrent original acquisition and private actual child/module provenance; no fixture replacement",
+    "Installed same job Diagnostics+Localization paired audit/dump/pixels/canonical journal <=2s and original WP0230 crash completion gates"
+  ],
+  "proof_limits": "Source research and implementation basis; component checks, compile and runtime transfer/UI proof have not been run for this candidate. Testing stopped by operator.",
+  "correction_09": {
+    "authority": "Root authorizes minimum original pip raw-renderer function-reference exception for existing full live transfer scope; no source/module-file edits.",
+    "research": [
+      "Actual pip26.2.1 independently pinned progress_bars.py97-155 original generator yields identical byte chunks after its genuine counted/flushed raw output; get_download_progress_renderer dynamically selects _raw_progress_bar.",
+      "https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-gettickcount64: shared system-start milliseconds, unaffected by time adjustment; typical10-16ms resolution; source/parent use only for age, monotonic_ns drives rate.",
+      "https://docs.python.org/3/reference/expressions.html#yield-expressions: GeneratorExit and close cleanup."
+    ],
+    "controls": [
+      "Same original effective four pip module pins before temporary raw generator adaptation; genuine generator/args/chunks/output/errors/close retained.",
+      "HF and pip numeric callbacks include shared Windows boot tick; absent/future/stale clock age refuses speed and ETA while retaining bytes.",
+      "UI independently expires speed and ETA at remaining freshness deadline even when subsequent singleflight read remains pending; canonical status/bytes retained."
+    ],
+    "tests": "Owning source-clock delayed/future/failure, true original generator delegation/close, UI pending-read expiry and visibility cleanup tests written but UNRUN."
+  },
+  "correction_10": {
+    "reason": "Source age sampled before IPC delivery; recording receipt time alone omits transport and can relabel old sample fresh.",
+    "control": "Actual shared poller measures monotonic request-start to resolve elapsed and conservatively adds full duration to source age before commit. Missing/nonfinite/backward clock refuses rate/ETA, bytes and canonical status preserved. Existing independent local expiry remains.",
+    "proof": "Owning actual poller delayed-resolution plus invalid-clock negatives written UNRUN; actual packaged React pending/IPC delay remains required.",
+    "callback_clock_order": "Capture boot tick first, then counter/monotonic frame fields; later preparation delay counts against freshness.",
+    "genuine_retry": "Original shared bar remains; nonwaiting telemetry-only generation/baseline reset+gap on genuine recursive context preserves A03."
+  },
+  "operator_direction": "2026-10-05: focus on WP-0230b and finish implementation; stop testing remains in effect; offline ISO excluded",
+  "current_external_sources_checked": [
+    "https://raw.githubusercontent.com/pypa/pip/26.2.1/src/pip/_internal/cli/progress_bars.py",
+    "https://raw.githubusercontent.com/huggingface/huggingface_hub/v1.33.0/src/huggingface_hub/file_download.py",
+    "https://raw.githubusercontent.com/huggingface/huggingface_hub/v0.34.3/src/huggingface_hub/file_download.py",
+    "https://learn.microsoft.com/en-us/windows/win32/api/sysinfoapi/nf-sysinfoapi-gettickcount64",
+    "https://raw.githubusercontent.com/huggingface/huggingface_hub/v0.34.4/src/huggingface_hub/file_download.py"
+  ]
+}

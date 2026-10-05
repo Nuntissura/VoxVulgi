@@ -12992,6 +12992,7 @@ fn run_python_checked_with_timeout(
     cmd.env("HF_HUB_DISABLE_XET", "1");
     cmd.env("HF_HUB_DOWNLOAD_TIMEOUT", "300");
     cmd.env("HF_HUB_ETAG_TIMEOUT", "30");
+    let _transfer_nonce = crate::phase2_transfer_live::instrument_python(&mut cmd, python, args);
 
     let output = crate::cmd::run_owned_output(
         &mut cmd,

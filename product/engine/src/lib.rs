@@ -20,6 +20,8 @@ pub mod offline_payload_validation;
 pub mod offline_update_preservation_seed;
 pub mod pack_install_state;
 pub mod paths;
+pub mod phase2_transfer;
+pub mod phase2_transfer_live;
 pub mod persistence;
 pub mod pinned_dependency_manifest;
 pub mod provider_metadata;

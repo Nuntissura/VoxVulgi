@@ -412,6 +412,7 @@ fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, St
                 request["speaker_key"].as_str().ok_or("speaker_key required")?, "replace").map_err(|e|e.to_string())?;
             Ok(redact_diagnostics_value(serde_json::to_value(setting).map_err(|e|e.to_string())?))
         }
+        "tools.phase2_transfer_status" => crate::phase2_transfer_status_readback(paths, request["job_id"].as_str().ok_or("job_id required")?).map(redact_diagnostics_value),
         "database.runtime_status" => {
             // Observe admission and terminal receipts without opening SQLite or reserving a lane.
             let database = db::AppDatabase::for_paths(paths).map_err(|e|e.to_string())?;
@@ -595,7 +596,7 @@ fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, St
 }
 
 fn is_read(command: &str) -> bool {
-    matches!(command, "ui.viewport.inspect" | "tools.voice_runtime_paths" | "tools.voice_readiness" | "localization.inspect" | "database.runtime_status" | "jobs.list" | "jobs.inspect" | "jobs.logs" | "jobs.overview" | "jobs.activity" | "downloads.presets" | "downloads.batch_members" | "subscriptions.failed_downloads" | "operation.get")
+    matches!(command, "ui.viewport.inspect" | "tools.voice_runtime_paths" | "tools.voice_readiness" | "tools.phase2_transfer_status" | "localization.inspect" | "database.runtime_status" | "jobs.list" | "jobs.inspect" | "jobs.logs" | "jobs.overview" | "jobs.activity" | "downloads.presets" | "downloads.batch_members" | "subscriptions.failed_downloads" | "operation.get")
 }
 
 pub(super) fn handle(body: &str) -> (&'static str, String) {
@@ -983,4 +984,22 @@ mod tests {
         assert_eq!(jobs::get_job(&paths,"unrelated").unwrap().unwrap().status,jobs::JobStatus::Running);
     }
 
+    #[test]
+    fn phase2_transfer_read_catalog_and_exact_canonical_type_are_enforced() {
+        let c=catalog();let descriptor=c["commands"].as_array().unwrap().iter().find(|v|v["name"]=="tools.phase2_transfer_status").unwrap();
+        assert!(is_read("tools.phase2_transfer_status"));assert_eq!(descriptor["read_only"],true);
+        let id=uuid::Uuid::new_v4().to_string();
+        assert!(validate_input(&json!({"actor_id":"test","command":"tools.phase2_transfer_status","job_id":id}),descriptor).is_ok());
+        assert!(validate_input(&json!({"actor_id":"test","command":"tools.phase2_transfer_status","job_id":id,"sql":"DELETE"}),descriptor).is_err());
+        let temp=tempfile::tempdir().unwrap();let paths=AppPaths::new(temp.path().join("private"));paths.ensure_dirs().unwrap();
+        let conn=rusqlite::Connection::open(paths.db_dir().join("app.sqlite")).unwrap();db::migrate(&conn).unwrap();drop(conn);
+        let original=jobs::enqueue_install_phase2_packs_v1(&paths).unwrap();
+        let response=crate::phase2_transfer_status_readback(&paths,&original.id).unwrap();
+        assert_eq!(response["canonical_install"]["id"],original.id);assert_eq!(response["canonical_install"]["status"],"queued");
+        assert!(response["owner"].is_null());assert!(response["transfer"].is_null());
+        let unrelated=jobs::enqueue_dummy_sleep(&paths,0).unwrap();
+        assert!(crate::phase2_transfer_status_readback(&paths,&unrelated.id).unwrap()["canonical_install"].is_null());
+        assert!(crate::phase2_transfer_status_readback(&paths,"../../outside").is_err());
+        assert_eq!(jobs::get_job(&paths,&original.id).unwrap().unwrap().status,jobs::JobStatus::Queued);
+    }
 }
