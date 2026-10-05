@@ -443,6 +443,9 @@ mod tests {
         assert_eq!(std::fs::read(&journal).unwrap(),before,"refusal must not overwrite linked journal");
         std::fs::remove_file(&journal).unwrap();
         owner.revalidate_targets(&paths,&[journal]).unwrap();
+        flush_diagnostics_trace_queue(&paths, Duration::from_secs(5)).unwrap();
+        assert!(read_recent_diagnostics_trace_entries(&paths, 10).unwrap().iter()
+            .any(|row| row.event == "install_proof_acquire_validation"));
         drop(owner);
         std::fs::remove_dir_all(root).unwrap();
     }
