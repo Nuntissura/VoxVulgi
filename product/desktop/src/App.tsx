@@ -2113,6 +2113,8 @@ function LocalizationStudioHome({
                   <button
                     type="button"
                     disabled={voiceSetupActionDisabled}
+                    data-agent-action-id="localization.voice-setup.install"
+                    data-agent-effect-class="reversible_state_change"
                     title={
                       voiceSetupHasRepair
                         ? "Queue a tracked repair of the missing or stale voice-cloning runtime while keeping existing media and preferences."

@@ -213,3 +213,20 @@ test("original dub activation is conditional on clone readiness and guards confi
   assert.ok(source.indexOf('shouldRefuseQuietCloneConfirmation(quietActivation, preflight.ready)') < source.indexOf('const proceed = await confirm(msg'));
   assert.ok(source.includes('if (quietActivation) throw new Error("Voice-preserving dub not admitted: required voice pack is not ready.'));
 });
+
+test("Localization voice setup exposes exact quiet activation of its original tracked installer", () => {
+  const source = readRepoFile("src", "App.tsx");
+  const actionId = "localization.voice-setup.install";
+  const declaration = source.indexOf(`data-agent-action-id="${actionId}"`);
+  assert.notEqual(declaration, -1);
+  const start = source.lastIndexOf("<button", declaration);
+  const end = source.indexOf("</button>", declaration);
+  const button = source.slice(start, end);
+  assert.match(button, /disabled=\{voiceSetupActionDisabled\}/);
+  assert.match(button, /data-agent-effect-class="reversible_state_change"/);
+  assert.match(button, /queueVoiceCloningSetup\(voiceSetupHasRepair \? "repair" : "setup"\)/);
+  assert.doesNotMatch(button, /data-agent-safe-action/);
+  assert.deepEqual(classifySafeAgentActions("button", "button", false, false, actionId, "reversible_state_change"), ["scroll_into_view", "activate_product_action"]);
+  assert.equal(requireExpectedProductActionId(actionId, actionId), actionId);
+  assert.throws(() => requireExpectedProductActionId(actionId, "diagnostics.phase2.install"));
+});

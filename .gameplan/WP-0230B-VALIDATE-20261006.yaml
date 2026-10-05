@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: WP-0230B-VALIDATE-20261006
 parent: null
-generation: 4
+generation: 5
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -29,3 +29,4 @@ steps:
 - {id: GP-013, role: any, at: before_round, do: require pointer-sized native package identity API signatures, check: {type: file, path: .local/wp0230b_validation_20261006.py, contains: kernel.GetCurrentProcess.restype = ctypes.c_void_p}, source: focused01 ended before any test at untyped native identity query, state: active}
 - {id: GP-014, role: any, at: before_round, do: verify transfer command lock temporary drops before local step, check: {type: file, path: product/engine/src/phase2_transfer_live.rs, contains: let scope = if let Ok(mut latest)}, source: engine01 compiler E0597 end-expression mutex guard outlives step, state: active}
 - {id: GP-015, role: any, at: before_round, do: require wheel download into isolated target instead of metadata-only pip dry-run, check: {type: file, path: .local/wp0230b_actual_adapters_20261006_v2.py, contains: --target}, source: Actual adapters01 pip dry-run exited0 after metadata without downloading wheel, state: active}
+- {id: GP-016, role: any, at: before_round, do: verify task board UTF8 read, check: {type: file, path: .local/record_wp0230b_validation_20261006.py, contains: board.read_text(encoding='utf-8')}, source: 'Record helper cp1252 read failed; corrected explicit UTF8; gameplan read verb rejected, corrected verify', state: active}
