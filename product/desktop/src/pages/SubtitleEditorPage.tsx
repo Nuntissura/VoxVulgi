@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
 import { usePageActivity, usePollingLoop } from "../lib/activity";
@@ -10,6 +10,7 @@ import {
   referenceQualityFactors,
   segmentClonePresentation,
   summarizeClonePreflight,
+  shouldRefuseQuietCloneConfirmation,
   type ClonePreflightSummary,
   type SegmentCloneInfo,
 } from "../lib/cloneUx";
@@ -4756,7 +4757,8 @@ export function SubtitleEditorPage({
     }
   }
 
-  async function enqueueDubVoicePreservingV1() {
+  async function enqueueDubVoicePreservingV1(event?: MouseEvent<HTMLButtonElement>) {
+    const quietActivation = event?.nativeEvent.isTrusted === false;
     if (!trackId) return;
 
     setBusy(true);
@@ -4767,6 +4769,7 @@ export function SubtitleEditorPage({
         "tools_tts_voice_preserving_local_v1_status",
       );
       if (!pack.installed) {
+        if (quietActivation) throw new Error("Voice-preserving dub not admitted: required voice pack is not ready. No setup or native confirmation was started.");
         const summary = await invoke<LocalizationRunQueueSummary>("jobs_enqueue_localization_run_v1", {
           request: {
             item_id: itemId,
@@ -4798,6 +4801,11 @@ export function SubtitleEditorPage({
 
     // WP-0187: Pre-flight check
     const preflight = await runClonePreflight();
+    if (shouldRefuseQuietCloneConfirmation(quietActivation, preflight.ready)) {
+      setError(`Voice-preserving dub not admitted: ${preflight.title}. Quiet activation requires ready references; native confirmation was not opened.`);
+      setBusy(false);
+      return;
+    }
     if (!preflight.ready) {
       const msg = `Clone pre-flight check: ${preflight.title}\n${preflight.speakers
         .map((speaker) => `${speaker.label}: ${speaker.summary}${speaker.guidance ? ` ${speaker.guidance}` : ""}`)
@@ -4815,6 +4823,7 @@ export function SubtitleEditorPage({
       const job = await invoke<JobRow>("jobs_enqueue_dub_voice_preserving_v1", {
         itemId,
         sourceTrackId: targetTrackId,
+        quietAgent: quietActivation,
       });
       setDubVoicePreservingJobId(job.id);
       setDubVoicePreservingJobStatus(job.status);
@@ -7043,6 +7052,8 @@ export function SubtitleEditorPage({
             {selectedStage === "voice_plan" ? (
               <button
                 type="button"
+                data-agent-action-id={`localization.clone-readiness.${itemId}`}
+                data-agent-effect-class="reversible_state_change"
                 disabled={busy || clonePreflightBusy}
                 onClick={() => checkCloneReadinessOnly().catch((error) => setError(String(error)))}
               >
@@ -7052,6 +7063,8 @@ export function SubtitleEditorPage({
             {selectedStage === "dub" ? (
               <button
                 type="button"
+                data-agent-action-id={clonePreflightSummary?.ready ? `localization.voice-preserving-dub.${itemId}` : undefined}
+                data-agent-effect-class={clonePreflightSummary?.ready ? "reversible_state_change" : undefined}
                 disabled={busy || !trackId}
                 onClick={enqueueDubVoicePreservingV1}
                 title={!trackId ? "Load the English translated track first" : undefined}
@@ -10013,6 +10026,8 @@ export function SubtitleEditorPage({
                   </button>
                   <button
                     type="button"
+                    data-agent-action-id={`localization.voice-plan-save.${itemId}`}
+                    data-agent-effect-class="reversible_state_change"
                     disabled={busy || itemVoicePlanBusy}
                     onClick={() => {
                       saveItemVoicePlan().catch(() => undefined);
@@ -10039,6 +10054,9 @@ export function SubtitleEditorPage({
                   <div className="v">
                     <select
                       aria-label="Preferred managed voice backend"
+                      data-agent-action-id={`localization.voice-plan-backend.${itemId}`}
+                      data-agent-effect-class="reversible_state_change"
+                      data-agent-input-kind="select"
                       value={
                         itemVoicePlanBackendId ||
                         managedVoiceBackendId(

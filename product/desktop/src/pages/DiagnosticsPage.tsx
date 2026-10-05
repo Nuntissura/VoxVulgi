@@ -1,7 +1,7 @@
 import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { confirm, open, save } from "@tauri-apps/plugin-dialog";
-import { usePageActivity, usePollingLoop } from "../lib/activity";
+import { usePollingLoop } from "../lib/activity";
 import {
   DemandSupersededError,
   aggregateDiagnosticsSectionSnapshots,
@@ -17,6 +17,7 @@ import { copyPathToClipboard, openPathBestEffort, revealPath as revealFilesystem
 import { loadYoutubeProtectionSnapshot } from "../lib/youtubeProtectionSnapshot";
 import { RootRebindControl } from "../components/RootRebindControl";
 import { collectDiagnosticsFieldResults, DiagnosticReadErrors, settleDiagnosticDemands, diagnosticPendingText, capabilityIsVerified } from "../lib/diagnosticsResults";
+import { phase2StatusIcon } from "../lib/phase2Progress";
 import "./DiagnosticsPage.css";
 
 type RuntimeProvenance = {
@@ -1149,7 +1150,6 @@ function defaultAdapterConfig(template: VoiceBackendAdapterTemplate): VoiceBacke
 }
 
 export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
-  const pageActive = usePageActivity(visible);
   const youtubeProtectionRequestRef = useRef(0);
   const demandGenerationRef = useRef<DemandGeneration | null>(null);
   const sectionDemandActiveRef = useRef<Record<DiagnosticsSectionKey, number>>({
@@ -2001,16 +2001,11 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
     : diagnosticPendingText(sectionStatus.storage.state);
 
   usePollingLoop(
-    async () => {
-      const next = await invoke<Phase2InstallLatestState>("tools_phase2_packs_install_latest_state").catch(
-        () => null,
-      );
-      if (next) {
-        setPhase2Latest(next);
-      }
-    },
+    () => loadPhase2Section(true),
     {
-      enabled: pageActive && phase2HasActive,
+      // Logical page visibility keeps quiet mounted WebViews current without focus.
+      // The existing demand group serializes reads and rejects detached generations.
+      enabled: visible && phase2HasActive,
       intervalMs: 1000,
     },
   );
@@ -4733,6 +4728,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
           <table>
             <thead>
               <tr>
+                <th aria-label="Status indicator" />
                 <th>Pack</th>
                 <th>Status</th>
                 <th>Started</th>
@@ -4755,11 +4751,12 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                     : null;
                   return (
                   <tr key={String(step?.id ?? step?.title ?? Math.random())}>
+                    <td aria-label={`${statusText} status indicator`}><span aria-hidden="true">{phase2StatusIcon(phase2StepStatus(step))}</span></td>
                     <td>{String(step?.title ?? step?.id ?? "-")}</td>
                     <td>
                       {statusText}
                       {elapsed !== null && (
-                        <span style={{ color: "#4b5563", marginLeft: 6 }}>
+                        <span className="phase2-elapsed" style={{ color: "#4b5563", marginLeft: 6 }}>
                           ({phase2FormatElapsedSeconds(elapsed)})
                         </span>
                       )}
@@ -4791,6 +4788,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
               ) : phase2Plan?.length ? (
                 phase2Plan.map((p) => (
                   <tr key={p.id}>
+                    <td aria-label={`${p.supported ? "not started" : "unsupported"} status indicator`}><span aria-hidden="true">{phase2StatusIcon(p.supported ? "" : "skipped")}</span></td>
                     <td>{p.title}</td>
                     <td>{p.supported ? "not started" : "unsupported"}</td>
                     <td>-</td>
@@ -4802,7 +4800,7 @@ export function DiagnosticsPage({ visible = true }: { visible?: boolean }) {
                 ))
               ) : (
                 <tr>
-                  <td colSpan={7}>No install state yet.</td>
+                  <td colSpan={8}>No install state yet.</td>
                 </tr>
               )}
             </tbody>

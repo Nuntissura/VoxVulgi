@@ -9820,6 +9820,95 @@ pub struct InstallProofDispatchGuard {
     pub enter: Arc<dyn Fn(&AppPaths, &str) -> Result<Box<dyn Send + Sync>> + Send + Sync>,
 }
 
+// WP-0227: added Deserialize so we can load the previous
+// latest.json on this new install run and preserve any steps that
+// already finished. Without this, every install starts from
+// scratch even after the previous attempt got 5 of 7 steps done.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct Phase2InstallStep {
+    id: String,
+    title: String,
+    status: String,
+    started_at_ms: Option<i64>,
+    finished_at_ms: Option<i64>,
+    estimated_bytes: Option<u64>,
+    delta_bytes: Option<i64>,
+    error: Option<String>,
+    log_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+struct Phase2InstallState {
+    schema_version: u32,
+    job_id: String,
+    started_at_ms: i64,
+    updated_at_ms: i64,
+    steps: Vec<Phase2InstallStep>,
+}
+
+fn write_phase2_install_state(paths: &AppPaths, guard: Option<&InstallProofDispatchGuard>, path: &Path, latest: &Path, state: &Phase2InstallState) -> Result<()> {
+    if let Some(guard)=guard { (guard.targets)(paths,&[path.to_path_buf(),latest.to_path_buf()])?; }
+    let json = serde_json::to_string_pretty(state)?;
+    std::fs::write(path, format!("{json}\n"))?;
+    // Best-effort copy to a stable "latest" location.
+    let _ = std::fs::write(latest, format!("{json}\n"));
+    Ok(())
+}
+
+
+fn run_phase2_logged_install(sink: cmd::PipOutputSink, installer: impl FnOnce() -> Result<()>) -> Result<()> {
+    let scope = cmd::ScopedPipOutputSink::enter(sink)?;
+    let result = installer();
+    // Original installer errors retain precedence, including cancellation/timeouts.
+    // A handler catching a capture error cannot promote that step to success.
+    if result.is_ok() {
+        if let Some(error) = scope.failure() { return Err(error.into()); }
+    }
+    result
+}
+
+fn fail_phase2_install_journal(paths: &AppPaths, guard: Option<&InstallProofDispatchGuard>, path: &Path,
+    latest: &Path, state: &mut Phase2InstallState, index: usize, delta: i64, finished: i64, error: &EngineError) -> Result<()> {
+    let step = &mut state.steps[index];
+    step.status = "failed".to_string();
+    step.delta_bytes = Some(delta);
+    step.finished_at_ms = Some(finished);
+    step.error = Some(error.to_string());
+    state.updated_at_ms = now_ms();
+    write_phase2_install_state(paths, guard, path, latest, state)
+}
+
+fn phase2_pip_output_sink(paths: AppPaths, guard: Option<InstallProofDispatchGuard>, log_path: PathBuf) -> cmd::PipOutputSink {
+    Arc::new(move |channel, bytes| {
+        let check_target = || -> std::io::Result<()> {
+            if let Some(guard) = &guard {
+                (guard.targets)(&paths, &[log_path.clone()])
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+            }
+            Ok(())
+        };
+        check_target()?;
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(windows)] {
+            use std::os::windows::fs::OpenOptionsExt;
+            // Refuse pathname replacement while this owned target is written.
+            options.share_mode(0x1 | 0x2);
+        }
+        let mut file = options.open(&log_path)?;
+        let channel_header: &[u8] = match channel {
+            cmd::PipOutputChannel::Stdout => b"\n[pip stdout]\n",
+            cmd::PipOutputChannel::Stderr => b"\n[pip stderr]\n",
+        };
+        // Full authentic bytes per channel; these labels claim no chronology.
+        for part in [channel_header, bytes, b"\n".as_slice()] {
+            check_target()?;
+            file.write_all(part)?;
+        }
+        Ok(())
+    })
+}
+
 pub fn start_runner(paths: AppPaths) -> Result<JobRunnerHandle> {
     start_runner_inner(paths, None)
 }
@@ -20946,41 +21035,6 @@ if __name__ == "__main__":
                 std::fs::create_dir_all(parent)?;
             }
 
-            // WP-0227: added Deserialize so we can load the previous
-            // latest.json on this new install run and preserve any steps that
-            // already finished. Without this, every install starts from
-            // scratch even after the previous attempt got 5 of 7 steps done.
-            #[derive(Debug, Clone, Serialize, serde::Deserialize)]
-            struct Phase2InstallStep {
-                id: String,
-                title: String,
-                status: String,
-                started_at_ms: Option<i64>,
-                finished_at_ms: Option<i64>,
-                estimated_bytes: Option<u64>,
-                delta_bytes: Option<i64>,
-                error: Option<String>,
-                log_path: String,
-            }
-
-            #[derive(Debug, Clone, Serialize, serde::Deserialize)]
-            struct Phase2InstallState {
-                schema_version: u32,
-                job_id: String,
-                started_at_ms: i64,
-                updated_at_ms: i64,
-                steps: Vec<Phase2InstallStep>,
-            }
-
-            fn write_state(paths: &AppPaths, guard: Option<&InstallProofDispatchGuard>, path: &Path, latest: &Path, state: &Phase2InstallState) -> Result<()> {
-                if let Some(guard)=guard { (guard.targets)(paths,&[path.to_path_buf(),latest.to_path_buf()])?; }
-                let json = serde_json::to_string_pretty(state)?;
-                std::fs::write(path, format!("{json}\n"))?;
-                // Best-effort copy to a stable "latest" location.
-                let _ = std::fs::write(latest, format!("{json}\n"));
-                Ok(())
-            }
-
             fn append_log_line(paths: &AppPaths, guard: Option<&InstallProofDispatchGuard>, path: &Path, line: &str) -> Result<()> {
                 if let Some(guard)=guard { (guard.targets)(paths,&[path.to_path_buf()])?; }
                 if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -21041,7 +21095,19 @@ if __name__ == "__main__":
                 // Python environment after the bundled dependency set changes.
                 if let Some(prior) = prior_done_steps
                     .get(&item.id)
-                    .filter(|_| !p.force && tools::phase2_pack_step_satisfied(paths, &item.id))
+                    .filter(|_| {
+                        if p.force { return false; }
+                        let status_started = std::time::Instant::now();
+                        let satisfied = tools::phase2_pack_step_satisfied(paths, &item.id);
+                        let _ = checked_phase2_log_line(paths, install_proof_guard, job_id, "info", "phase2_existing_pack_status_checked", serde_json::json!({
+                            "step_id": &item.id,
+                            "elapsed_ms": status_started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                            "satisfied": satisfied,
+                            "used_for_prior_done_carry": satisfied,
+                            "original_status_function_invoked": true,
+                        }));
+                        satisfied
+                    })
                 {
                     steps.push(Phase2InstallStep {
                         id: item.id,
@@ -21076,7 +21142,7 @@ if __name__ == "__main__":
                 updated_at_ms: now_ms(),
                 steps,
             };
-            write_state(paths, install_proof_guard, &state_path, &latest_path, &state)?;
+            write_phase2_install_state(paths, install_proof_guard, &state_path, &latest_path, &state)?;
 
             let total_steps = state
                 .steps
@@ -21115,7 +21181,7 @@ if __name__ == "__main__":
                     (step.id.clone(), step.title.clone(), step.log_path.clone())
                 };
 
-                write_state(paths, install_proof_guard, &state_path, &latest_path, &state)?;
+                write_phase2_install_state(paths, install_proof_guard, &state_path, &latest_path, &state)?;
 
                 let log_path = PathBuf::from(&step_log_path);
                 append_log_line(
@@ -21126,7 +21192,9 @@ if __name__ == "__main__":
                 let before = crate::diagnostics::directory_size_bytes_best_effort(
                     &paths.python_toolchain_dir(),
                 ) as i64;
-                let result: Result<()> = match step_id.as_str() {
+                let result = run_phase2_logged_install(
+                    phase2_pip_output_sink(paths.clone(), install_proof_guard.cloned(), log_path.clone()),
+                    || -> Result<()> { match step_id.as_str() {
                     "portable_python_win64" => {
                         let status = tools::python_toolchain_status(paths);
                         if status.base_available {
@@ -21201,7 +21269,7 @@ if __name__ == "__main__":
                     other => Err(EngineError::InstallFailed(format!(
                         "unknown phase2 pack step id: {other}"
                     ))),
-                };
+                } });
 
                 let after = crate::diagnostics::directory_size_bytes_best_effort(
                     &paths.python_toolchain_dir(),
@@ -21221,22 +21289,16 @@ if __name__ == "__main__":
                         completed_steps += 1;
                     }
                     Err(err) => {
-                        {
-                            let step = &mut state.steps[step_index];
-                            step.status = "failed".to_string();
-                            step.delta_bytes = Some(delta_bytes);
-                            step.finished_at_ms = Some(finished_at_ms);
-                            step.error = Some(err.to_string());
-                        }
-                        append_log_line(paths, install_proof_guard, &log_path, &format!("failed: {}", err.to_string()))?;
-                        state.updated_at_ms = now_ms();
-                        write_state(paths, install_proof_guard, &state_path, &latest_path, &state)?;
+                        // Preserve a truthful terminal journal even if the step log target refuses writes.
+                        fail_phase2_install_journal(paths, install_proof_guard, &state_path, &latest_path,
+                            &mut state, step_index, delta_bytes, finished_at_ms, &err)?;
+                        let _ = append_log_line(paths, install_proof_guard, &log_path, &format!("failed: {}", err));
                         return Err(err);
                     }
                 }
 
                 state.updated_at_ms = now_ms();
-                write_state(paths, install_proof_guard, &state_path, &latest_path, &state)?;
+                write_phase2_install_state(paths, install_proof_guard, &state_path, &latest_path, &state)?;
 
                 let progress = 0.10 + 0.85 * ((completed_steps as f32) / (total_steps as f32));
                 set_progress(paths, job_id, progress)?;
@@ -33236,6 +33298,78 @@ mod tests {
     use std::net::TcpListener;
     use std::path::Path;
     use std::sync::Barrier;
+
+
+    #[cfg(windows)]
+    #[test]
+    fn wp0229_caught_capture_failure_refuses_retry_and_persists_production_failed_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = AppPaths::new(dir.path().to_path_buf());
+        let log = dir.path().join("step.log"); let retry_marker = dir.path().join("retry_spawned.txt");
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0)); let observed = calls.clone(); let exact_log = log.clone();
+        let guard = InstallProofDispatchGuard {
+            check: Arc::new(|_,_|Ok(())), enter: Arc::new(|_,_|Ok(Box::new(()))),
+            targets: Arc::new(move |_,targets| {
+                if targets == &[exact_log.clone()] && observed.fetch_add(1,Ordering::SeqCst) == 0 {
+                    Err(EngineError::InstallFailed("one-shot exact log ownership refusal".into()))
+                } else { Ok(()) }
+            }),
+        };
+        let result = run_phase2_logged_install(phase2_pip_output_sink(paths.clone(),Some(guard.clone()),log.clone()), || {
+            let mut first = cmd::command("cmd.exe");
+            first.args(["/D","/C","echo genuine stdout & echo genuine stderr 1>&2 & rem","-m","pip"]);
+            assert!(cmd::run_owned_output(&mut first,Duration::from_secs(10),||false).is_err());
+            // Original retry/catch shape: a later handler result would otherwise claim success.
+            let mut retry = cmd::command("cmd.exe");
+            retry.args(["/D","/C",&format!("echo spawned > \"{}\" & rem",retry_marker.display()),"-m","pip"]);
+            assert!(cmd::run_owned_output(&mut retry,Duration::from_secs(10),||false).is_err());
+            Ok(())
+        });
+        let error = result.unwrap_err();
+        assert!(error.to_string().contains("one-shot exact log ownership refusal"));
+        assert_eq!(calls.load(Ordering::SeqCst),1); assert!(!retry_marker.exists());
+        let state_path=dir.path().join("state.json"); let latest=dir.path().join("latest.json");
+        let mut state=Phase2InstallState {schema_version:1,job_id:"original-job".into(),started_at_ms:1,updated_at_ms:1,
+            steps:vec![Phase2InstallStep {id:"spleeter".into(),title:"Spleeter".into(),status:"running".into(),started_at_ms:Some(1),finished_at_ms:None,
+                estimated_bytes:None,delta_bytes:None,error:None,log_path:log.to_string_lossy().into_owned()}]};
+        fail_phase2_install_journal(&paths,Some(&guard),&state_path,&latest,&mut state,0,0,2,&error).unwrap();
+        for file in [state_path,latest] {
+            let actual:Phase2InstallState=serde_json::from_slice(&std::fs::read(file).unwrap()).unwrap();
+            assert_eq!(actual.job_id,"original-job"); assert_eq!(actual.steps[0].status,"failed");
+            assert_eq!(actual.steps[0].finished_at_ms,Some(2));
+            assert!(actual.steps[0].error.as_ref().unwrap().contains("one-shot exact log ownership refusal"));
+        }
+    }
+
+    #[test]
+    fn wp0229_pip_log_sink_preserves_channel_bytes_and_rechecks_exact_target() {
+        let dir=tempfile::tempdir().unwrap();let paths=AppPaths::new(dir.path().to_path_buf());let log=dir.path().join("exact_step.log");
+        let count=Arc::new(std::sync::atomic::AtomicUsize::new(0));let observed=count.clone();let expected=log.clone();let expected_paths=paths.clone();
+        let guard=InstallProofDispatchGuard {
+            check:Arc::new(|_,_|Ok(())),enter:Arc::new(|_,_|Ok(Box::new(()))),
+            targets:Arc::new(move|actual,targets|{assert_eq!(actual.base_dir,expected_paths.base_dir);assert_eq!(targets,&[expected.clone()]);observed.fetch_add(1,Ordering::SeqCst);Ok(())}),
+        };
+        let sink=phase2_pip_output_sink(paths,Some(guard),log.clone());
+        sink(cmd::PipOutputChannel::Stdout,b"actual stdout\xff\r\n").unwrap();
+        sink(cmd::PipOutputChannel::Stderr,b"actual stderr\r\n").unwrap();
+        assert_eq!(std::fs::read(&log).unwrap(),b"\n[pip stdout]\nactual stdout\xff\r\n\n\n[pip stderr]\nactual stderr\r\n\n");
+        assert_eq!(count.load(Ordering::SeqCst),8,"initial ownership plus every actual write for both channels");
+    }
+    #[test]
+    fn wp0229_pip_log_sink_guard_refusal_precedes_creation_and_each_payload_write() {
+        for refuse_at in [1,3] {
+            let dir=tempfile::tempdir().unwrap();let paths=AppPaths::new(dir.path().to_path_buf());let log=dir.path().join("refused_step.log");
+            let count=Arc::new(std::sync::atomic::AtomicUsize::new(0));let observed=count.clone();let expected=log.clone();
+            let guard=InstallProofDispatchGuard {
+                check:Arc::new(|_,_|Ok(())),enter:Arc::new(|_,_|Ok(Box::new(()))),
+                targets:Arc::new(move|_,targets|{assert_eq!(targets,&[expected.clone()]);if observed.fetch_add(1,Ordering::SeqCst)+1==refuse_at {Err(EngineError::InstallFailed("actual target guard refused".into()))} else {Ok(())}}),
+            };
+            let sink=phase2_pip_output_sink(paths,Some(guard),log.clone());
+            assert!(sink(cmd::PipOutputChannel::Stdout,b"authentic bytes refused").is_err());
+            assert_eq!(count.load(Ordering::SeqCst),refuse_at);
+            if refuse_at==1 {assert!(!log.exists());} else {assert_eq!(std::fs::read(log).unwrap(),b"\n[pip stdout]\n");}
+        }
+    }
 
     fn selected_queue_fixture() -> (tempfile::TempDir, AppPaths) {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -31,3 +31,28 @@ test("selected download choices and pause expose the exact shared product decisi
     assert.deepEqual(classifySafeAgentActions("button", "button", false, false, id, "reversible_state_change", ""), ["scroll_into_view", "activate_product_action"]);
   }
 });
+
+
+test("quiet viewport commands document ownership, bounds units and explicit mutation receipts", () => {
+  const inspect = manual.commands.find((c: any) => c.name === "ui.viewport.inspect");
+  const resize = manual.commands.find((c: any) => c.name === "ui.viewport.set");
+  assert.equal(inspect.read_only, true);
+  assert.ok(inspect.input_schema.required.includes("expected_pid"));
+  assert.equal(resize.read_only, false);
+  assert.ok(resize.input_schema.required.includes("operation_id"));
+  assert.equal(resize.input_schema.properties.width.maximum, 2560);
+  assert.equal(resize.input_schema.properties.height.maximum, 1920);
+  assert.match(resize.description, /not guaranteed CSS pixels/);
+});
+
+
+test("voice readiness is a bounded original read-only status command", () => {
+  const command = manual.commands.find((c: any) => c.name === "tools.voice_readiness");
+  assert.equal(command.read_only, true);
+  assert.equal(command.effect, "read_only");
+  assert.deepEqual(command.input_schema.properties.pack_id.enum, ["tts_neural_local_v1", "tts_voice_preserving_local_v1", "voice_clone_cosyvoice_v1"]);
+  assert.equal(command.input_schema.additionalProperties, false);
+  assert.deepEqual(Object.keys(command.input_schema.properties).sort(), ["actor_id", "bridge_token", "command", "pack_id"]);
+});
+
+test("private voice runtime paths expose no mutation inputs",()=>{const c=manual.commands.find((c:any)=>c.name==="tools.voice_runtime_paths");assert.equal(c.read_only,true);assert.equal(c.input_schema.additionalProperties,false);assert.deepEqual(Object.keys(c.input_schema.properties).sort(),["actor_id","bridge_token","command"]);});

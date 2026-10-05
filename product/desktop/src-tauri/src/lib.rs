@@ -1,4 +1,5 @@
 mod agent_control;
+mod agent_viewport;
 mod install_proof;
 use base64::Engine as _;
 #[cfg(target_os = "windows")]
@@ -2164,6 +2165,7 @@ fn agent_handle_state() -> String {
         "agent_background": state.agent_background,
         "app_version": env!("CARGO_PKG_VERSION"),
         "live_agent_actions_enabled": agent_live_actions_enabled(),
+        "install_proof_ownership": AGENT_APP_HANDLE.get().and_then(|app|app.try_state::<AppState>()).and_then(|state|state.install_proof.as_ref().map(|owner|owner.provenance())),
         "runtime": state.runtime,
     })
     .to_string()
@@ -16660,14 +16662,29 @@ fn jobs_enqueue_tts_neural_local_v1(
         .map_err(|e| e.to_string())
 }
 
+fn quiet_dub_admission<T>(
+    quiet_agent: bool,
+    safe_mode: &AtomicBool,
+    admit: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    // Fresh check at the original IPC admission boundary, after asynchronous UI preflight.
+    if quiet_agent && safe_mode.load(Ordering::SeqCst) {
+        return Err("Safe Mode blocks quiet voice-preserving dub admission".into());
+    }
+    admit()
+}
+
 #[tauri::command]
 fn jobs_enqueue_dub_voice_preserving_v1(
     state: State<'_, AppState>,
     item_id: String,
     source_track_id: String,
+    quiet_agent: Option<bool>,
 ) -> Result<jobs::JobRow, String> {
-    jobs::enqueue_dub_voice_preserving_v1(&state.paths, item_id, source_track_id)
-        .map_err(|e| e.to_string())
+    quiet_dub_admission(quiet_agent.unwrap_or(false), &state.safe_mode_enabled, || {
+        jobs::enqueue_dub_voice_preserving_v1(&state.paths, item_id, source_track_id)
+            .map_err(|e| e.to_string())
+    })
 }
 
 #[tauri::command]
@@ -19670,4 +19687,30 @@ pub fn run() {
                 }
             }
         });
+}
+
+
+#[cfg(test)]
+mod wp0330_quiet_dub_admission_tests {
+    use super::*;
+    #[test]
+    fn fresh_safe_mode_refuses_quiet_admission_without_calling_original_enqueue() {
+        let safe_mode = AtomicBool::new(false);
+        let admitted = AtomicBool::new(false);
+        safe_mode.store(true, Ordering::SeqCst); // Mode changed after earlier UI preflight.
+        let result = quiet_dub_admission(true, &safe_mode, || {
+            admitted.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+        assert!(result.unwrap_err().contains("Safe Mode"));
+        assert!(!admitted.load(Ordering::SeqCst));
+    }
+    #[test]
+    fn original_operator_admission_and_quiet_allowed_mode_keep_original_result() {
+        let safe_mode = AtomicBool::new(true);
+        assert_eq!(quiet_dub_admission(false, &safe_mode, || Ok(23)), Ok(23));
+        safe_mode.store(false, Ordering::SeqCst);
+        assert_eq!(quiet_dub_admission(true, &safe_mode, || Ok(29)), Ok(29));
+        assert_eq!(quiet_dub_admission(true, &safe_mode, || Err::<(), _>("original enqueue error".into())), Err("original enqueue error".into()));
+    }
 }

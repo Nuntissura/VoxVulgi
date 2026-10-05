@@ -37,5 +37,9 @@ windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Graphic
 zip = "0.6.6"
 voxvulgi_engine = { path = "../../engine" }
 
+[target.'cfg(windows)'.dependencies]
+webview2-com = "=0.38.2"
+windows-core = "=0.61.2"
+
 [dev-dependencies]
 tempfile = "3.20.0"

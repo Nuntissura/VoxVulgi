@@ -1,0 +1,22 @@
+kind: gameplan_confirmations
+confirmations:
+- {id: GP-003, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-10-02T16:52:31Z', note: 250abf7 plus inspected WP-0323 diff; no compiler processes; 3411GiB free; long paths; isolated tests}
+- {id: GP-005, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-10-02T16:52:31Z', note: 250abf7 plus inspected WP-0323 diff; no compiler processes; 3411GiB free; long paths; isolated tests}
+- {id: GP-006, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-10-02T16:52:31Z', note: 250abf7 plus inspected WP-0323 diff; no compiler processes; 3411GiB free; long paths; isolated tests}
+- {id: GP-008, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-10-02T16:52:31Z', note: 250abf7 plus inspected WP-0323 diff; no compiler processes; 3411GiB free; long paths; isolated tests}
+- {id: GP-009, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-10-02T16:52:31Z', note: 250abf7 plus inspected WP-0323 diff; no compiler processes; 3411GiB free; long paths; isolated tests}
+- {id: GP-010, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-10-02T16:52:31Z', note: 250abf7 plus inspected WP-0323 diff; no compiler processes; 3411GiB free; long paths; isolated tests}
+- {id: GP-011, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-10-02T16:52:31Z', note: 250abf7 plus inspected WP-0323 diff; no compiler processes; 3411GiB free; long paths; isolated tests}
+- {id: GP-012, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-10-02T16:52:31Z', note: 250abf7 plus inspected WP-0323 diff; no compiler processes; 3411GiB free; long paths; isolated tests}
+- {id: GP-013, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-10-02T16:52:31Z', note: 250abf7 plus inspected WP-0323 diff; no compiler processes; 3411GiB free; long paths; isolated tests}
+- {id: GP-015, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-10-02T16:58:39Z', note: Canonical probe locked; no retry of same failing probe; isolated tests remain required}
+- {id: GP-003, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-02T17:00:57Z', note: 977851b remediation; focused tests green; no heavy compilers; core-only 0.1.205; live proof still pending}
+- {id: GP-005, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-02T17:00:57Z', note: 977851b remediation; focused tests green; no heavy compilers; core-only 0.1.205; live proof still pending}
+- {id: GP-006, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-02T17:00:57Z', note: 977851b remediation; focused tests green; no heavy compilers; core-only 0.1.205; live proof still pending}
+- {id: GP-008, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-02T17:00:57Z', note: 977851b remediation; focused tests green; no heavy compilers; core-only 0.1.205; live proof still pending}
+- {id: GP-009, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-02T17:00:57Z', note: 977851b remediation; focused tests green; no heavy compilers; core-only 0.1.205; live proof still pending}
+- {id: GP-010, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-02T17:00:57Z', note: 977851b remediation; focused tests green; no heavy compilers; core-only 0.1.205; live proof still pending}
+- {id: GP-011, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-02T17:00:57Z', note: 977851b remediation; focused tests green; no heavy compilers; core-only 0.1.205; live proof still pending}
+- {id: GP-012, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-02T17:00:57Z', note: 977851b remediation; focused tests green; no heavy compilers; core-only 0.1.205; live proof still pending}
+- {id: GP-013, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-02T17:00:57Z', note: 977851b remediation; focused tests green; no heavy compilers; core-only 0.1.205; live proof still pending}
+- {id: GP-015, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-02T17:00:57Z', note: 977851b remediation; focused tests green; no heavy compilers; core-only 0.1.205; live proof still pending}

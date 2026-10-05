@@ -3,6 +3,46 @@
   "title": "VoxVulgi user and agent manual",
   "commands": [
     {
+      "name": "tools.voice_readiness",
+      "description": "Read one explicitly selected original Kokoro neural-TTS or OpenVoice voice-preserving pack status. A separate try/busy admission permits one probe; competing requests return busy without spawning another probe. A poisoned admission returns unavailable/readiness unknown and starts no probe; poison is never cleared automatically. Existing read-command errors use HTTP400, including busy and unavailable. No UI/global mutation lock is held. Original file checks and Python child timeout remain unchanged and can be slow; this is not bounded-duration readiness or inference proof. Never installs, repairs, warms up or admits jobs. CosyVoice selection invokes the original cosyvoice_pack_status with the same nonwaiting admission gate; it never installs, warms up, or enqueues.",
+      "read_only": true,
+      "effect": "read_only",
+      "input": {
+        "pack_id": "tts_neural_local_v1 or tts_voice_preserving_local_v1"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "pack_id"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "tools.voice_readiness"
+          },
+          "pack_id": {
+            "type": "string",
+            "enum": [
+              "tts_neural_local_v1",
+              "tts_voice_preserving_local_v1",
+              "voice_clone_cosyvoice_v1"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "database.runtime_status",
       "description": "Read bounded in-memory database admission state and terminal operation receipts, plus read-only WAL file sizes. Opens no SQLite connection and takes no database admission slot. checkpoint_maintenance reports the shared background PASSIVE owner, cycle age, partial progress, backlog and explicit new-write backpressure; diagnostics reads do not checkpoint. Diagnostics trace exposes the same state and its explicit Run passive WAL checkpoint action shares that owner. connection_use includes SQL and caller work; connection_close appears immediately before connection drop; terminal receipts contain its completed duration. A zero value on an active operation is the initial marker or a submillisecond completed close.",
       "read_only": true,
@@ -10,11 +50,23 @@
       "input": {},
       "input_schema": {
         "type": "object",
-        "required": ["bridge_token", "actor_id", "command"],
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command"
+        ],
         "properties": {
-          "bridge_token": {"type": "string"},
-          "actor_id": {"type": "string", "minLength": 1, "maxLength": 80},
-          "command": {"const": "database.runtime_status"}
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "database.runtime_status"
+          }
         },
         "additionalProperties": false
       }
@@ -264,7 +316,13 @@
           "command": {
             "const": "downloads.enqueue"
           },
-          "mode": { "type": "string", "enum": ["only", "continue_all"] },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "only",
+              "continue_all"
+            ]
+          },
           "urls": {
             "description": "1-25 URLs",
             "type": "array",
@@ -297,17 +355,53 @@
       "description": "Start exactly these queued foreground download jobs. only leaves all other queued work paused; continue_all resumes queued work and puts this selection first. Safe Mode, provider cooldown, normal pacing and storage/authentication checks remain enforced. Read the result and canonical jobs; held is not a completed download.",
       "read_only": false,
       "effect": "reversible_state_change",
-      "input": { "job_ids": "1-1500 exact canonical IDs", "mode": "only or continue_all" },
+      "input": {
+        "job_ids": "1-1500 exact canonical IDs",
+        "mode": "only or continue_all"
+      },
       "input_schema": {
         "type": "object",
-        "required": ["bridge_token", "actor_id", "command", "job_ids", "mode", "operation_id"],
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "job_ids",
+          "mode",
+          "operation_id"
+        ],
         "properties": {
-          "bridge_token": { "type": "string" },
-          "actor_id": { "type": "string", "minLength": 1, "maxLength": 80 },
-          "command": { "const": "downloads.start_selected" },
-          "job_ids": { "type": "array", "minItems": 1, "maxItems": 1500, "uniqueItems": true, "items": { "type": "string" } },
-          "mode": { "type": "string", "enum": ["only", "continue_all"] },
-          "operation_id": { "type": "string", "minLength": 1, "maxLength": 80 }
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "downloads.start_selected"
+          },
+          "job_ids": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 1500,
+            "uniqueItems": true,
+            "items": {
+              "type": "string"
+            }
+          },
+          "mode": {
+            "type": "string",
+            "enum": [
+              "only",
+              "continue_all"
+            ]
+          },
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          }
         },
         "additionalProperties": false
       }
@@ -317,15 +411,32 @@
       "description": "Read the whole canonical queued foreground download membership of a batch, not the rendered or paginated activity subset. Refuses batches over 1500; selection is revalidated when starting.",
       "read_only": true,
       "effect": "read_only",
-      "input": { "batch_id": "exact canonical batch ID" },
+      "input": {
+        "batch_id": "exact canonical batch ID"
+      },
       "input_schema": {
         "type": "object",
-        "required": ["bridge_token", "actor_id", "command", "batch_id"],
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "batch_id"
+        ],
         "properties": {
-          "bridge_token": { "type": "string" },
-          "actor_id": { "type": "string", "minLength": 1, "maxLength": 80 },
-          "command": { "const": "downloads.batch_members" },
-          "batch_id": { "type": "string" }
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "downloads.batch_members"
+          },
+          "batch_id": {
+            "type": "string"
+          }
         },
         "additionalProperties": false
       }
@@ -668,12 +779,29 @@
       "input": {},
       "input_schema": {
         "type": "object",
-        "required": ["bridge_token", "actor_id", "command", "operation_id"],
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "operation_id"
+        ],
         "properties": {
-          "bridge_token": { "type": "string" },
-          "actor_id": { "type": "string", "minLength": 1, "maxLength": 80 },
-          "command": { "const": "queue.pause" },
-          "operation_id": { "type": "string", "minLength": 1, "maxLength": 80 }
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "queue.pause"
+          },
+          "operation_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          }
         },
         "additionalProperties": false
       }
@@ -1025,7 +1153,7 @@
     },
     {
       "name": "tools.install_pack",
-      "description": "Invoke one original governed installer only inside explicit fresh owned mutable install-proof startup. Launch --agent-headless --agent-install-proof --agent-install-proof-nonce <32hex>, with VOXVULGI_AGENT_HEADLESS_BASE_DIR equal to its fresh native Temp child voxvulgi_install_proof_<nonce>. The source owner retains the lease; prepare prerequisite tools only inside this mutable owned root. Separate tools.install_phase2 invokes original force/journal job; neither action automatically resumes a paused queue.",
+      "description": "Invoke one original governed installer only inside explicit owned mutable install-proof startup (fresh by default). Launch --agent-headless --agent-install-proof --agent-install-proof-nonce <32hex>, with VOXVULGI_AGENT_HEADLESS_BASE_DIR equal to its fresh native Temp child voxvulgi_install_proof_<nonce>. Explicit reattachment additionally supplies --agent-install-proof-owner-sha256 <original-marker-64hex> after the original owned process is gracefully closed; it reopens the same nonce/root/physical identity exclusively without rewriting the original marker. Optional --agent-install-proof-workflow requires reattachment and selects private original product workflows only after explicit runner start; tools.install_pack and tools.install_phase2 are refused. Without this flag the installer-only runner remains unchanged. Inspect install_proof_ownership original versus current PID and workflow purpose. Marker source/executable provenance is not recorded; independently reconcile original closed launch/Update receipts and the new candidate launch. No marker/payload copy or qualified runtime mutation. The source owner retains the lease; prepare prerequisite tools only inside this mutable owned root. Separate tools.install_phase2 invokes original force/journal job; neither action automatically resumes a paused queue.",
       "read_only": false,
       "effect": "dependency_install",
       "input": {
@@ -1123,6 +1251,126 @@
           },
           "force": {
             "type": "boolean"
+          }
+        }
+      }
+    },
+    {
+      "name": "ui.viewport.inspect",
+      "description": "Read current-process main WebView controller bounds, zoom, rasterization, bounds mode, native quiet state and foreground process. Token/actor/expected_pid required. Only minimized --agent-background or hidden --agent-headless; unsupported COM fields are null with HRESULT. No SQLite, native focus, window restore, or setters.",
+      "read_only": true,
+      "effect": "read_only",
+      "input": {
+        "expected_pid": "exact ledger PID"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "expected_pid"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "ui.viewport.inspect"
+          },
+          "expected_pid": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "ui.viewport.set",
+      "description": "Explicitly change ONLY embedded WebView bounds in an owned minimized --agent-background or hidden --agent-headless session. Width/height use current controller BoundsMode units, not guaranteed CSS pixels. Read ui.viewport.inspect first; preserve zoom, rasterization, preferences and native window/focus. Eight-million physical-pixel cap. Timeout atomically cancels queued requests before admission; already-admitted operations may begin or finish later and cannot be cancelled. Timeout requires re-inspection. Successful controller readback is not CSS/readability proof: capture fresh dump/snapshot.",
+      "read_only": false,
+      "effect": "reversible_state_change",
+      "input": {
+        "expected_pid": "exact ledger PID",
+        "width": "640..2560 controller units",
+        "height": "480..1920 controller units"
+      },
+      "input_schema": {
+        "type": "object",
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command",
+          "expected_pid",
+          "operation_id",
+          "width",
+          "height"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "ui.viewport.set"
+          },
+          "expected_pid": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4294967295
+          },
+          "operation_id": {
+            "type": "string"
+          },
+          "width": {
+            "type": "integer",
+            "minimum": 640,
+            "maximum": 2560
+          },
+          "height": {
+            "type": "integer",
+            "minimum": 480,
+            "maximum": 1920
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "tools.voice_runtime_paths",
+      "description": "Token-authenticated read only exact nonsecret AppPaths-selected interpreter/model/cache/backend roots, only in explicit owned headless reattached private workflow after fresh original owner policy/SafeMode/unfinished-install checks. Sole raw-path response exception; diagnostics trace/global redactor unchanged. configuration_only=true; paths do not prove readiness, Python execution, model loading, or cache consumption. Independently observe native descendants and actual pipeline outputs. No runner start/install/job/warmup.",
+      "read_only": true,
+      "effect": "read_only",
+      "input_schema": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "bridge_token",
+          "actor_id",
+          "command"
+        ],
+        "properties": {
+          "bridge_token": {
+            "type": "string"
+          },
+          "actor_id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80
+          },
+          "command": {
+            "const": "tools.voice_runtime_paths"
           }
         }
       }
@@ -1226,7 +1474,7 @@
     },
     {
       "title": "Navigation and visual inspection",
-      "body": "Use /agent/navigate, /agent/ui_audit, /agent/ui_action, /agent/snapshot and /agent/dump. Navigation and DOM interaction do not raise the native window or simulate OS input. For Options manual navigate with section_id=options-manual. Read each audited control\u2019s safe_actions, product_action_id, effect and input choices. Audit IDs expire on rerender. Capture and open snapshots after interaction to inspect readability, clipping and layout. A successful action receipt proves dispatch only; re-read the resulting UI and backend state."
+      "body": "Use /agent/navigate, /agent/ui_audit, /agent/ui_action, /agent/snapshot and /agent/dump. Navigation and DOM interaction do not raise the native window or simulate OS input. For Options manual navigate with section_id=options-manual. Read each audited control’s safe_actions, product_action_id, effect and input choices. Audit IDs expire on rerender. Capture and open snapshots after interaction to inspect readability, clipping and layout. A successful action receipt proves dispatch only; re-read the resulting UI and backend state."
     },
     {
       "title": "Interaction and availability",
@@ -1258,7 +1506,7 @@
     },
     {
       "title": "Controlled retry after a cooldown",
-      "body": "Options \u2192 Video Archiver \u2192 YouTube protection \u2192 Try one video after cooldown, or youtube.controlled_probe. The app keeps one active canary and waits at least five minutes after the last outcome. It retains quality, subtitles and request spacing. Successful canaries recover the queue through normal policy; repeated server failures keep it held. This is an explicit request, not a guarantee that YouTube has lifted its limit."
+      "body": "Options → Video Archiver → YouTube protection → Try one video after cooldown, or youtube.controlled_probe. The app keeps one active canary and waits at least five minutes after the last outcome. It retains quality, subtitles and request spacing. Successful canaries recover the queue through normal policy; repeated server failures keep it held. This is an explicit request, not a guarantee that YouTube has lifted its limit."
     },
     {
       "title": "YouTube translated subtitles and sign-in",
@@ -1266,7 +1514,7 @@
     },
     {
       "title": "Localization through the agent bridge",
-      "body": "Use media.import_local with an exact local media_path, then poll its operation receipt and canonical import job. Inspect the resulting item with localization.inspect. localization.run starts or continues the existing staged Demucs voice-preserving dub/export pipeline for that item; it may pause for speaker references. Use localization.references.generate and inspect the generated candidates, then apply one exact item_id/speaker_key with localization.references.apply before continuing the run. Mutations require the bridge token, stable actor_id and unique operation_id, and are refused in Safe Mode. Admission acknowledges queued canonical work, not completed inference. held, queue_error and runner_start_error are explicit; global queue pause and unrelated queued jobs remain unchanged. Resume work only through a separately authorized queue action. Read canonical jobs and inspect actual captions, translated tracks, speaker references, mixed audio, MKV/subtitles and export ZIP before claiming success."
+      "body": "Use media.import_local with an exact local media_path, then poll its operation receipt and canonical import job. Inspect the resulting item with localization.inspect. Use the exact current item voice-plan backend select and Save plan semantic actions to choose the original managed backend; re-audit after each action and independently re-read localization.inspect voice_plan. tools.voice_readiness freshly reads original Kokoro/OpenVoice pack status without setup. localization.run starts or continues the existing staged Demucs voice-preserving dub/export pipeline for that item; it may pause for speaker references. Use localization.references.generate and inspect the generated candidates, then apply one exact item_id/speaker_key with localization.references.apply before continuing the run. Mutations require the bridge token, stable actor_id and unique operation_id, and are refused in Safe Mode. Admission acknowledges queued canonical work, not completed inference. held, queue_error and runner_start_error are explicit; global queue pause and unrelated queued jobs remain unchanged. Resume work only through a separately authorized queue action. Read canonical jobs and inspect actual captions, translated tracks, speaker references, mixed audio, MKV/subtitles and export ZIP before claiming success."
     }
   ]
 }

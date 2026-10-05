@@ -1,0 +1,98 @@
+{
+  "file_id": "WP0330-INSTALL-PROOF-REATTACHMENT-WORKFLOW-REFINEMENT-v3",
+  "file_kind": "refinement",
+  "updated_at": "2026-10-05",
+  "wp": "WP-0330",
+  "status": "READY_FOR_IMPLEMENTATION_SOURCE_REVIEW_ONLY",
+  "blocker": "Original owner reattachment retains installer-only guard in both explicit runner paths; localization/import therefore cannot execute. Explicit workflow mode is required; V1 did not unblock that runtime outcome.",
+  "research": {
+    "source": "d066e3cd88ea55068347671496faedc767f5d6b9",
+    "anchors": [
+      "product/desktop/src-tauri/src/lib.rs:18537-18555 runtime selection",
+      "product/desktop/src-tauri/src/install_proof.rs:190-233 baseline fresh root and exclusive marker",
+      "product/desktop/src-tauri/src/install_proof.rs:52-103 physical identity/descendant ownership validation",
+      "product/engine/src/paths.rs:234-244 isolated runtime",
+      "product/engine/src/paths.rs:853-882 tools/HuggingFace cache routing",
+      "product/engine/src/paths.rs:956-975 main/Cosy interpreter routing",
+      "product/desktop/src-tauri/src/agent_control.rs:26-30 and312-316 force installer-only runner for any owner; tools.install_pack/phase2 both call phase2_admission_ready"
+    ],
+    "primary_sources": [
+      {
+        "url": "https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-createfilew",
+        "verified": "2026-10-05",
+        "basis": "OPEN_EXISTING does not create/truncate. Share restrictions remain effective until handle close; incompatible read/write ownership fails with sharing violation. Directory handles require BACKUP_SEMANTICS; OPEN_REPARSE_POINT avoids implicit link following."
+      }
+    ],
+    "actual_receipts": [
+      ".local/proofVVRemaining/wp0330_guarded_install_d066e3c_02/headless_state.json: isolated runtime/root",
+      ".local/proofVVRemaining/wp0329_headless_workflow_08/headless_state.json: managed_offline7ea despite isolated user-data root"
+    ],
+    "rejected": [
+      "Regular headless assumed to select private runtime",
+      "Changing qualified runtime pointer or environment to bypass selection",
+      "Overwriting old owner PID/source claim",
+      "Calling later-candidate inference proof original install proof",
+      "Copying already privately installed runtime solely to obtain a new root"
+    ]
+  },
+  "predecessors": [
+    "All actual original install operations naturally terminal, independently read with original actor/session",
+    "Exact owned PID264504 Tauri-first graceful close and sidecar cleanup independently proven",
+    "New designated Core Update and exact installed executable provenance proven",
+    "Canonical private jobs/operations have no unfinished install/running work before reattachment"
+  ],
+  "red_team": [
+    "Active old owner or second reattachment: incompatible marker open refuses before SQLite or mutations; no process termination",
+    "Wrong nonce/hash/Temp child/native directory identity: refuse before SQLite/mutations",
+    "Protected runtime/operator root overlap, reparse/hardlink/nonregular descendants: retain existing full validation and refuse",
+    "Lost original-source evidence: require independent old/new launch lineage, never infer from marker PID",
+    "Old queued installer restarts: canonical closed preflight refuses unfinished work, then independently read new startup state before any explicit runner action",
+    "Caller timeout or failed new launch: retain owned lease/receipts truthfully, no force/retry or destructive marker cleanup"
+  ],
+  "acceptance": [
+    "Focused actual production-prepare tests and independent boundary proof: active owner and second owner, wrong SHA/root, protected overlap, ordinary fresh-root refusal, linked/physical-replacement negatives and marker/payload identity preservation. The candidate adds same-process prepare test; two-process closure, physical replacement and installed runtime cases remain external gates.",
+    "Reattachment creates/truncates neither original marker nor existing runtime files; exact original marker SHA unchanged",
+    "Exact installed boundary reports isolated user_data_root/runtime_root/generation_root at the same private physical fixture",
+    "Effective main and Cosy interpreters, model roots and HuggingFace cache resolve to existing uniquely owned private paths; no qualified source/operating profile fallback",
+    "Fresh owned launch/creation/exe/source receipts and canonical startup before semantic actions; no automatic runner or installation",
+    "Original and new provenance independently reconciled; fixture reuse is not installer completion proof",
+    "Required semantic missing-cache/reference negative and recovery/fallback outcomes proven through original controls and canonical jobs on the new candidate",
+    "Both explicit headless runner entrypoints use the same actual owned policy selection; workflow flag has no automatic runner, refuses original installer bridge commands and rejects unfinished original install jobs, Safe Mode and wrong root before original runner start."
+  ],
+  "product_changes": false,
+  "launches": 0,
+  "builds_or_tests": 0,
+  "selected_candidate_design": {
+    "reuse_existing_owner": "Explicit opt-in existing-root branch alongside original headless/install-proof/nonce. Caller supplies immutable original owner-marker SHA. Open marker READ|WRITE OPEN_EXISTING with FILE_SHARE_READ, hold for entire new session, verify hash plus original nonce/root/volume_serial/file_id against held physical directory. Do not modify marker. Reuse existing recursive no-reparse/no-hardlink checks and AppPaths::new routing.",
+    "ordinary_paths": "Without explicit reattachment opt-in, existing fresh-root refusal and regular installed-runtime routing remain unchanged.",
+    "provenance": "New launch receipt binds immutable ORIGINAL marker/launch/Update/terminal receipt hashes and ORIGINAL source/exe/creation separately from NEW source/exe/creation/PID. Marker itself has no source/exe/creation fields and cannot prove those. Independent native reconciliation must produce both provenance sets.",
+    "no_source_equivalence_claim": "Old install evidence remains bound to its original artifact. New inference/readiness/semantic-control evidence is bound to the new artifact using that historically installed private fixture. Reattachment does not retroactively validate installation under the new artifact.",
+    "selected_scope": "Root selected opt-in reuse of the existing InstallProof owner, including existing guarded original installer commands within explicit isolated owned install-proof authorization. No new runtime-only mode.",
+    "flag": "--agent-install-proof-owner-sha256 <original-marker-64hex>",
+    "workflow_flag": "--agent-install-proof-workflow, valid only with owner-SHA reattachment; original normal runner on private AppPaths only after explicit start; original guarded installer default unchanged; bridge installer commands refused",
+    "live_readback": "Original/current PID, marker SHA, exact physical root/nonce/volume_serial/file_id and workflow configuration only; not live readiness or admission permission. Independently inspect fresh Safe Mode and canonical pending work."
+  },
+  "candidate": {
+    "patch": ".local/wp0330_install_proof_reattach_candidate_03/candidate.patch",
+    "patch_sha256": "526aed54b087e905005cc2dfac176b9aaea68c74adf06ffeaf5f1c51e5d79892",
+    "manifest": ".local/wp0330_install_proof_reattach_candidate_03/manifest.json",
+    "product_applied": false,
+    "tests_run": false,
+    "runtime_proof": false,
+    "source_merge_required": [
+      "viewport and voice lib.rs changes",
+      "agentManual.json changes"
+    ]
+  },
+  "preserved_predecessor": "WP-0330_INSTALLED_PROOF_BATCH_v1_INSTALL_PROOF_REATTACHMENT_REFINEMENT.json",
+  "independent_root_review": {
+    "status": "SOURCE_ONLY_NO_BLOCKING_FINDING",
+    "patch_sha256": "526aed54b087e905005cc2dfac176b9aaea68c74adf06ffeaf5f1c51e5d79892",
+    "checks": [
+      "Opened exact retained marker/physical-root preparation and both original runner entrypoints",
+      "Explicit workflow permits original private runner only after fresh SafeMode/root/unfinished-installer checks; default installer-only guard retained",
+      "Original installer bridge admission refuses explicit workflow; ownership readback is configuration only"
+    ],
+    "runtime_proof": "NOT_EXECUTED; all original and added acceptance retained"
+  }
+}

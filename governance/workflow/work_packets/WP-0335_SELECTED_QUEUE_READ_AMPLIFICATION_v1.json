@@ -5,7 +5,7 @@
   "id": "WP-0335",
   "version": 1,
   "title": "Selected queue read amplification",
-  "status": "IN_PROGRESS",
+  "status": "NEEDS_VALIDATION",
   "owner": "Codex",
   "board": "../TASK_BOARD.md",
   "refinement": "WP-0335_SELECTED_QUEUE_READ_AMPLIFICATION_v1_REFINEMENT.md",
@@ -138,6 +138,26 @@
       "date": "2026-10-05",
       "state": "IN_PROGRESS",
       "note": "Normal installed WP-0324 evidence identified remaining SQL read contexts. Current primary-source research and read-only EQP retained; root review, bundled VFS/equivalence, implementation and installed proof remain pending. Update this WP and board before advancing."
+    },
+    {
+      "date": "2026-10-05",
+      "status": "NEEDS_VALIDATION",
+      "note": "Six owning bundled-engine tests PASS at d701a21, exact engine18 including selected regressions and guarded phase2 PASS. Activity VFS542878\u2192235678; selected empty/sparse old/new both orders >8x reduction with exact results. Independent review corrected cross-product fixture before run. Fresh managed installed normal30min/schema62/protected data/UI proof remains required; no timeout-resolved claim."
+    },
+    {
+      "date": "2026-10-05",
+      "status": "NEEDS_VALIDATION",
+      "note": "Six owning bundled-engine tests PASS at d701a21; engine18 including selected regressions and guarded phase2 PASS. Activity VFS542878 to235678; selected empty/sparse old/new both orders greater-than8x reduction with exact results. Independent review corrected cross-product fixture before run. Fresh managed installed normal30min/schema62/protected data/UI proof remains required; no timeout-resolved claim."
+    },
+    {
+      "date": "2026-10-05",
+      "status": "NEEDS_VALIDATION",
+      "note": "Final exact21 batch0e8c7c4c-98b8-4b1c-a18e-6769c993649d canonical attempt2 all21 succeeded; original attempt1 histories preserved. Final manifest7c068f24c837ffec364c15b40ec58a1970c47e1b4940c409b4f7e620997cb10d reconciles source/item/output paths and MKV streams:15 with embedded subtitles,6 without selected subtitles; no no-source-caption claim. Prior16 probe reuse proves current samefile/path and byte size only, not bytewise immutability; last5 freshly probed. Exact owned normal230588 d066/schema62 nativeclose PASS147ms after fresh all21/prior5 terminal, globalpause1/no running/grants; both bridge sidecars removed, no force/focus. Close terminal6e8637439bf99b495e2cd250fdc9fed2bd97bf5a4e6559105bdcf912e985cf53. Retain NEEDS_VALIDATION: root-opened paired Jobs visual/dump A07 remains unproven; this note does not replace A06 latency/read-context review, protected-data proof or independent final acceptance. No backup/Update performed by this close.",
+      "evidence": [
+        "product/desktop/build_target/tool_artifacts/wp_runs/WP-0335/20261005/exact_21_retry_d066e3c_01/final21_source_attempt_subtitle_manifest_01.json",
+        ".local/proofVVRemaining/wp0335_normal_close_230588_01/close_preflight.json",
+        ".local/proofVVRemaining/wp0335_normal_close_230588_01/native_close_terminal.json"
+      ]
     }
   ],
   "proof": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0335/summary.md"

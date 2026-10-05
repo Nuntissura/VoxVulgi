@@ -92,3 +92,16 @@ Out of scope (tracked in WP-0252):
 - Current status: NEEDS_VALIDATION
 - Kokoro offline-readiness fix was included in 0.1.81 per WP-0262; earlier waiting-for-rebuild note is historical. Remaining is full managed dub-job offline/cache/error proof, not only a standalone segment/import.
 - Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
+
+
+<topic id="installed-haerin-proof-20261005" status="partial-proof" wp="WP-0251" updated_at="2026-10-05">
+
+## Installed Haerin proof reconciliation - 2026-10-05
+
+- Status remains `NEEDS_VALIDATION`.
+- Installed Diagnostics reports neural/OpenVoice/default CosyVoice ready; the actual Haerin import-to-export workflow succeeded with ten canonical jobs. The dub used `cosyvoice`, not the original Kokoro/OpenVoice path, so it does not prove the original empty-cache/stale-marker failure fixed at the managed job boundary.
+- Remaining: independently reconcile the owning cache/warmup regression proof and exercise the original managed Kokoro/OpenVoice offline/cache/error scenario, including refusal of missing snapshot bytes despite a stale marker. Preserve the original cache and warmup requirements.
+- Inspected evidence: [installed workflow summary](../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0329/20261005/actual_localization_a0bb600/summary.md) and adjacent independent_validation.json, original voice report and canonical output records.
+- Evidence is bound to installed source `a0bb600141fffcfb1f7274189917af11b17e562a`, version `0.1.205`, executable SHA-256 `a197ae258a379124b8797f00d0559ec5496c8c6fcbe1b840379de0e036faad11`, and qualified runtime `runtime_7ea19cb688095cd14dfbc84e`. Reuse only for the inspected scenario and unchanged asserted inputs; this is not exact-source proof for later production `d066`, not subjective speech/translation quality, and not clean blocked-network final ISO acceptance. The final offline gate and its one unused acceptance attempt remain open.
+
+</topic>

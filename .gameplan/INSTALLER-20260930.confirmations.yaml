@@ -1,0 +1,10 @@
+kind: gameplan_confirmations
+confirmations:
+- {id: GP-003, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-09-30T15:53:34Z', note: 250abf736d845a4c9dd0b3f44f68b6655df3a677; preflight observed; core-only; prior green inputs unchanged}
+- {id: GP-005, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-09-30T15:53:34Z', note: 250abf736d845a4c9dd0b3f44f68b6655df3a677; preflight observed; core-only; prior green inputs unchanged}
+- {id: GP-006, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-09-30T15:53:34Z', note: 250abf736d845a4c9dd0b3f44f68b6655df3a677; preflight observed; core-only; prior green inputs unchanged}
+- {id: GP-008, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-09-30T15:53:34Z', note: 250abf736d845a4c9dd0b3f44f68b6655df3a677; preflight observed; core-only; prior green inputs unchanged}
+- {id: GP-009, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-09-30T15:53:34Z', note: 250abf736d845a4c9dd0b3f44f68b6655df3a677; preflight observed; core-only; prior green inputs unchanged}
+- {id: GP-010, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-09-30T15:53:34Z', note: 250abf736d845a4c9dd0b3f44f68b6655df3a677; preflight observed; core-only; prior green inputs unchanged}
+- {id: GP-011, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-09-30T15:53:34Z', note: 250abf736d845a4c9dd0b3f44f68b6655df3a677; preflight observed; core-only; prior green inputs unchanged}
+- {id: GP-012, head: 250abf736d845a4c9dd0b3f44f68b6655df3a677, at: '2026-09-30T15:53:34Z', note: 250abf736d845a4c9dd0b3f44f68b6655df3a677; preflight observed; core-only; prior green inputs unchanged}

@@ -313,3 +313,21 @@ const runningIconStyle: React.CSSProperties = {
 - Current status: NEEDS_VALIDATION
 - Base progress/headline/elapsed-time slice implemented and tested. Remaining base gate is real-install visual evidence under WP-0239. The explicitly carved-out byte/speed/ETA scope WP-0230b has no packet/board row and remains preserved as unresolved carried work in this packet; this reconciliation does not declare that extension delivered.
 - Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
+
+
+## Actual hidden installed boundary failure (2026-10-05)
+
+- Status remains `NEEDS_VALIDATION`; existing acceptance is unchanged.
+- Root opened `governance/snapshots/WP-0330_20261005_actual_install/force_retained_native_current_1791173322855.png` and `.local/proofVVRemaining/wp0330_actual_force_d066e3c_02/force_progress_1791173322371.json`. Exact original job `b0ac5736-cda5-4f90-aa7e-6390e094074a` remains running, attempt 1. At the paired observation the UI showed Kokoro running for 9m6s and OpenVoice/CosyVoice queued; the canonical journal had Kokoro/OpenVoice done and CosyVoice running. The installed hidden Diagnostics surface is stale.
+- Inspected `DiagnosticsPage.tsx` active polling uses `pageActive && phase2HasActive`; `usePageActivity` requires document visibility and window focus. Hidden quiet operation therefore disables journal polling while the local elapsed timer continues. The running row also lacks the contract's required status indicator, and elapsed text wraps within the status cell.
+- Remediation must retain original canonical journal/step counts and existing demand single-flight/generation guards, refresh active installation while Diagnostics is logically selected without requiring foreground focus, expose the existing status icon and keep elapsed tokens readable. New candidate app-boundary proof must compare successive actual UI states with that original journal. Source/test evidence alone cannot close this packet.
+- The native progress element exists in source. A blank html2canvas progress graphic is not evidence of a native progress-bar defect; no replacement is authorized from that observation alone.
+
+
+<topic id="wp0230-installed-active-history-refresh-red-20261005" wp="WP-0230" status="RED" updated_at="2026-10-05">
+
+Actual installed d066e3c/source0.1.205, owned guarded PID264504: original forced install `b0ac5736-cda5-4f90-aa7e-6390e094074a` was canonical running. After an explicit readonly Diagnostics refresh, the genuine screenshot showed Installing step6/8,5/8 count and Kokoro running33s; the elapsed value wrapped across lines. Later, without navigation/focus or another refresh, the retained screenshot still showed Kokoro running9m6s and OpenVoice/Cosy queued while the exact native journal showed Kokoro/OpenVoice done and Cosy running. The active history freshness acceptance is **RED**; a ticking elapsed counter does not prove the step state is current.
+
+Opened screenshots: `governance/snapshots/WP-0330_20261005_actual_install/force_actual_headline_1791172809702.png`, `force_actual_active_step_1791172810097.png`, `force_retained_native_current_1791173322855.png` (786×594). Paired audit/dump/snapshot receipts and exact canonical/latest-journal reread are under `.local/proofVVRemaining/wp0330_actual_force_d066e3c_02/force_retained_current_*_1791173322371.json` and `force_progress_1791173322371.json`. These snapshots requested no scroll_top; a blank/faint captured progress bar alone does not establish a native renderer defect. Never-started, cancelled/interrupted, successful and corrected live-poll cases remain unproven by this scoped run. Existing status and all criteria remain unchanged.
+
+</topic>

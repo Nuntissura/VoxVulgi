@@ -1,0 +1,181 @@
+{
+  "file_id": "WP0330-QUIET-VIEWPORT-REFINEMENT-v1",
+  "file_kind": "refinement",
+  "updated_at": "2026-10-05",
+  "wp": "WP-0330",
+  "status": "READY_FOR_IMPLEMENTATION",
+  "authority_changed": true,
+  "operator_scope": "User authorized all repairs and needed quiet tool expansion; root assigned proposal for A07 useful viewport, not a WP0324 gate. No application/build while observer runs.",
+  "canonical_contracts": [
+    "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1.json",
+    "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json"
+  ],
+  "reported_failure": {
+    "native_identity": {
+      "pid": 230588,
+      "creation_ms": 1791166404861,
+      "source": "d066e3cd88ea55068347671496faedc767f5d6b9"
+    },
+    "native_restore_size": [
+      800,
+      600
+    ],
+    "native_dpi": 96,
+    "css_viewport": [
+      400,
+      300
+    ],
+    "visible_artifact": "governance/snapshots/WP-0324_20261005_normal_io_d066e3c_01/independent_jobs_before_selection_1791166846859.png",
+    "verdict": "Navigation overlap/clipped at actual400x300; exactbounds/zoom/rasterization cause UNVERIFIED. No remedy selected before COMreadback."
+  },
+  "scope": [
+    "Token/actor/expectedPID-bound main WebView readback, Windows only, background minimized/headless hidden",
+    "Explicit operation-id embedded-bounds setter only, widths640..2560 heights480..1920 in current BoundsMode units; <=8million derived physicalpixels",
+    "Preserve nativewindow state and geometry,zoom/rasterization/preferences; no foreground API or native input",
+    "Refuse expired queued setter, keep uncertain in-flight native call timeout truthful; bounded2second UI wait",
+    "Additive frontenddump DPR/visualViewport.scale for independent CSSafterreadback",
+    "No global MUTATION/agentstate lock held during UI wait; existingreceiptregistryfour-flight bounds retained"
+  ],
+  "non_goals": [
+    "No automatic viewport change or zoomreset",
+    "No nativewindow resize/restore/focus or ordinary visibleapp mode",
+    "No queue/DB/runtime/download/installer policy changes",
+    "No new WP0324 acceptance gate",
+    "No claimed failure remediation until actual COM plus CSS and screenshot proof"
+  ],
+  "research": {
+    "sources": [
+      "https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2controller",
+      "https://learn.microsoft.com/en-us/microsoft-edge/webview2/reference/win32/icorewebview2controller3",
+      "pinnedtauri2.10.2/src/webview/mod.rs:181,1491,1650",
+      "pinnedtauri2.10.2/src/webview/webview_window.rs:1387,2291",
+      "pinnedwebview2-com-sys0.38.2/src/bindings.rs:8939,8951,8963,9866,9934",
+      "pinnedwry0.54.2/src/webview2/mod.rs:1212"
+    ],
+    "patterns": [
+      "Public controller getters viaTauri UIthread with_webview, HRESULTUnknown rather than guessedscale",
+      "Separate embeddedview bounds and nativewindow bounds; docs RAW/RASTER mode semantics",
+      "Existingtoken/actor/operationreceipt flow reused, no arbitraryscript/label/nativehandle input"
+    ],
+    "reuse": [
+      "existingagent_controlcommand validation,tokenauthentication,4operationregistrybound andreceipts",
+      "existingagent snapshot/dump after mutation",
+      "alreadylocked webview2-com0.38.2/windows-core0.61.2 promoted todirectWindowsdependencies only"
+    ],
+    "rejected": [
+      "Restore/show/nativewindowresize",
+      "Automatic zoom/raster reset",
+      "Assuming400x300 caused by DPI200%",
+      "Changing startup geometry without livecontroller readback",
+      "ClaimingCSSviewport or readability fromsuccessfulSetBounds"
+    ],
+    "selected": "Generic readback and explicit embedded-only diagnosticsetter. Actualremedy remains pendingreadback.",
+    "risks": [
+      "UIqueue stalls/nativecalls canoutlivecaller timeout",
+      "WebViewBoundsMode/raster semantics canconfuseCSSdimensions",
+      "User may restorewindow during queuedrequest",
+      "Foregroundprocess canchange externally during request",
+      "Direct transitive dependency promotion requiresroot Cargo.lock graph check"
+    ],
+    "controls": [
+      "Deadline checked before CAS Queued-to-Admitted competes with timeout Queued-to-Cancelled; admitted operation may begin later and outcome remains unknown",
+      "Bounds mode/scale/zoomreadback required; frontendfreshdump/snapshot mandatory forusefulness",
+      "Recheckquietstate onUIthread beforeSetBounds; rejectnonquietmode",
+      "ObserveforegroundPID before/after; nofocuscalls, do notinfercausalityfromexternalchange",
+      "Exactalreadylocked versions/packagechecksums unchanged; lockdelta only desktop directdependency list"
+    ]
+  },
+  "red_team": [
+    "No token/nativePID mismatch canreachviewporthelper throughcommandroute",
+    "Unsupportedcontroller3 field becomesNull+HRESULT; setterrefusesunknown values",
+    "NaN/negative/unknownmode/overflow/pixelcap refuses before mutation",
+    "Queued cancellation CAS winning prevents invocation; admission CAS winning may invoke later and remainsUnknownuntil reinspection",
+    "Allbefore/after nativegeometry/scaling mustmatch and bounds mustreadbackrequested; CSS/readability stillNOT_PROVEN"
+  ],
+  "validation_plan": [
+    "agent_viewport::tests::wp0330_viewport_policy_requires_hidden_or_minimized_mode",
+    "agent_viewport::tests::wp0330_viewport_bounds_reject_unknown_scaling_and_pixel_overflow",
+    "agent_viewport::tests::wp0330_viewport_admission_timeout_interleavings",
+    "agent_control::tests::wp0330_viewport_catalog_is_process_bound_and_rejects_arbitrary_inputs",
+    "product/desktop/tests/agentManual.test.ts",
+    "rootcentralcompile withunchangedversion/changelog andlockedgraph",
+    "owninghidden/minimized exactappboundary token/PID/badmode/range/deadline negatives",
+    "actualcontrollerinspect\u2192deliberateboundsset chosenfromreadback\u2192freshdump/snapshot; nativeiconic/hidden andforegroundsame,zoom/rasterizationpreserved; independentlyvisuallyinspectusefulviewport"
+  ],
+  "files": [
+    "product/desktop/src-tauri/src/lib.rs",
+    "product/desktop/src-tauri/src/agent_control.rs",
+    "product/desktop/src-tauri/Cargo.toml",
+    "product/desktop/src/lib/agentManual.json",
+    "product/desktop/src/App.tsx",
+    "product/desktop/tests/agentManual.test.ts",
+    "product/desktop/src-tauri/src/agent_viewport.rs",
+    "product/desktop/src-tauri/Cargo.lock"
+  ],
+  "baseline_head": "d066e3cd88ea55068347671496faedc767f5d6b9",
+  "patch_sha256": "e9bca25eb0bccf98b2e33e2a5514f46cb65c956e99a6c1d73ec8289bef1e395f",
+  "authorization_basis": "Operator authorized needed quiet tool expansion in the current autonomous session; implementation remains pending completion of frozen d066 runtime proofs",
+  "independent_source_review": {
+    "patch_sha256": "e9bca25eb0bccf98b2e33e2a5514f46cb65c956e99a6c1d73ec8289bef1e395f",
+    "manifest_sha256": "ea945acf948bb99ae8c0912992b82502d97878b641256ae4a620ebf49741d15c",
+    "outcome": "No remaining blocking source finding after atomic admission remediation; not compiled or runtime-proven"
+  },
+  "acceptance": [
+    {
+      "id": "WP0330-VIEW-001",
+      "requirement": "Authenticate each command using the current process bridge token"
+    },
+    {
+      "id": "WP0330-VIEW-002",
+      "requirement": "Require a stable actor ID and exact current expected PID"
+    },
+    {
+      "id": "WP0330-VIEW-003",
+      "requirement": "Restrict both commands to the main WebView in minimized background or hidden headless mode"
+    },
+    {
+      "id": "WP0330-VIEW-004",
+      "requirement": "Inspect actual controller bounds, zoom, rasterization and bounds mode before choosing a resize"
+    },
+    {
+      "id": "WP0330-VIEW-005",
+      "requirement": "Report unsupported controller fields as unknown with HRESULT"
+    },
+    {
+      "id": "WP0330-VIEW-006",
+      "requirement": "Change only embedded bounds in an explicit operation-ID request"
+    },
+    {
+      "id": "WP0330-VIEW-007",
+      "requirement": "Preserve native window geometry and state"
+    },
+    {
+      "id": "WP0330-VIEW-008",
+      "requirement": "Preserve zoom, rasterization and user preferences"
+    },
+    {
+      "id": "WP0330-VIEW-009",
+      "requirement": "Enforce bounded dimensions and the eight-million physical-pixel cap"
+    },
+    {
+      "id": "WP0330-VIEW-010",
+      "requirement": "Atomically arbitrate queued cancellation against native-operation admission"
+    },
+    {
+      "id": "WP0330-VIEW-011",
+      "requirement": "Report admitted timeout outcomes as unknown and require reinspection"
+    },
+    {
+      "id": "WP0330-VIEW-012",
+      "requirement": "Release agent-state and global mutation locks before waiting for the UI thread"
+    },
+    {
+      "id": "WP0330-VIEW-013",
+      "requirement": "Verify actual controller readback after mutation"
+    },
+    {
+      "id": "WP0330-VIEW-014",
+      "requirement": "Capture and directly inspect fresh paired CSS dump and snapshot before claiming useful layout"
+    }
+  ]
+}

@@ -61,6 +61,36 @@
     {
       "date": "2026-10-05",
       "note": "Applied explicit fresh native-Temp/nonce/exclusive-owner install-proof startup and guarded bridge tools.install_pack/tools.install_phase2 to invoke original handlers and original force/journal worker in an isolated mutable root. No automatic unpause or installed-runtime generation writes. Compatible focused validation batched with WP0335; source implementation alone closes no existing scenario."
+    },
+    {
+      "date": "2026-10-05",
+      "note": "Actual minimized native800x600/CSS400x300 Jobs snapshot clips navigation/state. Current bridge has no quiet geometry readback/setter. Operator-authorized minimum process-bound controller inspection and explicit embedded-only geometry tool is refined and independently source-reviewed after atomic cancellation/admission race correction. Implementation/tests/packaged proof pending; frozen d066 observation/install batch remains unchanged. No viewport fix or WP closure claimed."
+    },
+    {
+      "date": "2026-10-05",
+      "note": "Fresh canonical rows and owning packet headings agree:33 NEEDS_VALIDATION/10 IN_PROGRESS/9 BLOCKED. Historical33/66scenario inventory preserved;0169/0324 nowDONE,0329/0335 newNV. Corrected board count10. Inventory is not execution proof; current batch and external/native/offline dependencies retained."
+    },
+    {
+      "date": "2026-10-05",
+      "status": "IN_PROGRESS",
+      "note": "Root-reviewed V3 original semantic voice controls refinement promoted source-only: exact item-bound backend select/Save plan, original readiness/preflight/dub controls, fresh quiet SafeMode admission, single original pack status try/busy and explicit poison unknown/refusal. Original WP0251/WP0156 scope, acceptance, source bindings, research and red-team requirements retained. READY_FOR_IMPLEMENTATION_SOURCE_REVIEW_ONLY; NOT_EXECUTED. No product apply while original install batch remains frozen; installed controls/negative recovery/fallback/current-item UI proof required before any completion claim.",
+      "refinement": "WP-0330_INSTALLED_PROOF_BATCH_v1_SEMANTIC_VOICE_CONTROLS_REFINEMENT.json",
+      "promoted_source_sha256": "99be1a75e4102b7e72a744e0d94988647b89016cbad04795f7cdea34d289fb19"
+    },
+    {
+      "date": "2026-10-05",
+      "note": "Root inspected exact opt-in retained install-proof marker/lease/physical-identity candidate. Reuse private fixture only after original owned close and exact new Update/launch lineage; original marker unchanged, original/new PID provenance separate. Source-only refinement promoted to unblock later semantic cache/reference tests without copying qualified bytes. No product apply, build, launch, proof replacement or DONE claim.",
+      "refinement": "WP-0330_INSTALLED_PROOF_BATCH_v1_INSTALL_PROOF_REATTACHMENT_REFINEMENT.json"
+    },
+    {
+      "date": "2026-10-05",
+      "note": "Preserved earlier retained-owner lease scope; V3 additionally addresses verified installer-only runner refusal of localization/import. Explicit private workflow remains opt-in, rejects installer admission, validates canonical unfinished installation and SafeMode before original runner. Original/new provenance remains separate. Source review only; no apply/build/runtime completion.",
+      "refinement": "WP-0330_INSTALLED_PROOF_BATCH_v1_INSTALL_PROOF_REATTACHMENT_WORKFLOW_REFINEMENT_v3.json"
+    },
+    {
+      "date": "2026-10-05",
+      "note": "Existing bridge readiness covered only main interpreter packs and omitted actual selected private Cosy/model/cache paths. V4 preserves prior controls and adds original selected Cosy status plus authenticated private workflow-only configuration path readback. Independent native child execution and genuine pipeline/cache outcomes remain required; no readiness from path presence, no product apply/build/runtime completion.",
+      "refinement": "WP-0330_INSTALLED_PROOF_BATCH_v1_SEMANTIC_VOICE_CONTROLS_REFINEMENT_v4.json"
     }
   ],
   "session_review_20261003": {
@@ -99,5 +129,13 @@
         "text": "Retain explicit dependency/native-interaction/offline-environment gaps per underlying WP; no DONE from inventory or shared build alone."
       }
     ]
-  }
+  },
+  "quiet_viewport_refinement": "WP-0330_INSTALLED_PROOF_BATCH_v1_QUIET_VIEWPORT_REFINEMENT.json",
+  "current_inventory": "WP-0330_INSTALLED_PROOF_BATCH_v1_CURRENT_INVENTORY_20261005.json",
+  "refinement_contracts": [
+    "WP-0330_INSTALLED_PROOF_BATCH_v1_SEMANTIC_VOICE_CONTROLS_REFINEMENT.json",
+    "WP-0330_INSTALLED_PROOF_BATCH_v1_INSTALL_PROOF_REATTACHMENT_REFINEMENT.json",
+    "WP-0330_INSTALLED_PROOF_BATCH_v1_INSTALL_PROOF_REATTACHMENT_WORKFLOW_REFINEMENT_v3.json",
+    "WP-0330_INSTALLED_PROOF_BATCH_v1_SEMANTIC_VOICE_CONTROLS_REFINEMENT_v4.json"
+  ]
 }

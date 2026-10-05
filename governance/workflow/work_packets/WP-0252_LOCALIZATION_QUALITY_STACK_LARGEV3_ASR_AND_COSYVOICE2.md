@@ -86,3 +86,16 @@ Out of scope (carried forward — see Remaining):
 - Current status: IN_PROGRESS
 - WP-0262 corrects false historical 0.1.68/0.1.69 shipping claims: first actual inclusion was 0.1.81. Large-v3 and CosyVoice runtime/provisioning slices exist. Preserved remaining work is hashed provisioning, wetext offline pre-cache and clean-machine full managed dubbed deliverable proof, reusing WP-0316 current runtime authority; new outputs follow WP-0306 MKV policy, with historical MP4 inputs preserved.
 - Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
+
+
+<topic id="installed-haerin-proof-20261005" status="partial-proof" wp="WP-0252" updated_at="2026-10-05">
+
+## Installed Haerin proof reconciliation - 2026-10-05
+
+- Status remains `IN_PROGRESS`.
+- The actual installed Haerin workflow used `whispercpp-large-v3-q5_0`; CosyVoice CPU job `da18f604-2531-4697-a865-d392e2cea496` succeeded with `clone_preserved`, one converted segment and zero fallback/standard-TTS segments. Original report inspection confirms the CPU float32 path. Demucs separation, mix, MKV, QC and canonical export all succeeded; the managed full-output gap is now proven for this exact case.
+- Remaining: independently reconcile hashed provisioning and complete offline normalizer/model assets, wetext zero-egress behavior and the clean blocked-network managed install-to-export gate under WP-0316/WP-0329. Qualification/import/metadata proof and successful already-provisioned workflow do not substitute for this gate. No subjective Korean/English quality or source-voice similarity verdict is claimed.
+- Inspected evidence: [installed workflow summary](../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0329/20261005/actual_localization_a0bb600/summary.md) and adjacent independent_validation.json, original voice report and canonical output records.
+- Evidence is bound to installed source `a0bb600141fffcfb1f7274189917af11b17e562a`, version `0.1.205`, executable SHA-256 `a197ae258a379124b8797f00d0559ec5496c8c6fcbe1b840379de0e036faad11`, and qualified runtime `runtime_7ea19cb688095cd14dfbc84e`. Reuse only for the inspected scenario and unchanged asserted inputs; this is not exact-source proof for later production `d066`, not subjective speech/translation quality, and not clean blocked-network final ISO acceptance. The final offline gate and its one unused acceptance attempt remain open.
+
+</topic>

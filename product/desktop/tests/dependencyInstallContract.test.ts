@@ -4,6 +4,23 @@ import { join } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
 
+test("active Phase2 progress refresh uses logical visibility and generation-owned demand in quiet sessions", () => {
+  const source = readRepoFile("src", "pages", "DiagnosticsPage.tsx");
+  const start = source.indexOf("  usePollingLoop(");
+  const end = source.indexOf("  async function installDemo()", start);
+  const poll = source.slice(start, end);
+  assert.match(poll, /\(\) => loadPhase2Section\(true\)/);
+  assert.match(poll, /enabled: visible && phase2HasActive/);
+  assert.doesNotMatch(poll, /pageActive|usePageActivity|hasFocus|setPhase2Latest|refresh\(/);
+  const loader = source.slice(source.indexOf("  const loadPhase2Section"), source.indexOf("  const loadStorageSection"));
+  assert.match(loader, /requestDiagnosticGroup\("diagnostics.phase2"/);
+  assert.match(loader, /commitDemandResult/);
+  assert.match(loader, /DemandSupersededError/);
+  const css = readRepoFile("src", "pages", "DiagnosticsPage.css");
+  assert.match(css, /\.diagnostics-page \.phase2-elapsed\s*\{[^}]*white-space: nowrap;[^}]*overflow-wrap: normal;/);
+  assert.match(source, /className="phase2-elapsed"/);
+});
+
 const root = fileURLToPath(new URL("..", import.meta.url));
 
 function readRepoFile(...parts: string[]): string {

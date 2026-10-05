@@ -1,0 +1,73 @@
+kind: gameplan_confirmations
+confirmations:
+- {id: GP-010, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-02T23:57:44Z', note: Authority read; board inspected; no half-written records at resume}
+- {id: GP-011, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-02T23:57:44Z', note: Authority read; board inspected; no half-written records at resume}
+- {id: GP-012, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-02T23:57:44Z', note: Authority read; board inspected; no half-written records at resume}
+- {id: GP-003, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-03T00:01:18Z', note: HEAD977851b inspected; no Cargo workers; long paths enabled; canonical cache and focused changed-input checks}
+- {id: GP-005, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-03T00:01:18Z', note: HEAD977851b inspected; no Cargo workers; long paths enabled; canonical cache and focused changed-input checks}
+- {id: GP-006, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-03T00:01:18Z', note: HEAD977851b inspected; no Cargo workers; long paths enabled; canonical cache and focused changed-input checks}
+- {id: GP-008, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-03T00:01:18Z', note: HEAD977851b inspected; no Cargo workers; long paths enabled; canonical cache and focused changed-input checks}
+- {id: GP-009, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-03T00:01:18Z', note: HEAD977851b inspected; no Cargo workers; long paths enabled; canonical cache and focused changed-input checks}
+- {id: GP-013, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-03T00:01:18Z', note: HEAD977851b inspected; no Cargo workers; long paths enabled; canonical cache and focused changed-input checks}
+- {id: GP-014, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-03T00:04:34Z', note: Agent repaired UTF8 and replaced AggregateError; root inspected helper}
+- {id: GP-015, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-03T00:10:03Z', note: pwsh matches PhaseQ requirement; reverse mapped diagnostics results preserve types}
+- {id: GP-016, head: 977851beb890867fad332fa0126b116e29237186, at: '2026-10-03T00:12:47Z', note: Use canonical-field projection; no repeated full database backup}
+- {id: GP-003, head: fa37ea545bf9b6154bbc98805f8649cdb51f7e8b, at: '2026-10-03T00:46:52Z', note: fa37ea5; tests green; closed DB backup verified; canonical cache; no compiler; source frozen}
+- {id: GP-005, head: fa37ea545bf9b6154bbc98805f8649cdb51f7e8b, at: '2026-10-03T00:46:52Z', note: fa37ea5; tests green; closed DB backup verified; canonical cache; no compiler; source frozen}
+- {id: GP-006, head: fa37ea545bf9b6154bbc98805f8649cdb51f7e8b, at: '2026-10-03T00:46:52Z', note: fa37ea5; tests green; closed DB backup verified; canonical cache; no compiler; source frozen}
+- {id: GP-008, head: fa37ea545bf9b6154bbc98805f8649cdb51f7e8b, at: '2026-10-03T00:46:52Z', note: fa37ea5; tests green; closed DB backup verified; canonical cache; no compiler; source frozen}
+- {id: GP-009, head: fa37ea545bf9b6154bbc98805f8649cdb51f7e8b, at: '2026-10-03T00:46:52Z', note: fa37ea5; tests green; closed DB backup verified; canonical cache; no compiler; source frozen}
+- {id: GP-010, head: fa37ea545bf9b6154bbc98805f8649cdb51f7e8b, at: '2026-10-03T00:46:52Z', note: fa37ea5; tests green; closed DB backup verified; canonical cache; no compiler; source frozen}
+- {id: GP-011, head: fa37ea545bf9b6154bbc98805f8649cdb51f7e8b, at: '2026-10-03T00:46:52Z', note: fa37ea5; tests green; closed DB backup verified; canonical cache; no compiler; source frozen}
+- {id: GP-012, head: fa37ea545bf9b6154bbc98805f8649cdb51f7e8b, at: '2026-10-03T00:46:52Z', note: fa37ea5; tests green; closed DB backup verified; canonical cache; no compiler; source frozen}
+- {id: GP-013, head: fa37ea545bf9b6154bbc98805f8649cdb51f7e8b, at: '2026-10-03T00:46:52Z', note: fa37ea5; tests green; closed DB backup verified; canonical cache; no compiler; source frozen}
+- {id: GP-014, head: fa37ea545bf9b6154bbc98805f8649cdb51f7e8b, at: '2026-10-03T00:46:52Z', note: fa37ea5; tests green; closed DB backup verified; canonical cache; no compiler; source frozen}
+- {id: GP-015, head: fa37ea545bf9b6154bbc98805f8649cdb51f7e8b, at: '2026-10-03T00:46:52Z', note: fa37ea5; tests green; closed DB backup verified; canonical cache; no compiler; source frozen}
+- {id: GP-016, head: fa37ea545bf9b6154bbc98805f8649cdb51f7e8b, at: '2026-10-03T00:46:52Z', note: fa37ea5; tests green; closed DB backup verified; canonical cache; no compiler; source frozen}
+- {id: GP-018, head: fa37ea545bf9b6154bbc98805f8649cdb51f7e8b, at: '2026-10-03T00:47:22Z', note: Build WP IDs0323 0327 0328 0329 0331 assigned; desktop args verified}
+- {id: GP-020, head: fa37ea545bf9b6154bbc98805f8649cdb51f7e8b, at: '2026-10-03T00:52:24Z', note: Parserfinding removed using pinned ShellExecuteExW opener; allagentproductsource frozen}
+- {id: GP-003, head: f53712c8051bc29a872e2f1279dfd87849f12f43, at: '2026-10-03T00:54:33Z', note: f53712c pushed; focused proofs green; exact diff frozen; canonical cache; no compiler}
+- {id: GP-005, head: f53712c8051bc29a872e2f1279dfd87849f12f43, at: '2026-10-03T00:54:33Z', note: f53712c pushed; focused proofs green; exact diff frozen; canonical cache; no compiler}
+- {id: GP-006, head: f53712c8051bc29a872e2f1279dfd87849f12f43, at: '2026-10-03T00:54:33Z', note: f53712c pushed; focused proofs green; exact diff frozen; canonical cache; no compiler}
+- {id: GP-008, head: f53712c8051bc29a872e2f1279dfd87849f12f43, at: '2026-10-03T00:54:33Z', note: f53712c pushed; focused proofs green; exact diff frozen; canonical cache; no compiler}
+- {id: GP-009, head: f53712c8051bc29a872e2f1279dfd87849f12f43, at: '2026-10-03T00:54:33Z', note: f53712c pushed; focused proofs green; exact diff frozen; canonical cache; no compiler}
+- {id: GP-010, head: f53712c8051bc29a872e2f1279dfd87849f12f43, at: '2026-10-03T00:54:33Z', note: f53712c pushed; focused proofs green; exact diff frozen; canonical cache; no compiler}
+- {id: GP-011, head: f53712c8051bc29a872e2f1279dfd87849f12f43, at: '2026-10-03T00:54:33Z', note: f53712c pushed; focused proofs green; exact diff frozen; canonical cache; no compiler}
+- {id: GP-012, head: f53712c8051bc29a872e2f1279dfd87849f12f43, at: '2026-10-03T00:54:33Z', note: f53712c pushed; focused proofs green; exact diff frozen; canonical cache; no compiler}
+- {id: GP-013, head: f53712c8051bc29a872e2f1279dfd87849f12f43, at: '2026-10-03T00:54:33Z', note: f53712c pushed; focused proofs green; exact diff frozen; canonical cache; no compiler}
+- {id: GP-014, head: f53712c8051bc29a872e2f1279dfd87849f12f43, at: '2026-10-03T00:54:33Z', note: f53712c pushed; focused proofs green; exact diff frozen; canonical cache; no compiler}
+- {id: GP-015, head: f53712c8051bc29a872e2f1279dfd87849f12f43, at: '2026-10-03T00:54:33Z', note: f53712c pushed; focused proofs green; exact diff frozen; canonical cache; no compiler}
+- {id: GP-016, head: f53712c8051bc29a872e2f1279dfd87849f12f43, at: '2026-10-03T00:54:33Z', note: f53712c pushed; focused proofs green; exact diff frozen; canonical cache; no compiler}
+- {id: GP-018, head: f53712c8051bc29a872e2f1279dfd87849f12f43, at: '2026-10-03T00:54:33Z', note: f53712c pushed; focused proofs green; exact diff frozen; canonical cache; no compiler}
+- {id: GP-020, head: f53712c8051bc29a872e2f1279dfd87849f12f43, at: '2026-10-03T00:54:33Z', note: f53712c pushed; focused proofs green; exact diff frozen; canonical cache; no compiler}
+- {id: GP-005, head: 062a5a79f4b06ce28616c6970092a21ccede20c8, at: '2026-10-03T01:09:26Z', note: 062a5a7 pushed; snapshot finding fixed; tsc17tests green; frozen source; no compiler}
+- {id: GP-008, head: 062a5a79f4b06ce28616c6970092a21ccede20c8, at: '2026-10-03T01:09:26Z', note: 062a5a7 pushed; snapshot finding fixed; tsc17tests green; frozen source; no compiler}
+- {id: GP-010, head: 062a5a79f4b06ce28616c6970092a21ccede20c8, at: '2026-10-03T01:09:26Z', note: 062a5a7 pushed; snapshot finding fixed; tsc17tests green; frozen source; no compiler}
+- {id: GP-011, head: 062a5a79f4b06ce28616c6970092a21ccede20c8, at: '2026-10-03T01:09:26Z', note: 062a5a7 pushed; snapshot finding fixed; tsc17tests green; frozen source; no compiler}
+- {id: GP-012, head: 062a5a79f4b06ce28616c6970092a21ccede20c8, at: '2026-10-03T01:09:26Z', note: 062a5a7 pushed; snapshot finding fixed; tsc17tests green; frozen source; no compiler}
+- {id: GP-014, head: 062a5a79f4b06ce28616c6970092a21ccede20c8, at: '2026-10-03T01:09:26Z', note: 062a5a7 pushed; snapshot finding fixed; tsc17tests green; frozen source; no compiler}
+- {id: GP-015, head: 062a5a79f4b06ce28616c6970092a21ccede20c8, at: '2026-10-03T01:09:26Z', note: 062a5a7 pushed; snapshot finding fixed; tsc17tests green; frozen source; no compiler}
+- {id: GP-016, head: 062a5a79f4b06ce28616c6970092a21ccede20c8, at: '2026-10-03T01:09:26Z', note: 062a5a7 pushed; snapshot finding fixed; tsc17tests green; frozen source; no compiler}
+- {id: GP-018, head: 062a5a79f4b06ce28616c6970092a21ccede20c8, at: '2026-10-03T01:09:26Z', note: 062a5a7 pushed; snapshot finding fixed; tsc17tests green; frozen source; no compiler}
+- {id: GP-022, head: 062a5a79f4b06ce28616c6970092a21ccede20c8, at: '2026-10-03T01:22:48Z', note: Only186868 Current candidate owned by diagnostics agent; installed exe no process}
+- {id: GP-023, head: 062a5a79f4b06ce28616c6970092a21ccede20c8, at: '2026-10-03T01:25:03Z', note: lib.rs18420 CLI safe-mode gates background; background minimizes withoutfocus; headlessrequiresisolation}
+- {id: GP-024, head: 062a5a79f4b06ce28616c6970092a21ccede20c8, at: '2026-10-03T01:25:15Z', note: lib.rs18420 CLI safe-mode gates background; background minimizes withoutfocus; headlessrequiresisolation}
+- {id: GP-003, head: 062a5a79f4b06ce28616c6970092a21ccede20c8, at: '2026-10-03T01:42:33Z', note: Frozen startup/root-capacity diff inspected; independent reviews pass; no compiler; canonical cache}
+- {id: GP-006, head: 062a5a79f4b06ce28616c6970092a21ccede20c8, at: '2026-10-03T01:42:33Z', note: Frozen startup/root-capacity diff inspected; independent reviews pass; no compiler; canonical cache}
+- {id: GP-009, head: 062a5a79f4b06ce28616c6970092a21ccede20c8, at: '2026-10-03T01:42:33Z', note: Frozen startup/root-capacity diff inspected; independent reviews pass; no compiler; canonical cache}
+- {id: GP-013, head: 062a5a79f4b06ce28616c6970092a21ccede20c8, at: '2026-10-03T01:42:33Z', note: Frozen startup/root-capacity diff inspected; independent reviews pass; no compiler; canonical cache}
+- {id: GP-020, head: 062a5a79f4b06ce28616c6970092a21ccede20c8, at: '2026-10-03T01:42:33Z', note: Frozen startup/root-capacity diff inspected; independent reviews pass; no compiler; canonical cache}
+- {id: GP-003, head: 9f8a13796a9c33a2fbe044eba12b3550e0b3427e, at: '2026-10-03T01:47:53Z', note: 9f8a137 pushed; frozen checks23+tsc pass; reviews closed; canonical cache; retained205}
+- {id: GP-005, head: 9f8a13796a9c33a2fbe044eba12b3550e0b3427e, at: '2026-10-03T01:47:53Z', note: 9f8a137 pushed; frozen checks23+tsc pass; reviews closed; canonical cache; retained205}
+- {id: GP-006, head: 9f8a13796a9c33a2fbe044eba12b3550e0b3427e, at: '2026-10-03T01:47:53Z', note: 9f8a137 pushed; frozen checks23+tsc pass; reviews closed; canonical cache; retained205}
+- {id: GP-008, head: 9f8a13796a9c33a2fbe044eba12b3550e0b3427e, at: '2026-10-03T01:47:53Z', note: 9f8a137 pushed; frozen checks23+tsc pass; reviews closed; canonical cache; retained205}
+- {id: GP-009, head: 9f8a13796a9c33a2fbe044eba12b3550e0b3427e, at: '2026-10-03T01:47:53Z', note: 9f8a137 pushed; frozen checks23+tsc pass; reviews closed; canonical cache; retained205}
+- {id: GP-013, head: 9f8a13796a9c33a2fbe044eba12b3550e0b3427e, at: '2026-10-03T01:47:53Z', note: 9f8a137 pushed; frozen checks23+tsc pass; reviews closed; canonical cache; retained205}
+- {id: GP-014, head: 9f8a13796a9c33a2fbe044eba12b3550e0b3427e, at: '2026-10-03T01:47:53Z', note: 9f8a137 pushed; frozen checks23+tsc pass; reviews closed; canonical cache; retained205}
+- {id: GP-015, head: 9f8a13796a9c33a2fbe044eba12b3550e0b3427e, at: '2026-10-03T01:47:53Z', note: 9f8a137 pushed; frozen checks23+tsc pass; reviews closed; canonical cache; retained205}
+- {id: GP-016, head: 9f8a13796a9c33a2fbe044eba12b3550e0b3427e, at: '2026-10-03T01:47:53Z', note: 9f8a137 pushed; frozen checks23+tsc pass; reviews closed; canonical cache; retained205}
+- {id: GP-018, head: 9f8a13796a9c33a2fbe044eba12b3550e0b3427e, at: '2026-10-03T01:47:53Z', note: 9f8a137 pushed; frozen checks23+tsc pass; reviews closed; canonical cache; retained205}
+- {id: GP-020, head: 9f8a13796a9c33a2fbe044eba12b3550e0b3427e, at: '2026-10-03T01:47:53Z', note: 9f8a137 pushed; frozen checks23+tsc pass; reviews closed; canonical cache; retained205}
+- {id: GP-022, head: 9f8a13796a9c33a2fbe044eba12b3550e0b3427e, at: '2026-10-03T01:47:53Z', note: 9f8a137 pushed; frozen checks23+tsc pass; reviews closed; canonical cache; retained205}
+- {id: GP-023, head: 9f8a13796a9c33a2fbe044eba12b3550e0b3427e, at: '2026-10-03T01:47:53Z', note: 9f8a137 pushed; frozen checks23+tsc pass; reviews closed; canonical cache; retained205}
+- {id: GP-024, head: 9f8a13796a9c33a2fbe044eba12b3550e0b3427e, at: '2026-10-03T01:47:53Z', note: 9f8a137 pushed; frozen checks23+tsc pass; reviews closed; canonical cache; retained205}

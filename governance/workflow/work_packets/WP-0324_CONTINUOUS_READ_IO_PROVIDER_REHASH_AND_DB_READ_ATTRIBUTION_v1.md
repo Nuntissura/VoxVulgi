@@ -1,7 +1,7 @@
 ---
 file_id: WP-0324
 file_kind: work_packet
-updated_at: 2026-09-30
+updated_at: 2026-10-05
 ---
 
 # Work Packet: WP-0324 — Continuous read I/O: provider re-hash on every poll, unattributed database page reads
@@ -10,7 +10,7 @@ updated_at: 2026-09-30
 
 - ID: WP-0324
 - Owner: Claude
-- Status: NEEDS_VALIDATION
+- Status: DONE
 - Created: 2026-09-24
 - Board: `../TASK_BOARD.md`
 - Related: WP-0322 (download-engine identity cache by size+mtime), WP-0321 S3 (provider tree receipt fast path), WP-0312 (SQLite runtime boundary), WP-0323 (readers report locked)
@@ -165,5 +165,21 @@ Provider forced-fresh23 then stable while polling/cache hits continue. Four actu
 Separate VFS attribution in bounded current trace segment: selected_pending18,500,505,600bytes/808 receipts; fetch_queued_jobs_for_track_inner34,688,180,224/1490; operator_activity_page3,006,590,976/128; four claim contexts3,177,234,432bytes. Logical context reads, not physical disk IO, exact statement or timeout root-cause proof. Native read-only metadata plans at hot_query_plans_live_readonly.json (Python SQLite3.50.4, not bundled3.53.2) show selected-existence optimizer drives job status index; paused fetch drives queued job index then LEFT JOIN/sort; activity inner page is non-covering because text id is absent from existing sort indexes. Metadata-only plans executed under RO/query_only/BEGIN/WAL, no SQL mutation or full query benchmark.
 
 Follow-up WP0335 owns minimal measured selected-query/activity read amplification remediation and its actual bundled-VFS/order-equivalence/installed proof; WP0323 retains existing older activity payload-before-pagination remediation. Original provider30minute/candidate/Tauri p50/VFS acceptance remains unchanged. Status remains NEEDS_VALIDATION before parallel follow-up implementation; do not infer completion from plans or launch-only evidence.
+
+</topic>
+
+<topic id="normal-observer-failure-20261005" wp="WP-0324" status="NEEDS_VALIDATION" updated_at="2026-10-05">
+
+Observer187224 terminal FAIL: Windows WinError5 replacing progress.json at1791164885193;1782samples/1781580ms. Original failed verdict retained. Bounded sharing-conflict retry added only to ignored harness; no product gate weakened. Native watcher completed1950580ms,1682samples,zero unresponsive/bridge-failure samples. Its three external RO database probes timed out; these are not AppDatabase read_admission_timeout proof.
+
+Independent canonical BEGIN at1791164966631: all5 originals SUCCEEDED attempt2/errornull, globalpause1, selectedgrants0/foreignrunning0. Five distinct NAS MKVs independently probed with AV1/VP9 video, Korean Opus and embedded English/Korean subtitle tracks; output_metadata.json under .local/proofVVRemaining/wp0324_output_metadata_review_01. Root opened paired Jobs screenshot normal_selected_5_terminal_independent_1791164967239.png: paused queue and waiting controls readable.
+
+Selected work first exhausted1791164514065 (~23m32), so the partial observer does not establish original continuous30min acceptance. Full-window actual Tauri p50 is unproven; bounded current tail median3.5ms is partial evidence only. Generation1 provider records reconcile28forcedfresh+2TTL; no cold/input_changed in observed records. Preserve original acceptance and repeat on rebuilt WP0335 candidate with adequate canonical selected workload.
+
+</topic>
+
+<topic id="verified-normal-runner-closure-20261005" wp="WP-0324" status="DONE" updated_at="2026-10-05">
+
+Original provider-cache/candidate/30minute/Tauri-latency/VFS-attribution acceptance independently passed on source d066e3c / installed6cf6592e. Root inspected actual independent artifacts and source:1800051ms pending selected work,60 Tauri samples/p50=3ms,3402 polls=3402 cache hits,18 execution windows/90 unique forced-fresh flights with initial-boundary counters reconciled,0 database failures in2246 retained trace rows. Follow-upWP0335 exists. Proof: product/desktop/build_target/tool_artifacts/wp_runs/WP-0324/20261005/normal_io_prearmed_d066e3c_01/summary.md. Preserve79 logical large-read intervals/20 without provider-flight overlap as unassigned; no physical-I/O ownership, zero-all-bursts or universal timeout-resolution claim. WP0335 readable Jobs UI and remaining selected completion are separate. Historical incomplete/failing observations remain retained; version/changelog unchanged under current authority.
 
 </topic>

@@ -9,6 +9,7 @@ import {
   referenceQualityFactors,
   segmentClonePresentation,
   summarizeClonePreflight,
+  shouldRefuseQuietCloneConfirmation,
 } from "../src/lib/cloneUx.ts";
 
 test("clone status presentation uses the packet color and label contract", () => {
@@ -151,4 +152,12 @@ test("clone preflight distinguishes missing, weak, and ready references", () => 
     ready: true,
     speakers: [ready],
   });
+});
+
+
+test("quiet clone activation refuses confirmation while operator interaction retains it", () => {
+  assert.equal(shouldRefuseQuietCloneConfirmation(true, false), true);
+  assert.equal(shouldRefuseQuietCloneConfirmation(true, true), false);
+  assert.equal(shouldRefuseQuietCloneConfirmation(false, false), false);
+  assert.equal(shouldRefuseQuietCloneConfirmation(false, true), false);
 });

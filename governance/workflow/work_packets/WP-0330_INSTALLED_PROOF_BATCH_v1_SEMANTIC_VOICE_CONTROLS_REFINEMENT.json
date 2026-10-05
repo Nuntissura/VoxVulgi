@@ -1,0 +1,213 @@
+{
+  "file_id": "WP0330-SEMANTIC-VOICE-CONTROLS-REFINEMENT-v3",
+  "file_kind": "refinement",
+  "updated_at": "2026-10-05",
+  "status": "READY_FOR_IMPLEMENTATION_SOURCE_REVIEW_ONLY",
+  "wp": "WP-0330",
+  "carried_acceptance": [
+    "WP-0251 original incomplete Kokoro cache/readiness negative and recovery",
+    "WP-0156 actual requested clone converted/fallback/error/current-item UI disclosure"
+  ],
+  "operator_scope": "Expand existing toolset to use original product controls. Source stays frozen during install proofs; root reviews/promotes candidate separately.",
+  "research": {
+    "sources": [
+      {
+        "path": "product/desktop/src/lib/agentUiAudit.ts",
+        "anchors": "classifySafeAgentActions238-262; activate_product_action442-460; select_option462-487",
+        "finding": "Existing token-authorized semantic dispatch invokes native element click/change. Exact action ID, stable actor, disabled state and allowlisted option are checked; receipts prove dispatch only."
+      },
+      {
+        "path": "product/desktop/src/pages/SubtitleEditorPage.tsx",
+        "anchors": "saveItemVoicePlan4478; original preflight4670; original dub4759; original controls7044,7053,10014,10040",
+        "finding": "Original select updates dirty backend state; Save plan runs existing item_voice_plan_upsert. Dub handler reruns genuine curation preflight and can open a native confirmation."
+      },
+      {
+        "path": "product/desktop/src-tauri/src/lib.rs",
+        "anchors": "navigate2286-2319; original pack status13892-13927",
+        "finding": "Existing navigation supports exact item_id/section_id. Diagnostics uses original engine status functions; frontend demand coordination does not govern new backend route."
+      },
+      {
+        "path": "product/engine/src/tools.rs",
+        "anchors": "kokoro_app_cache_ready9713; neural status12221; voice status12420",
+        "finding": "Pinned refs/main plus original file bytes/hash needed, warmup marker alone insufficient. Original pack probes inspect actual private runtime; no replacement readiness heuristic."
+      },
+      {
+        "path": "product/engine/src/jobs.rs",
+        "anchors": "queue_dub_or_voice_setup3196; resolve_managed_dub_backend31607",
+        "finding": "Existing localization.run honors saved item plan. Default is not evidence of OpenVoice selection."
+      },
+      {
+        "url": "https://v2.tauri.app/develop/calling-rust/",
+        "checked_on": "2026-10-05",
+        "finding": "Typed original invoke commands return values/errors; preserve original async handlers and IPC rather than unrestricted IPC or alternate enqueue."
+      },
+      {
+        "url": "https://developer.mozilla.org/en-US/docs/Web/API/Event/isTrusted",
+        "checked_on": "2026-10-05",
+        "finding": "HTMLElement.click emits click with isTrusted=false. Existing semantic bridge target.click can therefore be refused before native confirmation in the unchanged original handler; trusted operator events retain confirmation. Exact installed WebView guard behavior still requires boundary proof."
+      },
+      {
+        "path": "product/engine/src/tools.rs",
+        "anchors": "SemanticProbeSlot7612/7644-7718; native original neural12221/OpenVoice12420; existing cache46-148",
+        "finding": "Original neural/OpenVoice status functions have no shared flight. Existing semantic manager is private and uses dependency fingerprints/cached result; that identity does not cover Kokoro refs/model/warmup. Reusing it risks stale cache-negative proof. Separate non-waiting admission preserves fresh original funcs."
+      },
+      {
+        "path": "product/desktop/src-tauri/src/lib.rs",
+        "anchors": "original jobs_enqueue_dub_voice_preserving_v116664; AppState.safe_mode_enabled3281",
+        "finding": "Original dub IPC did not gate SafeMode. Optional quiet_agent adds fresh AtomicBool check immediately at original admission boundary; false/omitted preserves trusted original operator behavior."
+      }
+    ],
+    "selected": "Annotate original controls, use existing semantic bridge, add bounded argument schema for original read-only status functions and extend existing canonical inspect with original plan. Conditional dub declaration only for last genuine ready preflight, with fresh original-handler guard refusing changed preflight or missing pack before native confirmation/setup on programmatic click. V1 independent review rejected missing fresh SafeMode admission and unbounded duplicate read-probe fan-out. V2 adds optional quiet_agent only to original IPC, refusal with closure-based behavioral tests proposed before original enqueue, and independent try-lock busy probe admission selecting exactly one original status function per request. It leaves original status child timeout unchanged. V3 distinguishes temporary contention from poisoned prior failure. Existing HTTP400 read-error mapping stays unchanged and is documented explicitly; no general router change.",
+    "reuse": [
+      "Original select/save/dub/preflight handlers",
+      "Existing product action classification/actor/expected ID and option guards",
+      "Original neural/OpenVoice status functions",
+      "Original readonly item voice plan lookup"
+    ],
+    "rejected": [
+      "Direct database or preference mutation",
+      "Default CosyVoice proof labeled OpenVoice",
+      "Fake refs/markers/reports",
+      "Alternate test-only enqueue or bypass of original preflight",
+      "Native dialog auto-confirmation",
+      "Shared qualified runtime cache mutation"
+    ]
+  },
+  "source_bindings": {
+    "product/desktop/src/pages/SubtitleEditorPage.tsx": {
+      "source_sha256": "44868196592b753a957eff5599a172f289d1bff13ec41880bd2fd0ebc7d43452",
+      "candidate_sha256": "6243554575a4212227ad71644755ea4ed320622669f3c41eed515b7f14dce27d"
+    },
+    "product/desktop/src-tauri/src/agent_control.rs": {
+      "source_sha256": "800474e856c6832c872c49ba089930e5f60f1fbc65e16465d4fe0b15dff8c57b",
+      "candidate_sha256": "46aa0852c8f080cf3369f9870a1fb68520b56ca7357cb0175e4b5e49c8d14dea"
+    },
+    "product/desktop/src/lib/agentManual.json": {
+      "source_sha256": "bab88ec333dd5b62e211c564b5f0fd086862017dce6fe2d1b810a88316c500aa",
+      "candidate_sha256": "7184f3ea95ef9dcd237460265f8c4479d4e9059a3a2f8ec4abaf7a5b2d71992f"
+    },
+    "product/desktop/tests/agentUiAuditContract.test.ts": {
+      "source_sha256": "c38b90fbff237fd2ad4e9aee04b44172348385cdf030431f04ea1099de6ee90d",
+      "candidate_sha256": "e7bf1dcc9c72142be6dbfb1b626b2e7488bb87ca5e486faf4798da12898c4010"
+    },
+    "product/desktop/tests/agentManual.test.ts": {
+      "source_sha256": "ead113960d70ab67c082eef601d580d4120848ff96fb4c1580a4255454b6ff84",
+      "candidate_sha256": "9228064562baa34762cd923bb1964b2d726d7a5f958619237708297cdf57badb"
+    },
+    "product/desktop/src/lib/cloneUx.ts": {
+      "source_sha256": "7a6eaa6b1928c0e70d60d34fdda87581b9398366071431467a4cc2bd53be7b37",
+      "candidate_sha256": "0cb652a3dd4ba8f421104f98822732737698e92440e7c4e76f902bd30ca45547"
+    },
+    "product/desktop/tests/cloneUx.test.ts": {
+      "source_sha256": "368376c0a59cb4b274702d64f95d8e2d3cc58af16bc9b086b16de611c75cd294",
+      "candidate_sha256": "331bc1026665c180227bd6b322b8e4d3689df0b21863b52d9c67632855317875"
+    },
+    "product/desktop/src-tauri/src/lib.rs": {
+      "source_sha256": "bfca26b24677db6092e0c2316d1018b2a3691c0b315aede28f0066b2eed6766f",
+      "candidate_sha256": "8027efcfbf5403f4e9427e1e14cd1cdbd2d5d2c1e064deec04223b68b47d23df"
+    }
+  },
+  "unchanged_scope": [
+    "Desktop version0.1.205 and changelog",
+    "Original operator UI confirmation for trusted click",
+    "Original original install/queue/clone pipeline handlers",
+    "Current install-proof source d066 and PID264504 bindings",
+    "WP status and final offline gates"
+  ],
+  "acceptance": [
+    "Run focused agentUiAuditContract, agentManual, cloneUx, Rust catalog/schema, fresh SafeMode admission closure and readiness competing-admission behavioral tests after promotion. Tests must prove denied quiet admission never calls original enqueue, trusted operator behavior/error propagation retained, busy readiness never executes a second probe, and released gate permits fresh probe. Proposed tests have not run. V3 local-helper catch_unwind negative must demonstrate poisoned admission remains unknown/unavailable for repeated calls with zero probe starts and no automatic poison clearing; no production global gate is poisoned by this test.",
+    "Build only after root promotion and frozen install batch completion using canonical build authority; exact installed artifact inspected via PID-validated capabilities/manual.",
+    "Navigate to exact imported item through existing /agent/navigate item_id and section_id=loc-voice-plan; fresh ui_audit must expose select/save item-bound IDs and original allowlisted openvoice_v2 option. Use the source-verified loc-backends anchor for the Dub stage (App.tsx419-430; SubtitleEditorPage.tsx1218-1222).",
+    "Set original select via semantic select_option; re-audit then original Save plan; canonical localization.inspect voice_plan must independently show saved managed OpenVoice selection for that exact item.",
+    "Read tools.voice_readiness with one explicit original pack_id per call. Each call must freshly run that original status function; competing request must immediately return explicit busy without spawning second probe. Original Python child probes/file checks can be slow (existing child timeout unchanged). No bounded-duration/app-wide cancellation or inference claim.",
+    "Check clone readiness through original semantic control (reversible_state_change because genuine curation may write reports), inspect actual original summary; conditional Run voice-preserving dub action appears only when ready.",
+    "Negative guard: change private reference after genuine ready preflight, activate original semantic dub; fresh preflight must refuse with truthful rendered error, enqueue no dub and open no native dialog. Separately missing voice pack must refuse quiet setup admission. Existing trusted operator confirmation remains.",
+    "After genuine UI-ready preflight, toggle SafeMode before original synthetic admission; fresh original Tauri guard must refuse with no new canonical job. Restore only through existing governed mode action; test cannot alter frozen installation registry/queue policy. Verify valid quiet action with modeoff and trusted operator behavior separately.",
+    "Valid guard: with genuine ready reference, pause PRIVATE queue with token/actor/unique operation then activate exact original dub. Re-read canonical original job and verify clone intent, backend and actual reference before reversibly moving that exact privately-generated reference post-admission; no script writes plans/reports/markers.",
+    "Resume only known private pending proof work, preserving original history; canonical terminal jobs and actual voice report must independently show requested clone, converted/fallback/error counts/outcomes. Inspect exact current-item UI dump+opened snapshot for truthful partial/fallback/error disclosure.",
+    "No whole WP DONE or fully unblocked claim until installed guard proof and original negative/recovery/fallback observations pass; final ISO, listening and other carried requirements stay open."
+  ],
+  "scenario_gates": {
+    "private_root": "Owned install-proof physical root only after original installer stages settle and root explicitly admits follow-on workflow; never qualified source/operator root. No controller executed now.",
+    "input": "Test material/All_action_of_Our_beautiful_haerin_is_on_live_today_newjeans_fyp_haerin_YKJSXNJFU-E_6e20b53e.mp4",
+    "input_sha256_verified_now": "328e555ab418eb37b6ca0cb7656497b2cef2684816dfa47257f69c1825001676",
+    "original_provenance": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0329/20261005/actual_localization_a0bb600/flight.json",
+    "WP0251": "Authentic private Kokoro refs/main moved reversibly only after verified warmup/pinned cache; fresh original readiness false, then exact new imported Haerin/OpenVoice original localization.run admission and truthful actual readiness/voice_setup/error outcome. Original run may queue genuine setup; do not label queued repair as readiness failure or inference. Restore ref in finally and verify samefile/bytes/hash plus authentic warmup unchanged; fresh readiness recovery. Separate actual inference recovery proof still needed.",
+    "WP0156": "Valid actual preflight -> explicit private pause -> original dub enqueue -> canonical job clone-intent binding -> move exact actual generated reference privately -> resume -> independently inspect natural fallback/error outcome and current-item UI. If no genuine fallback occurs, retain actual error and report missing fallback proof; do not manufacture report.",
+    "queue_restore": "Capture private initial canonical pause/recurring/default state and exact queued identities. Refuse unrelated queued/running work. Existing queue.resume also clears recurring pause; do not use when prior recurring pause cannot be restored via governed controls. Changes require explicit isolated-fixture allowance and restore receipt; never rewrite preference files."
+  },
+  "red_team": [
+    {
+      "risk": "Stale ready summary before click",
+      "control": "Original handler freshly re-runs preflight; synthetic activation refuses confirmation after readiness changes; packaged UI proof required."
+    },
+    {
+      "risk": "UI dispatch accepted but async failure",
+      "control": "Re-audit rendered error and canonical job set, not accepted receipt alone."
+    },
+    {
+      "risk": "Wrong current item or cache aliases qualified data",
+      "control": "Exact audited item-bound action IDs and physicalsamefile/private ordinary-file ownership proof before any reversible move."
+    },
+    {
+      "risk": "Readiness may initiate genuine pipeline setup when cache absent",
+      "control": "Record actual setup admission independently; never substitute fabricated status or claim expected terminal error before observation."
+    },
+    {
+      "risk": "Missing-reference fallback branch not naturally reached",
+      "control": "Use actual queued clone intent/reference provenance and accept observed outcome honestly; no DONE from planned scenario."
+    },
+    {
+      "risk": "SafeMode changes during async preflight",
+      "control": "quiet_agent propagates into original Tauri IPC; fresh AtomicBool gate before original enqueue refuses without executing admission. Packaged canonical before/after read required."
+    },
+    {
+      "risk": "Repeated token-authenticated status requests fan out long Python children",
+      "control": "Separate process-local RAII try-lock admission gives explicit busy, executes one selected original status function, has no UI/global mutation lock, and releases on unwind. Existing other status routes unchanged; no app-wide bound claim."
+    },
+    {
+      "risk": "Prior probe panic is mislabeled temporary busy",
+      "control": "Explicit TryLockError distinction; poisoned owner means unknown/unavailable, no probe admitted or poison clearing. Local test-only gate panic verifies actual helper repeatedly refuses."
+    }
+  ],
+  "version": 3,
+  "previous_candidate_preserved": "../wp0330_semantic_voice_controls_candidate_02",
+  "independent_review_findings": [
+    {
+      "id": "WP0330-CANDIDATE-V1-HIGH-01",
+      "finding": "Original semantic dub admission lacked fresh SafeMode guard",
+      "remediation": "Optional quiet_agent in original Tauri command, fresh AtomicBool check before original enqueue; behavioral closure tests proposed."
+    },
+    {
+      "id": "WP0330-CANDIDATE-V1-HIGH-02",
+      "finding": "Readiness route could synchronously spawn duplicate long probes per request",
+      "remediation": "Separate try-lock busy gate; one explicitly selected original status per request; no bounded-duration claim; busy admission behavioral test proposed."
+    },
+    {
+      "id": "WP0330-CANDIDATE-V2-P2-01",
+      "finding": "WouldBlock and poisoned admission were ambiguously both busy",
+      "remediation": "Distinct explicit unavailable/readiness unknown for poison, fail closed/no auto clear; actual local helper catch_unwind negative proves no probe admitted after poison."
+    }
+  ],
+  "admission_error_semantics": {
+    "temporary_contention": "WouldBlock -> explicit busy; no second probe starts",
+    "failed_owner": "Poisoned -> unavailable/readiness unknown; no probe starts and no automatic clear_poison",
+    "http_status": "400 through unchanged existing read-command error mapping; not503",
+    "original_probe_duration": "Unchanged; no bounded-duration claim"
+  },
+  "execution_status": "NOT_EXECUTED",
+  "authority_changed": true,
+  "canonical_wp": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1.json",
+  "promoted_source": {
+    "path": ".local/wp0330_semantic_voice_controls_candidate_03/refinement_proposal.json",
+    "sha256": "99be1a75e4102b7e72a744e0d94988647b89016cbad04795f7cdea34d289fb19"
+  },
+  "source_review": {
+    "source": "d066e3cd88ea55068347671496faedc767f5d6b9",
+    "patch_path": ".local/wp0330_semantic_voice_controls_candidate_03/candidate.patch",
+    "patch_sha256": "564c0f72129403eb8ab6e55348d487c3da36c4f9dda931db23c918049f609011",
+    "applied": false,
+    "tests_executed": false,
+    "freeze": "No product apply until original guarded installation batch completes; exact installed controls require separate proof"
+  }
+}

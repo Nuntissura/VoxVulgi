@@ -189,3 +189,27 @@ test("Localization current-item navigation is safe for a headless read-only prob
     /data-agent-safe-action="true"[\s\S]*?data-testid="localization-open-current-item"[\s\S]*?onClick=\{\(\) => onOpenEditor\(currentHomeItem\.id\)\}/,
   );
 });
+
+
+test("managed voice plan exposes exact current-item original select/save handlers", () => {
+  const source = readRepoFile("src", "pages", "SubtitleEditorPage.tsx");
+  assert.ok(source.includes('data-agent-action-id={`localization.voice-plan-backend.${itemId}`}'));
+  assert.ok(source.includes('data-agent-action-id={`localization.voice-plan-save.${itemId}`}'));
+  assert.ok(source.includes('saveItemVoicePlan().catch(() => undefined)'));
+  for (const id of ["localization.voice-plan-backend.item-1", "localization.voice-plan-backend.item-2"]) {
+    assert.deepEqual(classifySafeAgentActions("select", "combobox", false, false, id, "reversible_state_change", "select"), ["scroll_into_view", "select_option"]);
+  }
+  assert.deepEqual(classifySafeAgentActions("button", "button", false, false, "localization.voice-plan-save.item-1", "reversible_state_change"), ["scroll_into_view", "activate_product_action"]);
+  assert.throws(() => requireExpectedProductActionId("localization.voice-plan-save.item-1", "localization.voice-plan-save.item-2"));
+});
+
+
+test("original dub activation is conditional on clone readiness and guards confirmation races", () => {
+  const source = readRepoFile("src", "pages", "SubtitleEditorPage.tsx");
+  assert.ok(source.includes('clonePreflightSummary?.ready ? `localization.voice-preserving-dub.${itemId}` : undefined'));
+  assert.ok(source.includes('onClick={enqueueDubVoicePreservingV1}'));
+  assert.ok(source.includes('shouldRefuseQuietCloneConfirmation(quietActivation, preflight.ready)'));
+  assert.ok(source.includes('event?.nativeEvent.isTrusted === false'));
+  assert.ok(source.indexOf('shouldRefuseQuietCloneConfirmation(quietActivation, preflight.ready)') < source.indexOf('const proceed = await confirm(msg'));
+  assert.ok(source.includes('if (quietActivation) throw new Error("Voice-preserving dub not admitted: required voice pack is not ready.'));
+});

@@ -4,6 +4,95 @@ use std::process::Command;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PipOutputChannel { Stdout, Stderr }
+pub(crate) type PipOutputSink = std::sync::Arc<dyn Fn(PipOutputChannel, &[u8]) -> std::io::Result<()> + Send + Sync>;
+#[derive(Clone)]
+struct PipFailure { kind: std::io::ErrorKind, message: String }
+impl PipFailure {
+    fn from_error(error: &std::io::Error) -> Self { Self { kind:error.kind(), message:error.to_string() } }
+    fn error(&self) -> std::io::Error { std::io::Error::new(self.kind,self.message.clone()) }
+}
+#[derive(Default)]
+struct PipFailures { first_sink: Option<PipFailure>, lifecycle: Option<PipFailure> }
+impl PipFailures {
+    fn error(&self) -> Option<std::io::Error> { self.lifecycle.as_ref().or(self.first_sink.as_ref()).map(PipFailure::error) }
+}
+#[derive(Clone)]
+struct PipOutputContext { sink: PipOutputSink, failures: std::rc::Rc<std::cell::RefCell<PipFailures>> }
+thread_local! {
+    static PIP_OUTPUT_SINK: std::cell::RefCell<Option<PipOutputContext>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Exact current Phase2 step only; nesting restores the caller and the guard cannot
+/// cross threads. Captured output is published after owned pipe draining, not streamed.
+pub(crate) struct ScopedPipOutputSink {
+    previous: Option<PipOutputContext>,
+    failures: std::rc::Rc<std::cell::RefCell<PipFailures>>,
+    _thread_bound: std::marker::PhantomData<std::rc::Rc<()>>,
+}
+impl ScopedPipOutputSink {
+    pub(crate) fn enter(sink: PipOutputSink) -> std::io::Result<Self> {
+        let failures=std::rc::Rc::new(std::cell::RefCell::new(PipFailures::default()));
+        let context=PipOutputContext {sink,failures:failures.clone()};
+        let previous = PIP_OUTPUT_SINK.try_with(|slot| {
+            let mut slot = slot.try_borrow_mut().map_err(|_| std::io::Error::other("pip output scope already borrowed"))?;
+            Ok::<_, std::io::Error>(slot.replace(context))
+        }).map_err(|_| std::io::Error::other("pip output scope unavailable"))??;
+        Ok(Self { previous, failures, _thread_bound: std::marker::PhantomData })
+    }
+    pub(crate) fn failure(&self) -> Option<std::io::Error> { self.failures.borrow().error() }
+}
+impl Drop for ScopedPipOutputSink {
+    fn drop(&mut self) {
+        let _ = PIP_OUTPUT_SINK.try_with(|slot| {
+            if let Ok(mut slot) = slot.try_borrow_mut() { *slot = self.previous.take(); }
+        });
+    }
+}
+fn is_scoped_pip_command(command: &Command) -> std::io::Result<bool> {
+    let context = PIP_OUTPUT_SINK.try_with(|slot| slot.try_borrow().map(|slot| slot.clone()).map_err(|_| std::io::Error::other("pip output scope already borrowed")))
+        .map_err(|_| std::io::Error::other("pip output scope unavailable"))??;
+    let Some(context)=context else {return Ok(false);};
+    let args: Vec<_> = command.get_args().collect();
+    let pip=args.windows(2).any(|args| args[0] == OsStr::new("-m") && args[1] == OsStr::new("pip"));
+    if pip {if let Some(error)=context.failures.borrow().error() {return Err(error);}}
+    Ok(pip)
+}
+fn publish_pip_output(capture: bool, stdout: &[u8], stderr: &[u8]) -> std::io::Result<()> {
+    if !capture { return Ok(()); }
+    let sink = PIP_OUTPUT_SINK.try_with(|slot| {
+        slot.try_borrow().map(|slot| slot.clone()).map_err(|_| std::io::Error::other("pip output scope already borrowed"))
+    }).map_err(|_| std::io::Error::other("pip output scope unavailable"))??;
+    let context = sink.ok_or_else(|| std::io::Error::other("pip output scope disappeared before capture"))?;
+    for (channel,bytes) in [(PipOutputChannel::Stdout,stdout),(PipOutputChannel::Stderr,stderr)] {
+        if bytes.is_empty() {continue;}
+        if let Err(error)=(context.sink)(channel,bytes) {
+            let mut failures=context.failures.borrow_mut();
+            if failures.first_sink.is_none() {failures.first_sink=Some(PipFailure::from_error(&error));}
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+fn retain_command_error(error: std::io::Error, log_result: std::io::Result<()>) -> std::io::Error {
+    match log_result {
+        Ok(()) => error,
+        Err(log_error) => {
+            let combined=std::io::Error::new(error.kind(), format!("{error}; scoped pip output log failed: {log_error}"));
+            if matches!(error.kind(),std::io::ErrorKind::Interrupted | std::io::ErrorKind::TimedOut) {
+                let _=PIP_OUTPUT_SINK.try_with(|slot| {
+                    if let Some(context)=slot.borrow().as_ref() {
+                        let mut failures=context.failures.borrow_mut();
+                        if failures.lifecycle.is_none() {failures.lifecycle=Some(PipFailure::from_error(&combined));}
+                    }
+                });
+            }
+            combined
+        },
+    }
+}
+
 pub fn command(program: impl AsRef<OsStr>) -> Command {
     let mut cmd = Command::new(program);
     configure_for_background(&mut cmd);
@@ -66,6 +155,7 @@ pub fn run_owned_output_with_pid<F>(
 where
     F: FnMut() -> bool,
 {
+    let capture_pip = is_scoped_pip_command(command)?;
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     configure_owned_launch(command);
     let mut child = command.spawn()?;
@@ -120,11 +210,11 @@ where
             let _ = lifecycle_job.terminate_all();
             terminate_child_process_tree(&mut child);
             let pipe_deadline = Instant::now() + Duration::from_secs(2);
-            let _ = stdout_receiver
-                .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now()));
-            let _ = stderr_receiver
-                .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now()));
-            return Err(std::io::Error::new(
+            let stdout = stdout_receiver
+                .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now())).unwrap_or_default();
+            let stderr = stderr_receiver
+                .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now())).unwrap_or_default();
+            let error = std::io::Error::new(
                 if timed_out {
                     std::io::ErrorKind::TimedOut
                 } else {
@@ -138,7 +228,8 @@ where
                 } else {
                     format!("owned child pid {child_pid} was canceled and terminated")
                 },
-            ));
+            );
+            return Err(retain_command_error(error, publish_pip_output(capture_pip, &stdout, &stderr)));
         }
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -168,6 +259,7 @@ where
                             ),
                         )
                     })?;
+                publish_pip_output(capture_pip, &stdout, &stderr)?;
                 return Ok((
                     std::process::Output {
                         status,
@@ -183,11 +275,11 @@ where
                 let _ = lifecycle_job.terminate_all();
                 terminate_child_process_tree(&mut child);
                 let pipe_deadline = Instant::now() + Duration::from_secs(2);
-                let _ = stdout_receiver
-                    .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now()));
-                let _ = stderr_receiver
-                    .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now()));
-                return Err(error);
+                let stdout = stdout_receiver
+                    .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now())).unwrap_or_default();
+                let stderr = stderr_receiver
+                    .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now())).unwrap_or_default();
+                return Err(retain_command_error(error, publish_pip_output(capture_pip, &stdout, &stderr)));
             }
         }
     }
@@ -444,6 +536,71 @@ mod tests {
     use super::*;
     use std::process::Stdio;
     use std::time::{Duration, Instant};
+
+    fn wp0229_output_command(label: &str, pip: bool) -> Command {
+        let mut child = command("cmd.exe");
+        child.args(["/D", "/C", &format!("echo {label}-stdout & echo {label}-stderr 1>&2 & rem")]);
+        if pip { child.args(["-m", "pip"]); }
+        child
+    }
+    #[test]
+    fn wp0229_scoped_pip_output_preserves_actual_owned_channels_and_nonpip_passthrough() {
+        let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let target = captured.clone();
+        let _scope = ScopedPipOutputSink::enter(std::sync::Arc::new(move |channel, bytes| {
+            target.lock().unwrap().push((channel, bytes.to_vec())); Ok(())
+        })).unwrap();
+        let output = run_owned_output(&mut wp0229_output_command("genuine", true), Duration::from_secs(10), ||false).unwrap();
+        assert!(output.status.success());
+        assert_eq!(*captured.lock().unwrap(), vec![(PipOutputChannel::Stdout,output.stdout),(PipOutputChannel::Stderr,output.stderr)]);
+        captured.lock().unwrap().clear();
+        assert!(run_owned_output(&mut wp0229_output_command("nonpip", false), Duration::from_secs(10), ||false).unwrap().status.success());
+        assert!(captured.lock().unwrap().is_empty());
+    }
+    #[test]
+    fn wp0229_scoped_pip_output_refusal_fails_success_but_retains_cancel_timeout_kinds() {
+        let _scope=ScopedPipOutputSink::enter(std::sync::Arc::new(|_,_|Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,"owned target refused")))).unwrap();
+        let error=run_owned_output(&mut wp0229_output_command("refused",true),Duration::from_secs(10),||false).unwrap_err();
+        assert_eq!(error.kind(),std::io::ErrorKind::PermissionDenied);
+        for kind in [std::io::ErrorKind::Interrupted,std::io::ErrorKind::TimedOut] {
+            let error=retain_command_error(std::io::Error::new(kind,"original lifecycle error"),publish_pip_output(true,b"partial authentic capture",b""));
+            assert_eq!(error.kind(),kind);assert!(error.to_string().contains("original lifecycle error"));
+            assert!(error.to_string().contains("owned target refused"));
+        }
+    }
+    #[test]
+    fn wp0229_scoped_pip_output_native_cancel_and_timeout_keep_owned_lifecycle_errors() {
+        for cancel in [true,false] {
+            let _scope=ScopedPipOutputSink::enter(std::sync::Arc::new(|_,_|Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied,"owned target refused")))).unwrap();
+            let mut child=command("cmd.exe");
+            child.args(["/D","/C","echo before-stop & ping -n 60 127.0.0.1 >nul & rem","-m","pip"]);
+            let started=Instant::now();
+            let error=run_owned_output(&mut child,if cancel {Duration::from_secs(10)} else {Duration::from_millis(400)},||cancel && started.elapsed()>=Duration::from_millis(400)).unwrap_err();
+            assert_eq!(error.kind(),if cancel {std::io::ErrorKind::Interrupted} else {std::io::ErrorKind::TimedOut});
+            assert!(error.to_string().contains(if cancel {"was canceled"} else {"timed out"}));
+            assert!(started.elapsed()<Duration::from_secs(10));
+        }
+    }
+    #[test]
+    fn wp0229_scoped_pip_output_isolates_concurrent_threads_and_restores_nested_panic() {
+        let barrier=std::sync::Arc::new(std::sync::Barrier::new(2));
+        let workers:Vec<_>=(0..2).map(|index|{
+            let barrier=barrier.clone();std::thread::spawn(move||{
+                let captured=std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));let target=captured.clone();
+                let _scope=ScopedPipOutputSink::enter(std::sync::Arc::new(move|channel,bytes|{target.lock().unwrap().push((channel,bytes.to_vec()));Ok(())})).unwrap();
+                barrier.wait();let output=run_owned_output(&mut wp0229_output_command(&format!("thread{index}"),true),Duration::from_secs(10),||false).unwrap();
+                assert_eq!(*captured.lock().unwrap(),vec![(PipOutputChannel::Stdout,output.stdout),(PipOutputChannel::Stderr,output.stderr)]);
+            })
+        }).collect();for worker in workers {worker.join().unwrap();}
+        let outer=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));let target=outer.clone();
+        let scope=ScopedPipOutputSink::enter(std::sync::Arc::new(move|_,_|{target.fetch_add(1,std::sync::atomic::Ordering::SeqCst);Ok(())})).unwrap();
+        let panic=std::panic::catch_unwind(||{
+            let _nested=ScopedPipOutputSink::enter(std::sync::Arc::new(|_,_|Ok(()))).unwrap();
+            publish_pip_output(true,b"nested",b"").unwrap();panic!("owning scope panic fixture");
+        });assert!(panic.is_err());publish_pip_output(true,b"outer restored",b"").unwrap();
+        assert_eq!(outer.load(std::sync::atomic::Ordering::SeqCst),1);drop(scope);
+        assert!(!is_scoped_pip_command(&wp0229_output_command("disabled",true)).unwrap());
+    }
 
     #[test]
     fn quiet_command_console_probe_helper() {

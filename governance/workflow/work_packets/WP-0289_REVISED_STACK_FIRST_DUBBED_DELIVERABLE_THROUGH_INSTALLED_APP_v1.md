@@ -116,3 +116,16 @@ Historical baseline this must beat (measured 2026-07-31 on the operator machine)
 - Current status: BLOCKED
 - First installed offline dubbed deliverable waits on WP-0288 frozen selections and listening gate. Original deliverable scope preserved; WP-0306 governs MKV for new video outputs, historical MP4 input compatibility retained.
 - Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
+
+
+<topic id="installed-haerin-proof-20261005" status="partial-proof" wp="WP-0289" updated_at="2026-10-05">
+
+## Installed Haerin proof reconciliation - 2026-10-05
+
+- Status remains `BLOCKED` on WP-0288 frozen selections and listening requirements.
+- The actual installed Haerin workflow now publishes a 1,008,064-byte MKV with non-silent 7.174966-second mix, named English cloned and original audio, and eng/kor embedded subtitles; all ten canonical jobs, including export, succeeded. Older embedded ZIP provenance showing export running is an earlier projection, superseded for terminal status by the independent canonical job read. This advances the historical zero-deliverable baseline and proves the exact MKV output slice, not the entire revised-stack closure unit.
+- Remaining: WP-0288 frozen candidate/default/backup evidence; integration and proof of the revised default stack; Miyeon completed dub or visible terminal speaker/stage failure; actual clean Windows/VM install-to-export with blocked network and zero downloads; CPU-tier operator statement; operator audible/source-voice listening verdict; and dedicated acceptance mapping. The successful workflow used the existing Whisper translation/resemblyzer/Demucs/CosyVoice stack, so it cannot establish the specified revised backend defaults. Preserve all original scope and offline gates; current explicit version-retention authority supersedes the historical automatic version-bump clause.
+- Inspected evidence: [installed workflow summary](../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0329/20261005/actual_localization_a0bb600/summary.md) and adjacent independent_validation.json, original voice report and canonical output records.
+- Evidence is bound to installed source `a0bb600141fffcfb1f7274189917af11b17e562a`, version `0.1.205`, executable SHA-256 `a197ae258a379124b8797f00d0559ec5496c8c6fcbe1b840379de0e036faad11`, and qualified runtime `runtime_7ea19cb688095cd14dfbc84e`. Reuse only for the inspected scenario and unchanged asserted inputs; this is not exact-source proof for later production `d066`, not subjective speech/translation quality, and not clean blocked-network final ISO acceptance. The final offline gate and its one unused acceptance attempt remain open.
+
+</topic>

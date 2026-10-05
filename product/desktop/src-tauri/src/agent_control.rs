@@ -7,6 +7,17 @@ const CATALOG: &str = include_str!("../../src/lib/agentManual.json");
 static OPERATIONS: OnceLock<Mutex<HashMap<String, Value>>> = OnceLock::new();
 static SESSION_STARTED: OnceLock<i64> = OnceLock::new();
 static MUTATION: OnceLock<Mutex<()>> = OnceLock::new();
+// Separate non-waiting admission; never hold the global mutation/UI lock for a status probe.
+static VOICE_READINESS: Mutex<()> = Mutex::new(());
+fn with_voice_readiness_admission<T>(gate: &Mutex<()>, probe: impl FnOnce() -> T) -> Result<T, String> {
+    let _owner = match gate.try_lock() {
+        Ok(owner) => owner,
+        Err(std::sync::TryLockError::WouldBlock) => return Err("voice readiness busy; no additional probe started".into()),
+        Err(std::sync::TryLockError::Poisoned(_)) => return Err("voice readiness unavailable after prior probe failure; readiness unknown; no additional probe started".into()),
+    };
+    Ok(probe())
+}
+
 
 static EXPLICIT_HEADLESS_RUNNER: OnceLock<Mutex<Option<jobs::JobRunnerHandle>>> = OnceLock::new();
 pub(super) fn stop_explicit_runner() -> bool {
@@ -25,7 +36,7 @@ pub(super) fn ensure_explicit_headless_runner(paths: &AppPaths) -> Result<(), St
         if runner.is_none() {
             let proof = AGENT_APP_HANDLE.get().and_then(|app|app.try_state::<AppState>()).and_then(|state|state.install_proof.clone().map(|owner|(owner,state.safe_mode_enabled.clone())));
             *runner = Some(match proof {
-                Some((owner,safe_mode)) => jobs::start_runner_with_install_proof_guard(paths.clone(), owner.runner_guard(safe_mode)),
+                Some((owner,safe_mode)) => owner.start_explicit_runner(paths, safe_mode),
                 None => jobs::start_runner(paths.clone()),
             }.map_err(|e|e.to_string())?);
         }
@@ -204,8 +215,22 @@ fn localization_dispatch_receipt(paths: &AppPaths, admission: Value) -> Value {
     json!({"admission":admission,"held":held,"safe_mode":safe_mode,"runner_start_error":runner_error,"queue_error":queue_error,"queue":queue.ok(),"completion":"queued canonical work; inspect jobs; global pause is preserved"})
 }
 
+fn voice_runtime_paths_readback(paths:&AppPaths)->Result<Value,String> {
+    let main=tools::python_venv_python_path(paths).map_err(|e|e.to_string())?;
+    let cosy=tools::cosyvoice_venv_python_path(paths).map_err(|e|e.to_string())?;
+    Ok(json!({"configuration_only":true,"readiness":"not asserted","executed_interpreters":"not asserted",
+        "user_data_root":paths.base_dir,"runtime_root":paths.runtime_root(),"generation_root":paths.runtime_generation_root(),
+        "main_interpreter":main,"cosy_interpreter":cosy,"python_models_dir":paths.python_models_dir(),
+        "openvoice_models_dir":paths.python_models_dir().join("openvoice_v2"),
+        "kokoro_warmup_probe":paths.python_models_dir().join("kokoro").join(".warmup_ok"),
+        "huggingface_cache_dir":paths.huggingface_cache_dir(),"kokoro_cache_repo":paths.huggingface_cache_dir().join("hub").join("models--hexgrad--Kokoro-82M"),
+        "cosy_backend_dir":paths.cosyvoice_backend_dir(),"cosy_model_dir":paths.cosyvoice_model_parent_dir().join("CosyVoice2-0.5B")}))
+}
+
 fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, String> {
     match command {
+        "ui.viewport.inspect" => super::agent_viewport::execute(request, false),
+        "ui.viewport.set" => super::agent_viewport::execute(request, true),
         "tools.install_phase2" => {
             require_localization_mutation_ready()?;
             if !agent_bridge_state().lock().unwrap().agent_headless { return Err("Install proof requires headless".into()); }
@@ -254,12 +279,40 @@ fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, St
             let row = jobs::enqueue_import_local(paths, path.to_string(), true, false).map_err(|e|e.to_string())?;
             Ok(localization_dispatch_receipt(paths, json!({"job":safe_job(row)})))
         }
+        "tools.voice_readiness" => {
+            let pack = request["pack_id"].as_str().ok_or("pack_id required")?;
+            with_voice_readiness_admission(&VOICE_READINESS, || {
+                // One original selected status function. Its existing child timeout is unchanged.
+                redact_diagnostics_value(match pack {
+                    "tts_neural_local_v1" => json!(tools::tts_neural_local_v1_pack_status(paths)),
+                    "tts_voice_preserving_local_v1" => json!(tools::tts_voice_preserving_local_v1_pack_status(paths)),
+                    "voice_clone_cosyvoice_v1" => json!(tools::cosyvoice_pack_status(paths)),
+                    _ => unreachable!("catalog input enum validated before execute"),
+                })
+            })
+        }
+        "tools.voice_runtime_paths" => {
+            #[cfg(not(windows))]
+            { return Err("Private workflow path readback requires Windows ownership".into()); }
+            #[cfg(windows)]
+            {
+                if !agent_bridge_state().lock().unwrap().agent_headless {return Err("Private workflow path readback requires headless".into());}
+                let app=AGENT_APP_HANDLE.get().ok_or("application unavailable")?;
+                let state=app.try_state::<AppState>().ok_or("startup not ready")?;
+                let owner=state.install_proof.as_ref().ok_or("Explicit owned private workflow required")?;
+                if !owner.explicit_runner_policy(paths,&state.safe_mode_enabled)? {return Err("Explicit reattached private workflow required".into());}
+                // Sole raw-path response exception: authenticated owned private workflow.
+                // Global diagnostics/trace redaction is unchanged. No probe/runner/install.
+                voice_runtime_paths_readback(paths)
+            }
+        }
         "localization.inspect" => {
             let id = request["item_id"].as_str().ok_or("item_id required")?;
             let item = library::get_item_by_id(paths, id).map_err(|e|e.to_string())?;
             let tracks = subtitle_tracks::list_tracks(paths, id).map_err(|e|e.to_string())?;
             let references = voice_reference_candidates::load_reference_candidates(paths, id, None).map_err(|e|e.to_string())?;
-            Ok(redact_diagnostics_value(json!({"item":item,"tracks":tracks,"reference_candidates":references})))
+            let voice_plan = voice_plans::get_item_voice_plan(paths, id).map_err(|e|e.to_string())?;
+            Ok(redact_diagnostics_value(json!({"item":item,"tracks":tracks,"reference_candidates":references,"voice_plan":voice_plan})))
         }
         "localization.run" => {
             require_localization_mutation_ready()?;
@@ -311,7 +364,7 @@ fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, St
                 if runner.is_none() {
             let proof = AGENT_APP_HANDLE.get().and_then(|app|app.try_state::<AppState>()).and_then(|state|state.install_proof.clone().map(|owner|(owner,state.safe_mode_enabled.clone())));
             *runner = Some(match proof {
-                Some((owner,safe_mode)) => jobs::start_runner_with_install_proof_guard(paths.clone(), owner.runner_guard(safe_mode)),
+                Some((owner,safe_mode)) => owner.start_explicit_runner(paths, safe_mode),
                 None => jobs::start_runner(paths.clone()),
             }.map_err(|e|e.to_string())?);
         }
@@ -470,7 +523,7 @@ fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, St
 }
 
 fn is_read(command: &str) -> bool {
-    matches!(command, "localization.inspect" | "database.runtime_status" | "jobs.list" | "jobs.inspect" | "jobs.logs" | "jobs.overview" | "jobs.activity" | "downloads.presets" | "downloads.batch_members" | "subscriptions.failed_downloads" | "operation.get")
+    matches!(command, "ui.viewport.inspect" | "tools.voice_runtime_paths" | "tools.voice_readiness" | "localization.inspect" | "database.runtime_status" | "jobs.list" | "jobs.inspect" | "jobs.logs" | "jobs.overview" | "jobs.activity" | "downloads.presets" | "downloads.batch_members" | "subscriptions.failed_downloads" | "operation.get")
 }
 
 pub(super) fn handle(body: &str) -> (&'static str, String) {
@@ -533,8 +586,12 @@ pub(super) fn handle(body: &str) -> (&'static str, String) {
     drop(operations);
     let mut final_receipt = receipt.clone();
     std::thread::spawn(move || {
-        let _serial = MUTATION.get_or_init(||Mutex::new(())).lock().unwrap();
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(||execute(&paths,&command,&request)));
+        let run = || std::panic::catch_unwind(std::panic::AssertUnwindSafe(||execute(&paths,&command,&request)));
+        // Embedded-only UI work holds no global mutation lock while waiting for the UI thread.
+        let result = if command == "ui.viewport.set" { run() } else {
+            let _serial = MUTATION.get_or_init(||Mutex::new(())).lock().unwrap();
+            run()
+        };
         match result {
             Ok(Ok(value)) => { final_receipt["status"]=json!(if value.get("all_succeeded")==Some(&json!(false)){"partial_failure"}else{"completed"}); final_receipt["result"]=value; },
             Ok(Err(error)) => {final_receipt["status"]=json!("failed");final_receipt["error"]=json!(error);},
@@ -550,6 +607,19 @@ pub(super) fn handle(body: &str) -> (&'static str, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test] fn wp0330_viewport_catalog_is_process_bound_and_rejects_arbitrary_inputs() {
+        let c=catalog();
+        for name in ["ui.viewport.inspect","ui.viewport.set"] {
+            let d=c["commands"].as_array().unwrap().iter().find(|v|v["name"]==name).unwrap();
+            assert_eq!(is_read(name),name=="ui.viewport.inspect");
+            assert!(validate_input(&json!({"actor_id":"test","command":name}),d).is_err());
+            assert!(validate_input(&json!({"actor_id":"test","command":name,"expected_pid":1,"width":800,"height":600,"operation_id":"op","script":"window.focus()"}),d).is_err());
+        }
+        let d=c["commands"].as_array().unwrap().iter().find(|v|v["name"]=="ui.viewport.set").unwrap();
+        assert!(validate_input(&json!({"actor_id":"test","command":"ui.viewport.set","expected_pid":1,"width":400,"height":300,"operation_id":"op"}),d).is_err());
+        assert!(validate_input(&json!({"actor_id":"test","command":"ui.viewport.set","expected_pid":1,"width":1600,"height":1200,"operation_id":"op"}),d).is_ok());
+        assert!(super::super::agent_viewport::execute(&json!({"expected_pid":0}),false).is_err());
+    }
     #[test]
     fn wp0329_localization_bridge_catalog_rejects_missing_and_arbitrary_inputs() {
         let c = catalog();
@@ -560,6 +630,56 @@ mod tests {
             assert!(validate_input(&json!({"actor_id":"test","command":name,"item_id":"x","media_path":"x","sql":"DELETE"}),d).is_err());
         }
         assert!(require_localization_mutation_ready().is_err(), "No app state must fail closed");
+    }
+
+    #[test]
+    fn wp0330_voice_readiness_is_read_only_and_rejects_mutation_inputs() {
+        let c = catalog();
+        let d = c["commands"].as_array().unwrap().iter().find(|v|v["name"]=="tools.voice_readiness").unwrap();
+        assert!(is_read("tools.voice_readiness"));
+        assert!(is_read("tools.voice_runtime_paths"));
+        assert_eq!(d["read_only"], true);
+        assert_eq!(d["effect"], "read_only");
+        assert!(validate_input(&json!({"actor_id":"test","command":"tools.voice_readiness","pack_id":"tts_neural_local_v1"}), d).is_ok());
+        for extra in ["force", "operation_id", "sql"] {
+            let mut request = json!({"actor_id":"test","command":"tools.voice_readiness","pack_id":"tts_neural_local_v1"});
+            request[extra] = json!("forbidden");
+            assert!(validate_input(&request, d).is_err());
+        }
+    }
+
+    #[test]
+    fn wp0330_competing_readiness_request_never_starts_a_second_probe() {
+        let gate = Mutex::new(());
+        let first = gate.lock().unwrap();
+        let starts = std::sync::atomic::AtomicUsize::new(0);
+        let result = with_voice_readiness_admission(&gate, || starts.fetch_add(1, Ordering::SeqCst));
+        assert!(result.unwrap_err().contains("busy"));
+        assert_eq!(starts.load(Ordering::SeqCst), 0);
+        drop(first);
+        assert_eq!(with_voice_readiness_admission(&gate, || starts.fetch_add(1, Ordering::SeqCst)), Ok(0));
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(with_voice_readiness_admission(&gate, || 7), Ok(7));
+    }
+
+    #[test]
+    fn wp0330_poisoned_readiness_admission_is_unknown_and_never_starts_a_probe() {
+        let gate = Mutex::new(());
+        let panicked = std::panic::catch_unwind(|| {
+            let _ = with_voice_readiness_admission(&gate, || panic!("local test probe failure"));
+        });
+        assert!(panicked.is_err());
+        assert!(gate.is_poisoned());
+        let starts = std::sync::atomic::AtomicUsize::new(0);
+        for _ in 0..2 {
+            let result = with_voice_readiness_admission(&gate, || starts.fetch_add(1, Ordering::SeqCst));
+            let error = result.unwrap_err();
+            assert!(error.contains("unavailable after prior probe failure"));
+            assert!(error.contains("readiness unknown"));
+            assert!(!error.contains("busy"));
+            assert_eq!(starts.load(Ordering::SeqCst), 0);
+            assert!(gate.is_poisoned());
+        }
     }
 
     #[test]
@@ -706,4 +826,20 @@ mod tests {
         assert!(is_read("downloads.batch_members"));
         assert!(!is_read("queue.pause"));
     }
+    #[test]
+    fn wp0330_private_voice_paths_use_original_selected_routing_without_readiness_claim() {
+        let temp=tempfile::tempdir().unwrap();let paths=AppPaths::new(temp.path().join("private"));
+        assert!(voice_runtime_paths_readback(&paths).is_err());
+        for python in [paths.python_venv_dir(),paths.python_cosyvoice_venv_dir()] {
+            let executable=if cfg!(windows) {python.join("Scripts").join("python.exe")} else {python.join("bin").join("python")};
+            std::fs::create_dir_all(executable.parent().unwrap()).unwrap();std::fs::write(executable,b"test-only path presence; never executed").unwrap();
+        }
+        let value=voice_runtime_paths_readback(&paths).unwrap();
+        assert_eq!(value["configuration_only"],true);assert_eq!(value["readiness"],"not asserted");
+        assert_eq!(value["main_interpreter"],tools::python_venv_python_path(&paths).unwrap().to_string_lossy().as_ref());
+        assert_eq!(value["cosy_interpreter"],tools::cosyvoice_venv_python_path(&paths).unwrap().to_string_lossy().as_ref());
+        assert_eq!(value["huggingface_cache_dir"],paths.huggingface_cache_dir().to_string_lossy().as_ref());
+        assert_ne!(value["main_interpreter"],value["cosy_interpreter"]);
+    }
+
 }

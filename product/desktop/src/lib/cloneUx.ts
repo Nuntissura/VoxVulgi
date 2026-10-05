@@ -260,3 +260,8 @@ export function summarizeClonePreflight(
     speakers,
   };
 }
+
+
+export function shouldRefuseQuietCloneConfirmation(quietActivation: boolean, preflightReady: boolean): boolean {
+  return quietActivation && !preflightReady;
+}

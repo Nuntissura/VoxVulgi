@@ -1,0 +1,9 @@
+kind: gameplan_confirmations
+confirmations:
+- {id: GP-003, head: db862a2308a663f13eacd7c0a38996350098040a, at: '2026-09-29T20:27:48Z', note: no cargo/rustc/link procs 2026-09-29}
+- {id: GP-005, head: db862a2308a663f13eacd7c0a38996350098040a, at: '2026-09-29T20:27:48Z', note: LongPathsEnabled=1}
+- {id: GP-006, head: db862a2308a663f13eacd7c0a38996350098040a, at: '2026-09-29T20:27:48Z', note: same engine lib command as WP-0324; first WP-0325 round}
+- {id: GP-007, head: db862a2308a663f13eacd7c0a38996350098040a, at: '2026-09-29T20:27:48Z', note: 'run directly, no wrapper'}
+- {id: GP-009, head: db862a2308a663f13eacd7c0a38996350098040a, at: '2026-09-29T20:27:49Z', note: changed code reads no new env; tests use tempdir AppPaths}
+- {id: GP-010, head: db862a2308a663f13eacd7c0a38996350098040a, at: '2026-09-29T20:27:49Z', note: HEAD db862a2 diff 1466a5904830}
+- {id: GP-012, head: db862a2308a663f13eacd7c0a38996350098040a, at: '2026-09-29T20:27:49Z', note: tests do not touch running app}

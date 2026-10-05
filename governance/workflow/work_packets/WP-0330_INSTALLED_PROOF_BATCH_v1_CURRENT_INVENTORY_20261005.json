@@ -1,0 +1,1103 @@
+{
+  "file_id": "WP-0330-CURRENT-INVENTORY-20261005-01",
+  "file_kind": "current_proof_inventory",
+  "updated_at": "2026-10-05T03:22:31.1449616Z",
+  "head": "d066e3cd88ea55068347671496faedc767f5d6b9",
+  "canonical_statuses_modified": false,
+  "sources": [
+    {
+      "path": "governance/workflow/TASK_BOARD.md",
+      "sha256": "faeb3fc4b2c650e8d38febb3c80d57b2a04645054bb6fff533abfad101c3192a"
+    },
+    {
+      "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+      "sha256": "426a5b3b5b78ca94491ac1fc668604e466ed930170ddb062cb9d36a9e6cd8739"
+    }
+  ],
+  "counts": {
+    "current_three_status_total": 52,
+    "current_blocked": 9,
+    "current_in_progress": 10,
+    "current_needs_validation": 33,
+    "historical_scenarios": 66,
+    "historical_batches": 10,
+    "historical_inventory_rows": 33
+  },
+  "historical_row_current_status": [
+    {
+      "id": "WP-0143",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0146",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0148",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0156",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0160",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0169",
+      "current_board_status": "DONE",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0179",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0198",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0201",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0202",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0203",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0212",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0222",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0229",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0230",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0231",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0233",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0234",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0239",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0245",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0246",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0251",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0254",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0277",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0283",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0299",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0300",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0311",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0312",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0313",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0316",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0322",
+      "current_board_status": "NEEDS_VALIDATION",
+      "preserve_original_scope_and_scenarios": true
+    },
+    {
+      "id": "WP-0324",
+      "current_board_status": "DONE",
+      "preserve_original_scope_and_scenarios": true
+    }
+  ],
+  "historical_now_done": [
+    "WP-0169",
+    "WP-0324"
+  ],
+  "new_needs_validation_not_in_historical_inventory": [
+    "WP-0335",
+    "WP-0329"
+  ],
+  "board_summary_drift": {
+    "action": "Root review before editing the generated/count projection; no packet promotion implied.",
+    "in_progress_summary_says": 9,
+    "actual_rows": 10,
+    "root_correction": "Current summary count10; row/packet statuses unchanged by this correction"
+  },
+  "new_batch_proposals": [
+    {
+      "remaining": "Final exact clean offline ISO acceptance; prior real runtime qualification remains retained.",
+      "dependency": "WP-0316/GUIDE actual clean standard profile with authenticated offline launcher; final ONE attempt remains unused.",
+      "id": "WP-0329",
+      "batch": "exact_full_offline_iso"
+    },
+    {
+      "remaining": "A07 readable paired Jobs snapshot/dump and independent root acceptance; A06 stored normal-runtime evidence must be opened and mapped.",
+      "dependency": "Reviewed quiet viewport candidate focused/build/Update proof; no source-only closure.",
+      "id": "WP-0335",
+      "batch": "installed_selected_queue_runtime_and_quiet_jobs_ui"
+    }
+  ],
+  "current_rows": [
+    {
+      "id": "WP-0335",
+      "title": "Selected queue read amplification",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0335_SELECTED_QUEUE_READ_AMPLIFICATION_v1.json",
+      "packet_sha256": "a0f1545953652fb9b8aaa3e70e7f67cf787b4e8d75ff37477faf007f400dfa49",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [
+        "  \"dependencies\": ["
+      ],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0095",
+      "title": "Localization Studio manual app smoke",
+      "board_status": "BLOCKED",
+      "packet_status": "BLOCKED",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0095_LOCALIZATION_STUDIO_MANUAL_APP_SMOKE.md",
+      "packet_sha256": "fc1c2f259e3a522205b8f046c313d8c27124ae0e977a09945a87a020a1cc05cd",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": "Historical smoke umbrella; original benchmark, voice-plan, compare, recipe, output and shell criteria remain. Completion depends on unresolved localization deliverable/proof in WP-0289 and native shell checks WP-0146/WP-0148; the March regression wording is historical, not a new implementation list."
+    },
+    {
+      "id": "WP-0142",
+      "title": "Archiver downloader auth and session recovery",
+      "board_status": "IN_PROGRESS",
+      "packet_status": "IN_PROGRESS",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0142_ARCHIVER_DOWNLOADER_AUTH_AND_SESSION_RECOVERY.md",
+      "packet_sha256": "a8ed57c7729700241985c1402d350e016672bb991fd5abefca9b9c0b44c02370",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": "Partial historical auth/runtime work, not active March dependency refresh. WP-0191 investigation is DONE; WP-0299 owns current YouTube runtime and WP-0303/WP-0319 own later Instagram recovery. Explicit-session precedence and JSON/header/Netscape/file input cases plus installer-state authenticated proof remain here until a complete successor mapping is recorded. No requirement discarded."
+    },
+    {
+      "id": "WP-0143",
+      "title": "Localization Studio operator flow and output recovery",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0143_LOCALIZATION_STUDIO_OPERATOR_FLOW_AND_OUTPUT_RECOVERY.md",
+      "packet_sha256": "60ff0df4c3f53af65c928140be193d0398ad5d99a3a6afc4da6f9d39f680884b",
+      "historically_inventoried": true,
+      "historical_batch": "localization_real_media",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0143",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0146",
+      "title": "Window move affordance regression repair",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0146_WINDOW_MOVE_AFFORDANCE_REGRESSION_REPAIR.md",
+      "packet_sha256": "c56e0a2ec593033d79e0e036c46fe242c12bf8de205e3cd22f4f8e4d651cb67f",
+      "historically_inventoried": true,
+      "historical_batch": "native_window_and_open",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0146",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0148",
+      "title": "Frameless window bounds and fullscreen correctness",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0148_FRAMELESS_WINDOW_BOUNDS_AND_FULLSCREEN_CORRECTNESS.md",
+      "packet_sha256": "44f8b372c9f58de2dd840859a8468f5b8134de46132827fe5939fab3d63fd0eb",
+      "historically_inventoried": true,
+      "historical_batch": "native_window_and_open",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0148",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0156",
+      "title": "Voice clone truthfulness and fallback disclosure",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0156_VOICE_CLONE_TRUTHFULNESS_AND_FALLBACK_DISCLOSURE.md",
+      "packet_sha256": "ad16eaf57af59254e5ddc4ab513209fbe0ac1e7a4c2804ece2555e928f5325d1",
+      "historically_inventoried": true,
+      "historical_batch": "localization_real_media",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0156",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0157",
+      "title": "Reusable voice capture and apply first-run flow",
+      "board_status": "IN_PROGRESS",
+      "packet_status": "IN_PROGRESS",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0157_REUSABLE_VOICE_CAPTURE_AND_APPLY_FIRST_RUN_FLOW.md",
+      "packet_sha256": "ab187e6caa127255d57a5ff7244720cf7322c147a54aea072cae7ecb530d4e02",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": "First capture/save/apply basics-lane slice exists. Full cross-item capture -> save -> apply -> dub, reusable asset behavior, discoverability and advanced-control handoff remain; no complete implementation/proof record supports closure."
+    },
+    {
+      "id": "WP-0160",
+      "title": "Legacy YouTube subscription continuity state decoupling",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0160_LEGACY_YOUTUBE_SUBSCRIPTION_CONTINUITY_STATE_DECOUPLING.md",
+      "packet_sha256": "8039625d00ea71add63714bbd9f3e36e06f54515e29ba58007b43bd082b73e46",
+      "historically_inventoried": true,
+      "historical_batch": "migrated_subscription_continuity",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0160",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0179",
+      "title": "Translation Style Settings",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0179_TRANSLATION_STYLE_SETTINGS.md",
+      "packet_sha256": "31f40e0b93faeb0297e9cda16b224efd7652fc3260e27a47d2414b1019c2ab9d",
+      "historically_inventoried": true,
+      "historical_batch": "localization_real_media",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0179",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0184",
+      "title": "Fish Speech 1.5 Backend Integration",
+      "board_status": "IN_PROGRESS",
+      "packet_status": "IN_PROGRESS",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0184_FISH_SPEECH_BACKEND_INTEGRATION.md",
+      "packet_sha256": "2feb8059570ca2ce8d92ea75144697a88024c2311550900ce864a0618887eccb",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": "2026-09-30 status reconciliation: IN_PROGRESS. 2026-08-15 adversarial inspection establishes a catalog/starter-recipe scaffold, not a managed Fish Speech integration. Remaining: Managed pinned source/environment/weights, bounded server lifecycle, real zero-shot render/dub, backend comparison, offline and packaged proof."
+    },
+    {
+      "id": "WP-0198",
+      "title": "Localization import handoff and workspace visibility recovery",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0198_LOCALIZATION_IMPORT_HANDOFF_AND_WORKSPACE_VISIBILITY_RECOVERY.md",
+      "packet_sha256": "1203f73b58094967d7b5e75195b2762f408dc1da24f2e5a9f19577a97a1f19f2",
+      "historically_inventoried": true,
+      "historical_batch": "localization_real_media",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0198",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0201",
+      "title": "Localization empty-transcript fail-fast and stage truth",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0201_LOCALIZATION_EMPTY_TRANSCRIPT_FAILFAST_AND_STAGE_TRUTH.md",
+      "packet_sha256": "31926b02f34c126ec05ab1d443739a6b65b96760ec44d2d4237d3a3d6b1a5549",
+      "historically_inventoried": true,
+      "historical_batch": "localization_real_media",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0201",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0202",
+      "title": "Diarization pack dependency integrity and self-repair",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0202_DIARIZATION_PACK_DEPENDENCY_INTEGRITY_AND_SELF_REPAIR.md",
+      "packet_sha256": "09c3da995e1892e6071ede33443a93c82736ad21c0df9a6cdda836c8c09cd1f7",
+      "historically_inventoried": true,
+      "historical_batch": "managed_pack_recovery_and_progress",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0202",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0203",
+      "title": "Localization import cancellation and duplicate queue containment",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0203_LOCALIZATION_IMPORT_CANCELLATION_AND_DUPLICATE_QUEUE_CONTAINMENT.md",
+      "packet_sha256": "d8e8521ce3d49ba5b30304bcbc7820e62d45d8967f2deb571331fb68fdbd73f8",
+      "historically_inventoried": true,
+      "historical_batch": "localization_real_media",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0203",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0212",
+      "title": "Safe Mode pill placement and exit-rehydrate notice",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0212_SAFE_MODE_PILL_AND_EXIT_REHYDRATE_NOTICE.md",
+      "packet_sha256": "88f3c2028a9b33c594a7b58b9870adc3ba38f26b331d1fded4d059fa3b7a24ff",
+      "historically_inventoried": true,
+      "historical_batch": "packaged_isolated_ui",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0212",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0222",
+      "title": "Reveal media file exit code truthfulness",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0222_REVEAL_MEDIA_FILE_EXIT_CODE_TRUTHFULNESS.md",
+      "packet_sha256": "bacb8bbcdb32588c73c30c28ffe3d490626872e8ef74bbcb71e32779e0c799bb",
+      "historically_inventoried": true,
+      "historical_batch": "native_window_and_open",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0222",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0229",
+      "title": "Phase2 install short-circuit when packs already present",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0229_PHASE2_INSTALL_SHORT_CIRCUIT_WHEN_PACKS_PRESENT.md",
+      "packet_sha256": "67b750162970743021962d615a7fa42f43f1e0ea5c63ba1a6072107d4e59b458",
+      "historically_inventoried": true,
+      "historical_batch": "managed_pack_recovery_and_progress",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0229",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0230",
+      "title": "Phase2 install progress bar and status truthfulness",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0230_PHASE2_INSTALL_PROGRESS_BAR_AND_STATUS_TRUTHFULNESS.md",
+      "packet_sha256": "dd47f71b7226f2ee61d475b066cb63ab59c7069e2616b2ea9e17210f111dd518",
+      "historically_inventoried": true,
+      "historical_batch": "managed_pack_recovery_and_progress",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0230",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0231",
+      "title": "Neural TTS pack hf_hub/transformers pin and recovery",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0231_NEURAL_TTS_HF_HUB_TRANSFORMERS_PIN_AND_RECOVERY.md",
+      "packet_sha256": "b0d5592929b79119a9f9e9e8102c4b3882ddb7e88be38ec963b642d6bbbcce5c",
+      "historically_inventoried": true,
+      "historical_batch": "managed_pack_recovery_and_progress",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0231",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0232",
+      "title": "Per-pack hashed lockfile and `--require-hashes` installs",
+      "board_status": "IN_PROGRESS",
+      "packet_status": "IN_PROGRESS",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0232_PER_PACK_HASHED_LOCKFILE_AND_REQUIRE_HASHES.md",
+      "packet_sha256": "dc616d8440683d62cbb92302e6cd0eb875f559cf9922a2bf053a59626eeb609d",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": "Five hashed lockfiles implemented. Current lockfile inventory still lacks spleeter.lock.json; the original sixth-pack gap is real, not merely an old operator checklist. Remaining is coverage of all intended packs plus real lockfile consumption/hash-refusal proof. Later all-pack warmup success does not prove all-pack hashed installation."
+    },
+    {
+      "id": "WP-0233",
+      "title": "CI / pre-build warmup gate for every Python pack",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0233_CI_WARMUP_GATE_FOR_PYTHON_PACKS.md",
+      "packet_sha256": "875c10901ab4d47be5e6acd2c50b3c9c44423aef680dc6c942128bd85a4dc6a1",
+      "historically_inventoried": true,
+      "historical_batch": "managed_pack_recovery_and_progress",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0233",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0234",
+      "title": "Atomic per-pack install with staging and rollback",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0234_ATOMIC_PER_PACK_INSTALL_WITH_STAGING_AND_ROLLBACK.md",
+      "packet_sha256": "1b034face9135721ef95273d0462398a261a9e3a6def34b409a35b9492ac180c",
+      "historically_inventoried": true,
+      "historical_batch": "managed_pack_recovery_and_progress",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0234",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0235",
+      "title": "First-run \"Set up voice packs\" flow (outside Diagnostics)",
+      "board_status": "BLOCKED",
+      "packet_status": "BLOCKED",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0235_FIRST_RUN_VOICE_PACK_SETUP_FLOW.md",
+      "packet_sha256": "b829601fd4881896f7ab4b1303ec311186733e5493be874e5fc8a015485585b3",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": "Clean-state setup UI and sample runtime proof passed. Remaining full first-run progress and per-pack repair depend on WP-0230 and unimplemented WP-0236; those dependencies, not the completed setup slice, prevent closure."
+    },
+    {
+      "id": "WP-0239",
+      "title": "Operator verification of voice-pack reliability build (v0.1.27)",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0239_OPERATOR_VERIFICATION_VOICE_PACK_RELIABILITY_BUILD.md",
+      "packet_sha256": "dc47c5bdee583cd84586afc194f4c05d1737dab99e14ee6a98cfdcf30378a992",
+      "historically_inventoried": true,
+      "historical_batch": "managed_pack_recovery_and_progress",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0239",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0245",
+      "title": "Jobs/Library batched queries and install-command tracing",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0245_JOBS_LIBRARY_BATCHED_QUERIES_AND_INSTALL_TRACE.md",
+      "packet_sha256": "ac4b222c7e716411949fc2f9923cdfdf27bac016283a1bf9edd07b4680eda459",
+      "historically_inventoried": true,
+      "historical_batch": "managed_pack_recovery_and_progress",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0245",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0246",
+      "title": "Localization Studio Spleeter deadlock fix, job-spawn timeout/cancel hardening, stuck-job watchdog",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0246_LOCALIZATION_SPLEETER_DEADLOCK_JOB_TIMEOUT_WATCHDOG.md",
+      "packet_sha256": "fad220c296a80a2fc619895b4fea70c2f13f9aae168c8444b304ef2e78c06cac",
+      "historically_inventoried": true,
+      "historical_batch": "localization_real_media",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0246",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0251",
+      "title": "Localization dub Kokoro offline-cache honest readiness",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0251_LOCALIZATION_DUB_KOKORO_OFFLINE_CACHE_HONEST_READINESS.md",
+      "packet_sha256": "9f5b8c2fe8b3e4b9dde3ce8e2809e321949c4766180ae1835c916a6bdc7fa924",
+      "historically_inventoried": true,
+      "historical_batch": "localization_real_media",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0251",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0252",
+      "title": "Localization quality stack: whisper large-v3 ASR + CosyVoice 2 voice clone",
+      "board_status": "IN_PROGRESS",
+      "packet_status": "IN_PROGRESS",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0252_LOCALIZATION_QUALITY_STACK_LARGEV3_ASR_AND_COSYVOICE2.md",
+      "packet_sha256": "558b28cf338da4b3eb24476b2a187f0ab9a97ed44a2e7afd9218223c5a0041b2",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": "WP-0262 corrects false historical 0.1.68/0.1.69 shipping claims: first actual inclusion was 0.1.81. Large-v3 and CosyVoice runtime/provisioning slices exist. Preserved remaining work is hashed provisioning, wetext offline pre-cache and clean-machine full managed dubbed deliverable proof, reusing WP-0316 current runtime authority; new outputs follow WP-0306 MKV policy, with historical MP4 inputs preserved. Update 2026-10-05 inspected a0bb600/runtime7ea proof: installed large-v3-q5_0 ASR and CosyVoice CPU clone_preserved (converted1/fallback0), Demucs/mix/MKV/QC/export succeeded. Remaining hashed provisioning/complete normalizer assets, wetext zero-egress and clean blocked-network final install-to-export. Status unchanged; later d066 exact-source and listening quality are not inferred."
+    },
+    {
+      "id": "WP-0254",
+      "title": "Lane-based job scheduling + startup subscription auto-sync",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0254_JOB_LANES_SCHEDULING_AND_STARTUP_AUTO_SYNC.md",
+      "packet_sha256": "1789767116806967d6b2783c56ebd0acd859837307cbaa06b91f53cc3d9866bd",
+      "historically_inventoried": true,
+      "historical_batch": "actual_provider_runner_and_export",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0254",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0257",
+      "title": "Subscription-refresh anti-bot / auth-block cascade hardening",
+      "board_status": "IN_PROGRESS",
+      "packet_status": "IN_PROGRESS",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0257_SUBSCRIPTION_REFRESH_ANTIBOT_AUTHBLOCK_HARDENING.md",
+      "packet_sha256": "19bbe112827cf1218475b3888666303fe34a8e9d40ef3215e86c335add983146",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": "Implemented corroboration/TTL/backoff and later pacing/circuit-breaker work exist. Preserve unmapped retry guard, auth scope, structured transient failures and update-all recovery scenarios; WP-0299/WP-0320 overlap does not prove every original requirement complete."
+    },
+    {
+      "id": "WP-0253",
+      "title": "Library unification + responsiveness + NAS fallback + bundled watcher",
+      "board_status": "IN_PROGRESS",
+      "packet_status": "IN_PROGRESS",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0253_LIBRARY_UNIFICATION_RESPONSIVENESS_NAS_FALLBACK_WATCHER.md",
+      "packet_sha256": "17c684ce57e29a2d4589c1547e9eb3e730407eeafd9928b026dd74a018f8b48f",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": "Packet records new-item origin/library stamping, paged YouTube history, NAS fallback wiring and verified-copy fallback resync implemented. They are not remaining implementation work. Remaining original one-command/view collapse, sampling-budget tuning and HF-cache/voice-job diagnostic signals/proof are preserved; no NAS resync or media mutation authorized by status correction."
+    },
+    {
+      "id": "WP-0262",
+      "title": "Localization Studio: root cause (never worked) + fix plan",
+      "board_status": "IN_PROGRESS",
+      "packet_status": "IN_PROGRESS",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0262_LOCALIZATION_STUDIO_ROOT_CAUSE_AND_FIX_PLAN.md",
+      "packet_sha256": "46f81add4b69aa970980f044a701afa12b12621a67a6099d754a5dc59bca4406",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": "2026-09-30 status reconciliation: IN_PROGRESS. Normalize board MOSTLY DONE and packet qualified IN_PROGRESS to one status. Later board history records Kokoro import compatibility and subtitles-only/visible multi-speaker failure; these do not prove full dub synthesis. Remaining: Full end-to-end dub synthesis, CosyVoice warm-import verification, installation precompile/warmup and offline payload/default model closure. Preserve July diagnosis as dated history."
+    },
+    {
+      "id": "WP-0263",
+      "title": "Instagram Archiver parity: single + passive subscription cron + global cookie",
+      "board_status": "BLOCKED",
+      "packet_status": "BLOCKED",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0263_INSTAGRAM_ARCHIVER_PARITY_PASSIVE_CRON_GLOBAL_COOKIE.md",
+      "packet_sha256": "53a1f81803f02a3f844580bfc69ecfaeeffe3fa1212ac3151e3754646a691ef5",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": "2026-09-30 status reconciliation: BLOCKED. Normalize REOPENED to an actionable status. Opened WP-0303/summary.md showing exact August Posts/single/refresh/restart success; WP-0319 records current session feedback_required job 8f48c9d0-79c7-4106-83d0-d9086b9bbc69. Remaining: Instagram must accept configured session/request. Reconcile original passive cron/startup/global-cookie precedence/Test/auth guard/UI criteria against WP-0303 and prove any uncovered criteria; old reopening is not evidence all work remains unimplemented."
+    },
+    {
+      "id": "WP-0277",
+      "title": "Recoverable NAS duplicate cleanup",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0277_RECOVERABLE_NAS_DUPLICATE_CLEANUP_v1.md",
+      "packet_sha256": "92cde5e55d52b94418507b099f13ef784f9bbc779ccfe52210bb2aecaac0497c",
+      "historically_inventoried": true,
+      "historical_batch": "disposable_cleanup_quarantine_rollback",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0277",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [
+        "- Dependencies: `WP-0275`, `WP-0276`"
+      ],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0283",
+      "title": "Canonical queued identity compaction and execution gate",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0283_CANONICAL_QUEUED_IDENTITY_COMPACTION_AND_EXECUTION_GATE_v1.md",
+      "packet_sha256": "f513ba077bb6c7fb307736bd357e713f444506aa16232730cfdc135e66297d56",
+      "historically_inventoried": true,
+      "historical_batch": "packaged_isolated_ui",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0283",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [
+        "- Dependencies: `WP-0273`, `WP-0275`, `WP-0276`, `WP-0281`"
+      ],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0288",
+      "title": "Localization stack local benchmark and backup registry",
+      "board_status": "BLOCKED",
+      "packet_status": "BLOCKED",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0288_LOCALIZATION_STACK_LOCAL_BENCHMARK_AND_BACKUP_REGISTRY_v1.md",
+      "packet_sha256": "6953ef21962b02677f27e742e2cc09845f0647d20110c3154980dcb8e519bcbd",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": "Remaining corpus >=2 KO and >=2 JA clips, comparisons, current packaging/backup proof and operator listening verdict are explicit external inputs/gates. Successful one-stage evidence does not close the benchmark."
+    },
+    {
+      "id": "WP-0289",
+      "title": "Revised stack: first dubbed deliverable through the installed app",
+      "board_status": "BLOCKED",
+      "packet_status": "BLOCKED",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0289_REVISED_STACK_FIRST_DUBBED_DELIVERABLE_THROUGH_INSTALLED_APP_v1.md",
+      "packet_sha256": "6c058a11227c55b4d84a1e75175d83c56a17a1e7205a8dc8bb414cb737d6f113",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": "First installed offline dubbed deliverable waits on WP-0288 frozen selections and listening gate. Original deliverable scope preserved; WP-0306 governs MKV for new video outputs, historical MP4 input compatibility retained. Update 2026-10-05 inspected a0bb600/runtime7ea proof: installed Haerin MKV (1008064B), nonsilent7.174966s mix, cloned/original audio, eng/kor subtitles and canonical export succeeded. Still BLOCKED on WP0288 frozen selections/listening; revised defaults, Miyeon, clean blocked-network install/export and CPU-tier UI remain. Existing stack success is not revised-stack or later d066 exact-source proof; final ISO gate/one unused attempt preserved."
+    },
+    {
+      "id": "WP-0295",
+      "title": "Three-stem ambient bed adoption",
+      "board_status": "BLOCKED",
+      "packet_status": "BLOCKED",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0295_THREE_STEM_AMBIENT_BED_ADOPTION_v1.md",
+      "packet_sha256": "5c9d8f7fe65318f8701cacf18a5844d213b25e92f8ecdc470808b63e9a30c25f",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": "Three-stem adoption waits on WP-0288 separation winner and an ambience-heavy clip; these are genuine unmet inputs, not old installation notes."
+    },
+    {
+      "id": "WP-0298",
+      "title": "Causal freeze performance boundary and diagnostic capture",
+      "board_status": "BLOCKED",
+      "packet_status": "BLOCKED",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0298_CAUSAL_FREEZE_PERFORMANCE_BOUNDARY_AND_DIAGNOSTIC_CAPTURE_v1.md",
+      "packet_sha256": "144b22306454b63029d34b3b6d3aea56c6c0aae42ef8416adfaf000e957f2e1b",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [
+        "- Dependencies: WP-0221, WP-0242, WP-0250, WP-0278, WP-0280"
+      ],
+      "current_board_remaining_context": "Diagnostic implementation exists; remaining causal integration requires WP-0311/0312/0313 proof and WP-0314 liveness attribution plus valid exact current-profile observation/isolated job-start/latency evidence. Historical invalid canonical-data agent run is not closure proof."
+    },
+    {
+      "id": "WP-0299",
+      "title": "Secure downloader runtime and adaptive YouTube protection",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0299_SECURE_DOWNLOADER_RUNTIME_AND_ADAPTIVE_YOUTUBE_PROTECTION_v1.md",
+      "packet_sha256": "eb1ce742ca4390c8da445b5dc3c71bb65aabe04e3978175df4ee0941ff84b2bc",
+      "historically_inventoried": true,
+      "historical_batch": "actual_provider_runner_and_export",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0299",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [
+        "- Dependencies: WP-0257, WP-0266, WP-0267, WP-0269, WP-0298"
+      ],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0300",
+      "title": "Canonical provider metadata and multilingual title repair",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0300_CANONICAL_PROVIDER_METADATA_MULTILINGUAL_TITLE_REPAIR_v1.md",
+      "packet_sha256": "7b0fbe345093bcf1e9259f0503bcaf39558326f40cdccbfd53089cbb6bfdee1d",
+      "historically_inventoried": true,
+      "historical_batch": "provider_metadata_repair",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0300",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [
+        "- Dependencies: WP-0256, WP-0268, WP-0286, WP-0299"
+      ],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0311",
+      "title": "Diagnostics demand orchestration, command lifetime, and probe single-flight",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0311_DIAGNOSTICS_DEMAND_ORCHESTRATION_COMMAND_LIFETIME_AND_PROBE_SINGLE_FLIGHT_v1.md",
+      "packet_sha256": "b2ed2a92626dd4ee9f9bea56b5e3844694ae08d0caa031dbe893ec9cc88c705b",
+      "historically_inventoried": true,
+      "historical_batch": "disposable_vm_normal_window",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0311",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0312",
+      "title": "SQLite runtime access boundary and lock attribution",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0312_SQLITE_RUNTIME_ACCESS_BOUNDARY_AND_LOCK_ATTRIBUTION_v1.md",
+      "packet_sha256": "dfdd5292f14daa4619f5583d239461dd1cd4e71da8c8e1717fa702eab5f58855",
+      "historically_inventoried": true,
+      "historical_batch": "disposable_vm_normal_window",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0312",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0313",
+      "title": "Offline hydration scheduling, attestation, and startup observability",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0313_OFFLINE_HYDRATION_SCHEDULING_ATTESTATION_AND_STARTUP_OBSERVABILITY_v1.md",
+      "packet_sha256": "de4f6939dcb5d7933316f2c270bd4028421612541bf313aaf9ad4522e7d517b4",
+      "historically_inventoried": true,
+      "historical_batch": "disposable_vm_normal_window",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0313",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0314",
+      "title": "WebView/native-window liveness and ETW attribution",
+      "board_status": "BLOCKED",
+      "packet_status": "BLOCKED",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0314_WEBVIEW_NATIVE_WINDOW_LIVENESS_AND_ETW_ATTRIBUTION_v1.md",
+      "packet_sha256": "30cf8f790a224f5319e15fd89c283e4eb3ab1beac9d13727edd531b477749c67",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": "Not started beyond planning; explicitly blocked by completed proof of WP-0311/WP-0312/WP-0313. Liveness/ETW capture remains required under its original contract."
+    },
+    {
+      "id": "WP-0316",
+      "title": "Managed offline runtime and package-only installer",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0316_MANAGED_OFFLINE_RUNTIME_AND_PACKAGE_ONLY_INSTALLER_v1.md",
+      "packet_sha256": "3d35142b9b8355c477162b3803ce2a0667e3ccec0071543f2fa5629a71c8490a",
+      "historically_inventoried": true,
+      "historical_batch": "exact_full_offline_iso",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0316",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0319",
+      "title": "Subscription recovery and archive quality",
+      "board_status": "BLOCKED",
+      "packet_status": "BLOCKED",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0319_SUBSCRIPTION_RECOVERY_AND_ARCHIVE_QUALITY_v1.json",
+      "packet_sha256": "a853197ae59fdef760ec07291daae034a4e8ef4f7df8e740bcb374139374ab82",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": "YouTube recovery/quality implemented; latest contract records exact Instagram feedback_required provider blocker. Historical successful WP-0303 does not prove this later account/session case recovered."
+    },
+    {
+      "id": "WP-0322",
+      "title": "Actionable errors and automatic subscription export",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0322_ACTIONABLE_ERRORS_AND_SUBSCRIPTION_EXPORT_v1.md",
+      "packet_sha256": "05a241d20ef2cbba129e60b09207cb5a9b8fa0138e5aa3e161732f89bfa1175e",
+      "historically_inventoried": true,
+      "historical_batch": "actual_provider_runner_and_export",
+      "historical_dependency_reference": {
+        "path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1_inventory.json",
+        "row_id": "WP-0322",
+        "field": "dependency_or_blocker"
+      },
+      "explicit_packet_dependency_lines": [],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0329",
+      "title": "Runtime readiness and model restoration",
+      "board_status": "NEEDS_VALIDATION",
+      "packet_status": "NEEDS_VALIDATION",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0329_RUNTIME_READINESS_REPAIR_v1.md",
+      "packet_sha256": "272e7d4110b007d6aed0e57ea78255825900a244221c16b33f3fa2ca5e992e18",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [
+        "Status: NEEDS_VALIDATION. Owner: runtime_restore. Board: ../TASK_BOARD.md WP-0329. Refinement: WP-0329_RUNTIME_READINESS_REPAIR_v1_REFINEMENT.md. Dependencies: WP-0262, WP-0239, WP-0316. Preserve original localization/voice acceptance."
+      ],
+      "current_board_remaining_context": null
+    },
+    {
+      "id": "WP-0330",
+      "title": "Installed proof batch",
+      "board_status": "IN_PROGRESS",
+      "packet_status": "IN_PROGRESS",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1.json",
+      "packet_sha256": "6d467a93d590688557665ca8518856cfd95eca05eeea0cdcd593abdb6d846700",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [
+        "  \"dependencies\": ["
+      ],
+      "current_board_remaining_context": "Inventory and exercise remaining NEEDS_VALIDATION acceptance in compatible batches; preserve original contracts. WP: work_packets/WP-0330_INSTALLED_PROOF_BATCH_v1.json. Review2026-10-03: inventory33packets/66scenarios/10batches and limited cleanup/empty-export subset exist; current inventory reconciliation and remaining actual scenarios pending. Update2026-10-05: quiet viewport tooling refined and source-reviewed; implementation/packaged proof pending."
+    },
+    {
+      "id": "WP-0331",
+      "title": "Repair build and installer delivery",
+      "board_status": "IN_PROGRESS",
+      "packet_status": "IN_PROGRESS",
+      "status_agreement": true,
+      "packet_path": "governance/workflow/work_packets/WP-0331_REPAIR_BUILD_AND_INSTALLER_DELIVERY_v1.json",
+      "packet_sha256": "e2f1f591b4a046d0fc41632496875ef1697a6357fd5b29b85744977b33e9ffad",
+      "historically_inventoried": false,
+      "historical_batch": null,
+      "historical_dependency_reference": null,
+      "explicit_packet_dependency_lines": [
+        "  \"dependencies\": [\"WP-0316\", \"WP-0323\", \"WP-0327\", \"WP-0328\", \"WP-0329\"],"
+      ],
+      "current_board_remaining_context": "Integrate repairs, bundle focused Cargo checks, reuse canonical cache, commit/push, build retained 0.1.205 and prove exact installer. Full ISO governed solely by WP-0316/GUIDE. WP: work_packets/WP-0331_REPAIR_BUILD_AND_INSTALLER_DELIVERY_v1.json. Review2026-10-03: core13a built/installed, wrappere180 correction7checks and ISOcandidate complete; candidateNOT_RELEASED. Product-first sequencing and remaining exact acceptance recorded; single final attempt UNUSED."
+    }
+  ],
+  "limits": [
+    "Point-in-time canonical board and packet reads, not runtime proof.",
+    "Historical 33 rows/66 scenarios/10 batches remain immutable; two DONE rows retained, two new NEEDS_VALIDATION rows added only in this proposal.",
+    "Historical dependency text is preserved context, not a freshly verified environment blocker.",
+    "No DONE conclusion from age, implementation, status headings or predecessor mapping.",
+    "IN_PROGRESS/BLOCKED packets are dependency context, not additional NEEDS_VALIDATION scenarios."
+  ],
+  "root_review": "ACCEPTED_INVENTORY_ONLY_NOT_EXECUTION_OR_WP_CLOSURE",
+  "current_board_sha256": "5660a790b88fa1f9e78513fccfbc893768ef24501bb006ca7432fcfdede26c18",
+  "proposal_sha256": "e3bb3596683fb3d66f78b3884c208e3c4003b3824afe9c03de370ff95c9d7221"
+}

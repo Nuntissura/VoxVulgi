@@ -12,13 +12,13 @@ NEEDS_VALIDATION
 
 ## Operator Request Preserved
 
-- Operator asked whether re-running install after success would be a no-op. Investigation showed it is **not** a no-op — every pack's install function unconditionally runs all pip commands, even when the packages are already installed. pip's "Requirement already satisfied" path still walks the dependency resolver, costing tens of seconds to minutes per pack, plus Kokoro warmup re-loads voice models from disk every time.
+- Operator asked whether re-running install after success would be a no-op. Investigation showed it is **not** a no-op â€” every pack's install function unconditionally runs all pip commands, even when the packages are already installed. pip's "Requirement already satisfied" path still walks the dependency resolver, costing tens of seconds to minutes per pack, plus Kokoro warmup re-loads voice models from disk every time.
 
 ## Research Basis
 
 ### Sources checked
 
-- `product/engine/src/tools.rs` `install_portable_python` (line 845): already idempotent via `.probe` marker check (line 862-868) — confirms the pattern.
+- `product/engine/src/tools.rs` `install_portable_python` (line 845): already idempotent via `.probe` marker check (line 862-868) â€” confirms the pattern.
 - `product/engine/src/tools.rs` `install_python_toolchain` (line 937): only short-circuits the `python -m venv` call when `venv_dir.exists()`; pip work still continues unconditionally.
 - `product/engine/src/tools.rs` `install_spleeter_pack` (line 1232): runs `pip install --upgrade pip setuptools wheel`, then bootstrap packages, then multi-strategy install candidates for spleeter, every time. No early return.
 - `product/engine/src/tools.rs` `install_diarization_pack` (line 2100): always runs binary-repair pip install for numba/llvmlite pair, then pinned-args install, then `validate_diarization_runtime`. No early return.
@@ -32,7 +32,7 @@ NEEDS_VALIDATION
   - `diarization_pack_status` at `tools.rs:2005`
   - `tts_preview_pack_status` at `tools.rs:2167`
   - `tts_neural_local_v1_pack_status` at `tools.rs:2229`
-  - `tts_voice_preserving_local_v1_pack_status` at `tools.rs:2337` — already does a sophisticated check (Kokoro version present + warmup probe exists + OpenVoice version present + OpenVoice models on disk + OpenVoice patch applied).
+  - `tts_voice_preserving_local_v1_pack_status` at `tools.rs:2337` â€” already does a sophisticated check (Kokoro version present + warmup probe exists + OpenVoice version present + OpenVoice models on disk + OpenVoice patch applied).
 - Existing callers of `install_*_pack` that this WP must not break:
   - The Phase2 install job handler at `product/engine/src/jobs.rs:9810-9854` (the `match step_id.as_str()` block calls each `install_*_pack(paths)?`).
   - Test/example callers (must keep working unchanged):
@@ -42,7 +42,7 @@ NEEDS_VALIDATION
     - `product/engine/examples/wp0150_localization_run_smoke.rs` lines 225, 229, 233
     - `product/engine/src/bin/voxvulgi_offline_bundle_prep.rs` lines 153, 169, 177, 185, 193
 - `product/engine/src/jobs.rs:323-326` defines `InstallPhase2PacksV1Params`. Currently has only `resume_localization_run: Option<LocalizationRunRequest>`. Needs an optional `force: bool` field for the repair-by-force path.
-- `product/desktop/src-tauri/src/lib.rs:6708-6713` defines the Tauri command `jobs_enqueue_install_phase2_packs_v1`. Takes no parameters today — needs to accept an optional `force: bool` request body field.
+- `product/desktop/src-tauri/src/lib.rs:6708-6713` defines the Tauri command `jobs_enqueue_install_phase2_packs_v1`. Takes no parameters today â€” needs to accept an optional `force: bool` request body field.
 - `product/desktop/src/pages/DiagnosticsPage.tsx:3237-3250` is the existing "Install Voice cloning packages" button row. Needs a sibling "Force reinstall all packs" button for the repair path.
 
 ### Selected approach
@@ -58,7 +58,7 @@ For each of the five Phase2 pack install functions, add a sibling `install_*_pac
 Update the Phase2 install job handler to:
 
 - When the new `params.force` flag is `false` (default), call `install_*_pack_if_needed(paths)` for every step.
-- When `params.force` is `true`, call the bare `install_*_pack(paths)` for every step (current behavior — always re-run everything).
+- When `params.force` is `true`, call the bare `install_*_pack(paths)` for every step (current behavior â€” always re-run everything).
 
 Update the Tauri command to accept an optional `force: bool` (defaulting to `false`) and propagate it into `InstallPhase2PacksV1Params`.
 
@@ -68,21 +68,21 @@ Add a "Force reinstall all packs" button in the Diagnostics page next to the exi
 
 - **Signature change** (add `force: bool` to every `install_*_pack`): forces updates to all 15+ callers in tests / examples / offline_bundle_prep. Higher blast radius, longer review, more chances for a missed call site. The wrapper pattern delivers the same operator-facing behavior with one new caller-relevant function per pack.
 - **Environment-variable force toggle**: hidden behavior, hard to discover, leaks state across processes. Rejected.
-- **Per-pack auto-version-check (install only when pin changed)**: more correct long-term but requires comparing installed version against pin manifest version for each pack. Different logic per pack (some packs have multiple pip packages, some have model files in addition). Out of scope for this WP — file a follow-up if needed after WP-0229 lands.
+- **Per-pack auto-version-check (install only when pin changed)**: more correct long-term but requires comparing installed version against pin manifest version for each pack. Different logic per pack (some packs have multiple pip packages, some have model files in addition). Out of scope for this WP â€” file a follow-up if needed after WP-0229 lands.
 - **Make `install_portable_python` and `install_python_toolchain` also wrapped**: `install_portable_python` already has the `.probe` early-return at line 862-868. `install_python_toolchain` is cheap when the venv exists (its pip work is mostly setuptools+wheel upgrades). Leaving both as-is keeps the change scope tight; both can be wrapped later if their re-run cost becomes a complaint.
 
 ## High-ROI Additions
 
-- Re-using the existing `*_pack_status` functions means zero new validation logic. The status functions already encode "what does installed actually mean" for each pack (e.g., `tts_voice_preserving_local_v1_pack_status` checks Kokoro version + warmup probe + OpenVoice version + OpenVoice converter files + OpenVoice patch — all five conditions). The wrapper inherits whatever the status function reports.
-- The new force-reinstall button in Diagnostics gives operators a deliberate repair path that did not previously exist — today the only way to force a redo is to delete `latest.json` and the venv contents by hand.
+- Re-using the existing `*_pack_status` functions means zero new validation logic. The status functions already encode "what does installed actually mean" for each pack (e.g., `tts_voice_preserving_local_v1_pack_status` checks Kokoro version + warmup probe + OpenVoice version + OpenVoice converter files + OpenVoice patch â€” all five conditions). The wrapper inherits whatever the status function reports.
+- The new force-reinstall button in Diagnostics gives operators a deliberate repair path that did not previously exist â€” today the only way to force a redo is to delete `latest.json` and the venv contents by hand.
 - The WP-0227 resume logic in the Phase2 install job handler at `jobs.rs:9744-9803` is unaffected: it still preserves `done` steps from prior `latest.json` and skips them in the loop. The short-circuit added here is a second-layer safety net that catches the case where a step was attempted but the status check shows the pack is actually fully installed (e.g., from an offline-payload prehydration the install job didn't track in `latest.json`).
 
 ## Reused Systems
 
-- Five existing `*_pack_status` functions in `tools.rs` — unmodified.
-- `Phase2InstallState` / `Phase2InstallStep` structs in `jobs.rs` around line 9702 — unmodified.
-- WP-0227 resume logic at `jobs.rs:9744-9803` — unmodified; complementary.
-- Existing Tauri command registration in `lib.rs:7457` `tauri::generate_handler![...]` — unmodified entry needed (the command name `jobs_enqueue_install_phase2_packs_v1` stays the same).
+- Five existing `*_pack_status` functions in `tools.rs` â€” unmodified.
+- `Phase2InstallState` / `Phase2InstallStep` structs in `jobs.rs` around line 9702 â€” unmodified.
+- WP-0227 resume logic at `jobs.rs:9744-9803` â€” unmodified; complementary.
+- Existing Tauri command registration in `lib.rs:7457` `tauri::generate_handler![...]` â€” unmodified entry needed (the command name `jobs_enqueue_install_phase2_packs_v1` stays the same).
 
 ## Gaps Closed
 
@@ -93,7 +93,7 @@ Add a "Force reinstall all packs" button in the Diagnostics page next to the exi
 
 - Risk: a `*_pack_status` function returns `installed: true` when the pack is actually partially-broken (e.g., import works but the Kokoro warmup probe is stale), and the short-circuit returns early without repairing.
   - Remediation: each status function is the canonical "is this pack working" check used by other parts of the engine; if it's lying, that's a pre-existing bug surfaced (not introduced) by this WP. The force button gives the operator an escape hatch. Long-term: tighten the status functions if false-positive cases appear.
-- Risk: short-circuit hides a real install-failure regression — operator stops noticing that their install is broken because the button says "done" instantly.
+- Risk: short-circuit hides a real install-failure regression â€” operator stops noticing that their install is broken because the button says "done" instantly.
   - Remediation: the WP only short-circuits when `status.installed` is `true`. If it's `false`, the install runs as before and any failure surfaces normally. The button label stays "Install Voice cloning packages" (not "Voice cloning packages are installed"), so the operator's mental model is unchanged.
 - Risk: future code adds a new install function and forgets to add the `_if_needed` wrapper.
   - Remediation: an inline comment on each wrapper points back to this WP. A grep for `install_*_pack` shows the pattern.
@@ -127,7 +127,7 @@ Add a "Force reinstall all packs" button in the Diagnostics page next to the exi
 - After the build is installed, a single operator workflow proves the short-circuit:
   1. Get one Phase2 install to complete successfully (all steps `done` in `latest.json`).
   2. Click "Install Voice cloning packages" again.
-  3. Watch the per-step `.log` files. They should remain empty for the newly-clicked job, OR contain only the `begin step=…` lines without the pip output. Total job runtime should be sub-30-seconds total instead of multi-minute.
+  3. Watch the per-step `.log` files. They should remain empty for the newly-clicked job, OR contain only the `begin step=â€¦` lines without the pip output. Total job runtime should be sub-30-seconds total instead of multi-minute.
   4. Click "Force reinstall all packs".
   5. Watch the per-step `.log` files. They should now contain the full pip install output as before (forced execution).
 
@@ -140,7 +140,7 @@ Add a "Force reinstall all packs" button in the Diagnostics page next to the exi
 
 ## Implementation Plan (for a no-context model)
 
-### Step 1 — `product/engine/src/tools.rs`
+### Step 1 â€” `product/engine/src/tools.rs`
 
 Add five wrapper functions, one for each pack. Insert each wrapper immediately AFTER its corresponding `install_*_pack` function in the file (so a reader sees them as a pair).
 
@@ -161,17 +161,17 @@ pub fn install_xxx_pack_if_needed(paths: &AppPaths) -> Result<XxxPackStatus> {
 }
 ```
 
-Five concrete substitutions to apply (verify each `*_pack_status` function name and `*PackStatus` return type before editing — they are listed in the Research Basis):
+Five concrete substitutions to apply (verify each `*_pack_status` function name and `*PackStatus` return type before editing â€” they are listed in the Research Basis):
 
-1. `install_spleeter_pack_if_needed` → calls `spleeter_pack_status` → returns `SpleeterPackStatus` → falls through to `install_spleeter_pack(paths)`.
-2. `install_diarization_pack_if_needed` → `diarization_pack_status` → `DiarizationPackStatus` → `install_diarization_pack`.
-3. `install_tts_preview_pack_if_needed` → `tts_preview_pack_status` → `TtsPreviewPackStatus` → `install_tts_preview_pack`.
-4. `install_tts_neural_local_v1_pack_if_needed` → `tts_neural_local_v1_pack_status` → `TtsNeuralLocalV1PackStatus` → `install_tts_neural_local_v1_pack`.
-5. `install_tts_voice_preserving_local_v1_pack_if_needed` → `tts_voice_preserving_local_v1_pack_status` → `TtsVoicePreservingLocalV1PackStatus` → `install_tts_voice_preserving_local_v1_pack`.
+1. `install_spleeter_pack_if_needed` â†’ calls `spleeter_pack_status` â†’ returns `SpleeterPackStatus` â†’ falls through to `install_spleeter_pack(paths)`.
+2. `install_diarization_pack_if_needed` â†’ `diarization_pack_status` â†’ `DiarizationPackStatus` â†’ `install_diarization_pack`.
+3. `install_tts_preview_pack_if_needed` â†’ `tts_preview_pack_status` â†’ `TtsPreviewPackStatus` â†’ `install_tts_preview_pack`.
+4. `install_tts_neural_local_v1_pack_if_needed` â†’ `tts_neural_local_v1_pack_status` â†’ `TtsNeuralLocalV1PackStatus` â†’ `install_tts_neural_local_v1_pack`.
+5. `install_tts_voice_preserving_local_v1_pack_if_needed` â†’ `tts_voice_preserving_local_v1_pack_status` â†’ `TtsVoicePreservingLocalV1PackStatus` â†’ `install_tts_voice_preserving_local_v1_pack`.
 
 Do not modify the existing `install_*_pack` functions. Do not modify the `*_pack_status` functions. Do not modify `install_portable_python` (already idempotent via `.probe` marker) or `install_python_toolchain` (cheap when venv exists).
 
-### Step 2 — `product/engine/src/jobs.rs` (`InstallPhase2PacksV1Params`)
+### Step 2 â€” `product/engine/src/jobs.rs` (`InstallPhase2PacksV1Params`)
 
 Find `struct InstallPhase2PacksV1Params` at approximately line 323. Add a `force` field:
 
@@ -188,9 +188,9 @@ struct InstallPhase2PacksV1Params {
 }
 ```
 
-The `#[serde(default)]` annotation makes the field tolerant of old job rows written before this WP — they deserialize as `force: false`.
+The `#[serde(default)]` annotation makes the field tolerant of old job rows written before this WP â€” they deserialize as `force: false`.
 
-### Step 3 — `product/engine/src/jobs.rs` (Phase2 install loop)
+### Step 3 â€” `product/engine/src/jobs.rs` (Phase2 install loop)
 
 Find the `match step_id.as_str()` block at approximately line 9810. Each arm currently looks like:
 
@@ -218,9 +218,9 @@ Change each pack arm to branch on `p.force` (variable `p` is the deserialized `I
 
 Apply the same change to the five pack arms: `spleeter`, `diarization`, `tts_preview`, `tts_neural_local_v1`, `tts_voice_preserving_local_v1`.
 
-Do **not** change the `portable_python_win64` or `python_toolchain` arms — they continue to call the existing functions.
+Do **not** change the `portable_python_win64` or `python_toolchain` arms â€” they continue to call the existing functions.
 
-### Step 4 — `product/desktop/src-tauri/src/lib.rs` (Tauri command + engine API)
+### Step 4 â€” `product/desktop/src-tauri/src/lib.rs` (Tauri command + engine API)
 
 The Tauri command at approximately line 6708 currently is:
 
@@ -269,7 +269,7 @@ pub fn enqueue_install_phase2_packs_v1_with_options(
 
 `InstallPhase2PacksV1Params` needs `#[derive(Default)]` for `..Default::default()` to work. Check its derive list (around line 323) and add `Default` if missing.
 
-### Step 5 — `product/desktop/src/pages/DiagnosticsPage.tsx`
+### Step 5 â€” `product/desktop/src/pages/DiagnosticsPage.tsx`
 
 Find the Voice-cloning-packages button row at approximately line 3237-3250. Add a "Force reinstall all packs" button next to the existing "Install Voice cloning packages" button. The new button calls the existing Tauri command with `{ force: true }`:
 
@@ -291,7 +291,7 @@ async function enqueueInstallPhase2Packs(force = false) {
 
 The existing "Install Voice cloning packages" button continues to call `enqueueInstallPhase2Packs()` (no argument, defaults to `force=false`).
 
-### Step 6 — Build & verify
+### Step 6 â€” Build & verify
 
 - `cargo build --release` for both crates.
 - `cargo test --manifest-path product/engine/Cargo.toml`.
@@ -305,8 +305,36 @@ The existing "Install Voice cloning packages" button continues to call `enqueueI
 - 2026-08-15: Six installed-status wrappers, force-aware queue params, force-safe resume logic, Tauri propagation, and explicit normal/force Diagnostics actions implemented. Focused frontend contracts passed 21/21, TypeScript passed, focused Rust passed 1/1, desktop `cargo check --lib` passed, and full engine suite passed 542 with 4 explicit ignores. Status remains `IN_PROGRESS` until the governed build and installed-app normal-vs-force runtime/log smoke complete.
 - 2026-08-15: Governed desktop build `0.1.163` completed with the verified offline payload reused. The exact packaged executable passed hidden bridge identity/state checks and a Diagnostics semantic audit (115 candidates, 0 missing accessible names); visual inspection confirmed both distinct install controls are readable and non-overlapping. Proof: `product/desktop/build_target/tool_artifacts/wp_runs/WP-0229/20260815-0811_v0_1_163/summary.md`. Status remains `IN_PROGRESS` only because Acceptance Criterion 5 requires installed-app normal-versus-force execution/log proof, and neither heavy mutating action was run on the loaded host.
 
-## Status reconciliation — 2026-09-30
+## Status reconciliation â€” 2026-09-30
 
 - Current status: NEEDS_VALIDATION
 - Six-pack short-circuit/force routing implemented, tested and packaged. Remaining is installed normal no-pip versus force/full-pip runtime and log proof (Acceptance Criterion 5).
 - Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
+
+<topic id="wp0229-installed-second-normal-timing-red-20261005" status="NEEDS_VALIDATION" wp="WP-0229" updated_at="2026-10-05">
+
+Installed source `d066e3cd88ea55068347671496faedc767f5d6b9`, version `0.1.205`, native owned install-proof PID264504/schema62. The actual first original job `c77bf46f-e093-4768-b73e-b95e40e26ddc` succeeded with all eight steps done; its collector raw-default mismatch remains retained and a separate native read-only reconciliation verified the same original and step-log hashes.
+
+The second normal original job `d9fe64f4-f4d6-465f-85d4-fdf781ccbaf5`, attempt1/forcefalse, succeeded but took **31,032ms**, failing the unchanged Acceptance Criterion5 requirement `<30s`. All eight actual journal step timestamps were carried from the first original; all eight new step logs are absent, with no new installer-step logs. The retained broad child detector observed two pip invocations but retained command hashes only; their subcommand is UNPROVEN. The prior no-sampled-pip statement is retracted; no actual pip-install absence claim follows from those hashes. This is a real performance RED, not installer failure. Retain `NEEDS_VALIDATION`; do not treat successful completion or the seeded fixture as closing this criterion.
+
+Evidence: `.local/proofVVRemaining/wp0330_actual_second_d066e3c_01/{result.json,canonical_terminal.json,actual_journal.json,original_job_step_logs.json,owned_children_observed_on_failure.json}`; first same-original reconciliation `.local/proofVVRemaining/wp0330_first_reconciled_d066e3c_01/`. Job-start to journal-start was11,289ms; journal construction/readiness checks took19,693ms. Physical timing attribution and a minimal safe remediation remain to inspect; do not skip full install-proof validation or widen the criterion. Force and six direct-handler acceptance proofs proceed independently while this RED remains open.
+
+</topic>
+
+
+## Actual forced installation log failure (2026-10-05)
+
+Root independently opened the original canonical terminal row, eight-step journal, retained step-log evidence and exact original step-log bytes. Forced job `b0ac5736-cda5-4f90-aa7e-6390e094074a`, attempt1/force=true, succeeded in 1,450,756ms; all eight original steps are done with no error. The observer retained 37 actual pip INSTALL child observations. These facts prove original forced work occurred; they do not satisfy the unchanged full-pip-output log criterion.
+
+All eight genuine per-step logs contain only begin/install lines (83–123 bytes), with no pip stdout. The collector correctly reports `FAIL`; do not replace it with a passing proxy or repeat this forced work on unchanged code. Inspected successful installer command output in `tools.rs` is discarded, while `jobs.rs` appends only step headers. Required remediation is scoped genuine installer stdout/stderr logging to the original step target, retaining owned-target validation and original timeout/cancellation/force behavior. A new candidate must satisfy the original log criterion through actual execution. The separate 31,032ms second-normal timing RED remains unresolved. Status remains `NEEDS_VALIDATION`.
+
+Evidence: `.local/proofVVRemaining/wp0330_actual_force_d066e3c_02/{result.json,canonical_terminal.json,actual_journal.json,original_job_step_logs.json,owned_children_observed_on_failure.json}`. No user queue change, forced process stop, fabricated pip line or force retry.
+
+
+<topic id="wp0229-installed-force-full-pip-log-red-20261005" wp="WP-0229" status="RED" updated_at="2026-10-05">
+
+The exact original forced job `b0ac5736-cda5-4f90-aa7e-6390e094074a`, attempt1/force=true, naturally succeeded: 1791172387226–1791173837982 (1,450,756ms), all eight journal steps done/error=null. The native observer recorded37 actual `pip install` subcommands. The unchanged forced full-pip-output criterion remains **RED**: all eight per-step logs contain only85–123bytes of begin/install/completed lines, with no pip output. Successful installation and child observation do not replace that log criterion. No force retry or status promotion occurred.
+
+Evidence: `.local/proofVVRemaining/wp0330_actual_force_d066e3c_02/{result,canonical_terminal,actual_journal,original_job_step_logs,owned_children_observed_on_failure}.json`. Original force01 preflight failure remains retained; it performed no product install. Separate original six direct handlers naturally returned installed=true with exact command_completed timing evidence in `.local/proofVVRemaining/wp0330_actual_direct_d066e3c_01/six_original_handler_timers.json`; those belong to WP0245 and do not close WP0229.
+
+</topic>

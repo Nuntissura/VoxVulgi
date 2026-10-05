@@ -118,7 +118,7 @@ function buildVisualDebuggerDump(): Record<string, unknown> {
   return {
     timestamp_ms: Date.now(),
     url: window.location.href,
-    viewport: { width: window.innerWidth, height: window.innerHeight },
+    viewport: { width: window.innerWidth, height: window.innerHeight, device_pixel_ratio: window.devicePixelRatio, visual_viewport_scale: window.visualViewport?.scale ?? null },
     content_scroll_top: contentEl ? contentEl.scrollTop : null,
     localstorage_voxvulgi: ls,
     mounted_section_ids: mountedSectionIds,

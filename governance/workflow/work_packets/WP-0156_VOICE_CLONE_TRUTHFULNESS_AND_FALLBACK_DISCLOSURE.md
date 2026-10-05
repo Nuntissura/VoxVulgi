@@ -55,3 +55,16 @@ Out of scope:
 - Current status: NEEDS_VALIDATION
 - Manifest/report, benchmark, artifact and current-item clone-truth wiring landed. Remaining is genuine converted plus fallback/error output and UI evidence, including explicit fallback policy; historical wording about wiring in progress is superseded by later implementation notes.
 - Historical requirements and proof remain preserved. Reconciled by WP-0326; no new runtime proof.
+
+
+<topic id="installed-haerin-proof-20261005" status="partial-proof" wp="WP-0156" updated_at="2026-10-05">
+
+## Installed Haerin proof reconciliation - 2026-10-05
+
+- Status remains `NEEDS_VALIDATION`.
+- The original CosyVoice report for job `da18f604-2531-4697-a865-d392e2cea496` records `clone_preserved`, one converted segment and zero fallback/standard-TTS segments. The published MKV English audio title is `English (AI dub - cloned voice)`, consistent with the successful report. This proves the successful report/artifact-label side only.
+- Remaining: actual fallback/error outcome and operator-visible current-item clone/fallback labels for both cases. Diagnostics readiness screenshots do not prove Localization current-item outcome rendering. The explicit fallback policy is anchored in PRODUCT_SPEC clone-truth requirements and TECHNICAL_DESIGN voice-preserving outcome/report requirements; retain focused policy/runtime proof reconciliation.
+- Inspected evidence: [installed workflow summary](../../../product/desktop/build_target/tool_artifacts/wp_runs/WP-0329/20261005/actual_localization_a0bb600/summary.md) and adjacent independent_validation.json, original voice report and canonical output records.
+- Evidence is bound to installed source `a0bb600141fffcfb1f7274189917af11b17e562a`, version `0.1.205`, executable SHA-256 `a197ae258a379124b8797f00d0559ec5496c8c6fcbe1b840379de0e036faad11`, and qualified runtime `runtime_7ea19cb688095cd14dfbc84e`. Reuse only for the inspected scenario and unchanged asserted inputs; this is not exact-source proof for later production `d066`, not subjective speech/translation quality, and not clean blocked-network final ISO acceptance. The final offline gate and its one unused acceptance attempt remain open.
+
+</topic>
