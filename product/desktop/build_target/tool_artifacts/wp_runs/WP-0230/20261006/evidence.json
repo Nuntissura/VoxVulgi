@@ -1,0 +1,96 @@
+{
+  "file_id": "WP0230_CLOSURE_EVIDENCE_20261006",
+  "wp": "WP-0230",
+  "acceptance_verdict": "PASS",
+  "cleanup_verdict": "PASS",
+  "artifact": {
+    "source": "e052b36b7e7a016f0c723d8613d0979f69e07611",
+    "closure_base_head": "347d8005cb30c6fd4498d7958e6d2e828c778b1b",
+    "version": "0.1.205",
+    "executable_sha256": "f755a7bb2e38eb6e0790e486fb7b64b610327bad8803b8eb7e194aa74ead43a9",
+    "build_result": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/core_05/result.json",
+    "build_result_sha256": "756b1ba858c59380649f24fe00b36095fe35af09cb5c8e3ef7a42ca47ead8848",
+    "reuse_check": "git diff e052b36b7e7a016f0c723d8613d0979f69e07611 HEAD -- product: empty at closure-base HEAD"
+  },
+  "new_builds": 0,
+  "new_automated_tests": 0,
+  "product_edits": 0,
+  "acceptance": {
+    "A1": {
+      "verdict": "PASS",
+      "proof": "Existing canonical CoreOnly build, including frontend build, result PASS"
+    },
+    "A2": {
+      "verdict": "PASS",
+      "proof": "cold/result.json; canonical jobs empty and history absent; visuals/genuine_cold_zero_20261006_1791307224662.png"
+    },
+    "A3": {
+      "verdict": "PASS",
+      "proof": "fresh_start/result.json; authentic original_samples.json; visuals/genuine_first_unheld_start_1_1791307776336.png",
+      "original_job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "attempt": 1,
+      "force": false,
+      "confirm_request_at_ms": 1791307774411,
+      "image_at_ms": 1791307776336,
+      "capture_finished_at_ms": 1791307776343,
+      "image_latency_ms": 1925,
+      "capture_finished_latency_ms": 1932,
+      "progression": "Original90ac automatic 3/8→4/8, journal transition1791217912484→image1791217913566=1082ms"
+    },
+    "A4": {
+      "verdict": "PASS",
+      "proof": "Opened original genuine_running_00/01/02 images:43s→46s→48s; unchanged 1Hz timer, formatter and poller"
+    },
+    "A5": {
+      "verdict": "PASS",
+      "proof": "completion_reuse/independent_native_readback_v3.json; opened visuals/progress_002_1791213107958.png",
+      "canonical_finish_at_ms": 1791213107190,
+      "image_latency_ms": 768,
+      "capture_finished_latency_ms": 974
+    },
+    "A6": {
+      "verdict": "PASS",
+      "proof": "WP-0230b/20261006/runtime_completion/wp0230b_two_root_final_01/independent_review.json; opened original_interrupted_A_1791271251894.png",
+      "original_job_id": "e01f7ef3-b870-42de-a5ea-6bc5991a6eb5",
+      "attempt": 1,
+      "done": 2,
+      "total": 8,
+      "journal_sha256": "21d0e9698fa64328d30194fdf95c6fcd402f43edf1bf3e69f486c14c855b5550"
+    },
+    "A7": {
+      "verdict": "PASS",
+      "proof": "Opened original running⟳,done✓,queued⏸; unchanged icon mapping, owning failed/skipped status mapping coverage reused"
+    }
+  },
+  "review": {
+    "DIFF_ATTACK_SURFACES": "No new product diff. Reused9080 timer/icons/headline/polling inspected against current files; transfer/initial denominator/bar changes covered by current build and fresh proof.",
+    "INDEPENDENT_CHECKS_RUN": "Root and independent reviewer opened exact cold/first-step/active/completed/interrupted artifacts and reconciled original canonical job/attempt/journal clocks. Independent reviewer ran vvstart.cmd first on every resumed task.",
+    "COUNTERFACTUAL_CHECKS": "Previous history is explicitly labeled; no current journal is invented. Fresh0/8 is proven only with canonical absent history. Cached normal skip-all run cannot substitute for first-step proof.",
+    "BOUNDARY_PROBES": "Quiet actual packaged WebView semantic Install/Confirm, canonical read-only SQLite observation, real original journal, image capture; no mocks or synthetic journal.",
+    "NEGATIVE_PATH_CHECKS": "Genuine forced interruption retains same original attempt and2/8. Recorded helper navigation/expired-handle failures preserved; same original cold process resumed safely.",
+    "INDEPENDENT_FINDINGS": "A1–A7 PASS. No new product defect established by the scoped completion pass.",
+    "RESIDUAL_UNCERTAINTY": "Documented snapshot-fill capture limitation; no new native renderer failure inferred. No operator app update or offline installer performed."
+  },
+  "execution_scenarios": [
+    ".local/wp0230_cold_boundary_20261006.py: original cold launch; navigation readiness failure retained",
+    ".local/wp0230_cold_boundary_resume_20261006.py: expired named job handle failure retained",
+    ".local/wp0230_cold_boundary_resume_v2_20261006.py: same owned cold app canonical reads, actual0/8 snapshot and graceful close",
+    ".local/wp0230_initial_confirm_timing_20261006.py: one normal cached original attempt; proof-preflight delay retained, not accepted as first-step proof",
+    ".local/wp0230_fresh_confirm_timing_20261006.py: one fresh original normal semantic Install/Confirm, actual journal and timed step1 image"
+  ],
+  "scope_exclusions": [
+    "Offline ISO",
+    "version bump",
+    "release changelog",
+    "unrelated validation",
+    "foreign process disruption",
+    "operator data mutation"
+  ],
+  "cleanup": {
+    "proof": "cleanup/fresh_closed.json and warm_closed.json; independent canonical SQLite rereads; exact PID245968/241156/198220 absent",
+    "fresh_status": "canceled",
+    "warm_status": "succeeded before cancellation request",
+    "forced_stops": 0,
+    "foreign_process_stops": 0
+  }
+}

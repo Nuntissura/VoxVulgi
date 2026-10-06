@@ -2,7 +2,7 @@
 
 ## Status
 
-IN_PROGRESS
+DONE
 
 ## Owner
 
@@ -28,7 +28,7 @@ This WP delivers the truthfulness half today; WP-0230b delivers the byte-level s
 
 ## Scope Extension (2026-05-18)
 
-Current extension tracking: `WP-0230b_PHASE2_TRANSFER_BYTES_SPEED_ETA_v3.json` and its v3 refinement preserve the full pip/Hugging Face bytes, speed and transfer-ETA scope plus the existing WP-0235 consumer. Implementation applied 2026-10-05; tests/build/runtime proof were not run because the operator stopped testing. WP-0230b is NEEDS_VALIDATION; the original WP-0230 base criteria and status remain unchanged.
+Current extension tracking: `WP-0230b_PHASE2_TRANSFER_BYTES_SPEED_ETA_v3.json` and its v3 refinement preserve the full pip/Hugging Face bytes, speed and transfer-ETA scope plus the existing WP-0235 consumer. WP-0230b reached DONE on 2026-10-06 with its independent A01–A10 proof. The parent base acceptance is independently closed by the dated topic below; historical implementation and validation notes remain preserved.
 
 Operator follow-up 2026-05-18: "we are sure the downloading happens? this is the selling feature. and the app must stay non technical and user freindly". The original WP-0230 scope (top-level progress bar + truthful badge) is necessary but insufficient — for non-technical users to trust the install, the progress must show *real bytes / sec / ETA* during the long Python-wheel-and-model-download steps. Promote the previously-out-of-scope item:
 
@@ -361,5 +361,18 @@ Implementation2026-10-05: exact candidate04 five files applied after owned priva
 Current installed source `9080e128`, version `0.1.205`: desktop110/frontend433 passed; engine842 is retained composed coverage with its original failed full-run receipt preserved. Canonical Core build and native Update passed independent all69-table preservation checks. The actual original paused installation `32bfdad1-01c7-4140-b69e-33b1ad65f19c` kept previous history explicit, resumed, and completed8/8. Root inspected the paired completion image `governance/snapshots/WP-0230_current_ui/progress_002_1791213107958.png`; its capture ended974ms after the canonical finish. Independent readback is `.local/proofVVRemaining/wp0230_held_visible_wake_9080e12_01/independent_native_readback_v3.json`. Route navigation proves visible wake, not React unmount/remount. Active elapsed/icons and genuine crash/restart remain pending.
 
 Fresh owned app230520 has zero canonical jobs and no installation journal. Root opened `governance/snapshots/WP-0230/genuine_never_started_1791215372005.png`: the never-installed headline and plan rows are present, but the required0/M progress bar is absent. `DiagnosticsPage.tsx` renders the bar only when journal steps exist. Remediation: retain every existing journal count; for confirmed absent history only, use the actual supported plan total with zero completed steps. Unknown/loading or malformed existing history must not invent a total. Three-file off-tree candidate `.local/wp0230_zero_plan_progress_candidate_01` is source-reviewed and unapplied; owning frontend checks, canonical Core build and fresh packaged0/8 evidence are required. The original image remains RED. Status remains IN_PROGRESS; no whole-packet completion or byte-progress delivery is claimed.
+
+</topic>
+
+
+<topic id="parent-base-acceptance-closure-20261006" wp="WP-0230" status="DONE" updated_at="2026-10-06">
+
+Superseding current status: DONE under PROOF_STANDARD.md; original requirements and historical RED/pending records remain preserved. The existing journal totals remain authoritative per the recorded operator remediation; only confirmed absent history uses the supported plan total.
+
+Independent A1–A7 review passed. Existing source e052b36b/version0.1.205 CoreOnly result is valid at closure-base HEAD347d800 (empty product diff). New actual cold profile proof shows0/8. Genuine normal original4b33 attempt1 shows Portable Python step1/8 at1925ms after final Confirm, capture end1932ms. Source9080 unchanged timer/icons/poller proof shows43s→46s→48s, natural3/8→4/8 and original32bfd completion within974ms. Current genuine crash/restart preserves originale01f7 attempt1 and unchanged journal2/8. No product changes, builds, automated retests, version bump, operator update or offline packaging were required for this closure.
+
+Exact owned test apps245968/241156 and keeper198220 closed quietly with native descendant handles signaled and independently absent PIDs. Canonical SQLite rereads confirm fresh4b33 canceled and warm07ac already succeeded; original journals and attempts remain preserved. No foreign or forced stops. The documented html2canvas fill caveat is retained; it does not establish a native renderer defect. The normal cached-profile preflight attempt is preserved but does not substitute for genuine first-step timing.
+
+Canonical proof: product/desktop/build_target/tool_artifacts/wp_runs/WP-0230/20261006/summary.md, evidence.json and artifact_manifest.json. The independent review and focused scenario receipts reconcile the stale October5 pending notes. WP-0230b is separately DONE; no sibling acceptance/status was changed.
 
 </topic>

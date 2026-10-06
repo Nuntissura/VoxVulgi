@@ -1,0 +1,48 @@
+{
+  "ok": true,
+  "request_id": "ui-1791307774413-6",
+  "operation": "action",
+  "elapsed_ms": 0,
+  "result": {
+    "action": "activate_product_action",
+    "accepted": true,
+    "accepted_at_ms": 1791307774414,
+    "actor_id": "codex.wp0230.initial-timing",
+    "product_action_id": "diagnostics.install-confirm",
+    "effect_class": "reversible_state_change",
+    "target_before": {
+      "audit_id": "vv-audit-181",
+      "id": null,
+      "test_id": null,
+      "tag": "button",
+      "role": "button",
+      "name": "Confirm installation",
+      "text_preview": "Confirm installation",
+      "class_name": "",
+      "type": "button",
+      "rendered": true,
+      "in_viewport": true,
+      "disabled": false,
+      "checked": null,
+      "selected": null,
+      "expanded": null,
+      "value_summary": null,
+      "product_action_id": "diagnostics.install-confirm",
+      "effect_class": "reversible_state_change",
+      "input_kind": null,
+      "available_choices": null,
+      "available_choices_truncated": false,
+      "rect": {
+        "x": 17,
+        "y": 392,
+        "width": 157,
+        "height": 42
+      },
+      "safe_actions": [
+        "scroll_into_view",
+        "activate_product_action"
+      ],
+      "dom_path": "div#diagnostics-install-confirmation > div > button:nth-of-type(1)"
+    }
+  }
+}

@@ -1,0 +1,22 @@
+schema_version: handshake.gameplan.v1
+template_version: 1
+kind: gameplan
+instance_policy:
+  omit_empty_optional_fields: true
+  policy_lives_in_rule_refs_not_instance_fields: true
+  schema_ref: repo-governance/schemas/gameplan.schema.yaml
+rule_refs: []
+writing: 'no prose; terse fragments; determinism > grammar; verb object [op value]'
+precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; correct the step'
+scope: wp
+assignment: WP-0230-CLOSURE-20261006
+parent: null
+generation: 4
+expensive_actions: []
+steps:
+- {id: GP-001, role: any, at: on_resume, do: confirm reread state|notes|receipts|gameplan before new work, check: {type: confirm}, source: 'preset:resume', state: active}
+- {id: GP-002, role: any, at: on_resume, do: confirm statuses recounted from source records; memory counts == 0, check: {type: confirm}, source: 'preset:resume', state: active}
+- {id: GP-003, role: any, at: on_resume, do: confirm half-written records finished before new work, check: {type: confirm}, source: 'preset:resume', state: active}
+- {id: GP-004, role: any, at: before_round, do: verify unchanged product candidate and owned isolated lifecycle, check: {type: confirm}, source: VV-VALIDATION-SCOPE-001 cold 0/M packaged proof, state: active}
+- {id: GP-005, role: any, at: before_round, do: require mounted Diagnostics voice tile from fresh audit before disclosure, check: {type: confirm}, source: cold audit raced navigation and still showed Jobs; continue same owned PID, state: active}
+- {id: GP-006, role: any, at: before_round, do: verify original app native identity and exact descendant handles without expired named job, check: {type: confirm}, source: resume failed because finally released named job; app retained without kill-on-close, state: active}

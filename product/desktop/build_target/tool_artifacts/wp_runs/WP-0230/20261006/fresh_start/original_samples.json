@@ -1,0 +1,3009 @@
+[
+  {
+    "at_ms": 1791307774411,
+    "canonical": {
+      "jobs": [],
+      "queue_paused": false
+    }
+  },
+  {
+    "at_ms": 1791307774463,
+    "canonical": {
+      "jobs": [],
+      "queue_paused": false
+    }
+  },
+  {
+    "at_ms": 1791307774833,
+    "canonical": {
+      "jobs": [],
+      "queue_paused": false
+    }
+  },
+  {
+    "at_ms": 1791307774879,
+    "canonical": {
+      "jobs": [],
+      "queue_paused": false
+    }
+  },
+  {
+    "at_ms": 1791307774924,
+    "canonical": {
+      "jobs": [],
+      "queue_paused": false
+    }
+  },
+  {
+    "at_ms": 1791307774970,
+    "canonical": {
+      "jobs": [],
+      "queue_paused": false
+    }
+  },
+  {
+    "at_ms": 1791307775016,
+    "canonical": {
+      "jobs": [],
+      "queue_paused": false
+    }
+  },
+  {
+    "at_ms": 1791307775388,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "queued",
+          "progress": 0.0,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    }
+  },
+  {
+    "at_ms": 1791307775449,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "queued",
+          "progress": 0.0,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    }
+  },
+  {
+    "at_ms": 1791307775510,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.0,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307775512,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "running",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307775572,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.0,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307775512,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "running",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307775619,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.0,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307775512,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "running",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307775665,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.0,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307775512,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "running",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307775711,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.0,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307775512,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "running",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307775756,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.0,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307775512,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "running",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307775803,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.0,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307775512,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "running",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307775848,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.0,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307775512,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "running",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307775894,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.0,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307775512,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "running",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307775940,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.0,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307775512,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "running",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307775985,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.0,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307775512,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "running",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307776032,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.0,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307776027,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "done",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": 1791307776021,
+          "estimated_bytes": null,
+          "delta_bytes": 0,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307776093,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.20625001192092896,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307776027,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "done",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": 1791307776021,
+          "estimated_bytes": null,
+          "delta_bytes": 0,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307777348,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.20625001192092896,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307777298,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "done",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": 1791307776021,
+          "estimated_bytes": null,
+          "delta_bytes": 0,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "running",
+          "started_at_ms": 1791307777298,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307777395,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.20625001192092896,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307777298,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "done",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": 1791307776021,
+          "estimated_bytes": null,
+          "delta_bytes": 0,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "running",
+          "started_at_ms": 1791307777298,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307777441,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.20625001192092896,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307777298,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "done",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": 1791307776021,
+          "estimated_bytes": null,
+          "delta_bytes": 0,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "running",
+          "started_at_ms": 1791307777298,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307777488,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.20625001192092896,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307777298,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "done",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": 1791307776021,
+          "estimated_bytes": null,
+          "delta_bytes": 0,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "running",
+          "started_at_ms": 1791307777298,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307777534,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.20625001192092896,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307777298,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "done",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": 1791307776021,
+          "estimated_bytes": null,
+          "delta_bytes": 0,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "running",
+          "started_at_ms": 1791307777298,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307777580,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.20625001192092896,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307777298,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "done",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": 1791307776021,
+          "estimated_bytes": null,
+          "delta_bytes": 0,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "running",
+          "started_at_ms": 1791307777298,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307777627,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.20625001192092896,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307777298,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "done",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": 1791307776021,
+          "estimated_bytes": null,
+          "delta_bytes": 0,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "running",
+          "started_at_ms": 1791307777298,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307777673,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.20625001192092896,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307777298,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "done",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": 1791307776021,
+          "estimated_bytes": null,
+          "delta_bytes": 0,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "running",
+          "started_at_ms": 1791307777298,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307777719,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.20625001192092896,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307777298,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "done",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": 1791307776021,
+          "estimated_bytes": null,
+          "delta_bytes": 0,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "running",
+          "started_at_ms": 1791307777298,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  },
+  {
+    "at_ms": 1791307777764,
+    "canonical": {
+      "jobs": [
+        {
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "batch_id": null,
+          "type": "install_phase2_packs_v1",
+          "status": "running",
+          "progress": 0.20625001192092896,
+          "error": null,
+          "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+          "created_at_ms": 1791307774428,
+          "started_at_ms": 1791307775458,
+          "finished_at_ms": null,
+          "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+          "target_title": null,
+          "retry_of_job_id": null,
+          "retry_replacement_job_id": null,
+          "lane": "localization",
+          "track": "localization",
+          "target_key": null,
+          "attempt_no": 1,
+          "app_busy_attempts": 0
+        }
+      ],
+      "queue_paused": false
+    },
+    "journal": {
+      "schema_version": 1,
+      "job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "started_at_ms": 1791307775499,
+      "updated_at_ms": 1791307777298,
+      "steps": [
+        {
+          "id": "portable_python_win64",
+          "title": "Portable Python (Windows x64)",
+          "status": "done",
+          "started_at_ms": 1791307775512,
+          "finished_at_ms": 1791307776021,
+          "estimated_bytes": null,
+          "delta_bytes": 0,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\portable_python_win64.log"
+        },
+        {
+          "id": "python_toolchain",
+          "title": "Python toolchain (venv)",
+          "status": "running",
+          "started_at_ms": 1791307777298,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\python_toolchain.log"
+        },
+        {
+          "id": "spleeter",
+          "title": "Spleeter separation (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\spleeter.log"
+        },
+        {
+          "id": "diarization",
+          "title": "Diarization (baseline)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\diarization.log"
+        },
+        {
+          "id": "tts_preview",
+          "title": "TTS preview (system voices)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_preview.log"
+        },
+        {
+          "id": "tts_neural_local_v1",
+          "title": "Neural TTS local (Kokoro)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_neural_local_v1.log"
+        },
+        {
+          "id": "tts_voice_preserving_local_v1",
+          "title": "Voice-preserving dub (OpenVoice V2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\tts_voice_preserving_local_v1.log"
+        },
+        {
+          "id": "voice_clone_cosyvoice_v1",
+          "title": "Voice-preserving dub (CosyVoice 2)",
+          "status": "queued",
+          "started_at_ms": null,
+          "finished_at_ms": null,
+          "estimated_bytes": null,
+          "delta_bytes": null,
+          "error": null,
+          "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\install\\phase2\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f\\voice_clone_cosyvoice_v1.log"
+        }
+      ]
+    }
+  }
+]

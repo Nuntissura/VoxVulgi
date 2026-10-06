@@ -1,0 +1,44 @@
+{
+  "actor_id": "codex.wp0230.close",
+  "command": "jobs.cancel",
+  "finished_at_ms": 1791307973387,
+  "operation_id": "wp0230-cancel-994e8a5fe25e4127a0134bdb10f973a4",
+  "poll": "POST /agent/command with command=operation.get and same actor_id/operation_id",
+  "process_id": 245968,
+  "request_hash": "90a1545bda1fbf4a25e80905dbaa118554ef10b5546cda084d0a453bc63d86ab",
+  "result": {
+    "all_succeeded": true,
+    "completion": "operation result; verify replacement progress separately",
+    "results": [
+      {
+        "job": {
+          "attempt_no": 1,
+          "batch_id": null,
+          "created_at_ms": 1791307774428,
+          "download_sleep_secs": null,
+          "error": null,
+          "finished_at_ms": 1791307972656,
+          "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+          "item_id": null,
+          "preset_id": null,
+          "progress": 0.3125,
+          "replacement_job_id": null,
+          "request_sleep_secs": null,
+          "retry_of_job_id": null,
+          "source_url": null,
+          "stage": "job_progress",
+          "started_at_ms": 1791307775458,
+          "status": "canceled",
+          "title": null,
+          "track": "localization",
+          "type": "install_phase2_packs_v1"
+        },
+        "ok": true,
+        "original_job_id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f"
+      }
+    ]
+  },
+  "session_started_at_ms": 1791307971573,
+  "started_at_ms": 1791307971573,
+  "status": "completed"
+}

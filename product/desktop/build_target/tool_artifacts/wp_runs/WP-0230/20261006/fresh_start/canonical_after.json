@@ -1,0 +1,27 @@
+{
+  "jobs": [
+    {
+      "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+      "item_id": null,
+      "batch_id": null,
+      "type": "install_phase2_packs_v1",
+      "status": "running",
+      "progress": 0.20625001192092896,
+      "error": null,
+      "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+      "created_at_ms": 1791307774428,
+      "started_at_ms": 1791307775458,
+      "finished_at_ms": null,
+      "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+      "target_title": null,
+      "retry_of_job_id": null,
+      "retry_replacement_job_id": null,
+      "lane": "localization",
+      "track": "localization",
+      "target_key": null,
+      "attempt_no": 1,
+      "app_busy_attempts": 0
+    }
+  ],
+  "queue_paused": false
+}

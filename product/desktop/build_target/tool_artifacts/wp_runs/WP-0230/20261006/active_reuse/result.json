@@ -1,0 +1,34 @@
+{
+  "status": "ACTIVE_SAMPLES_CAPTURED_ROOT_PIXEL_AND_FRESHNESS_REVIEW_REQUIRED",
+  "samples": [
+    {
+      "index": 0,
+      "at_ms": 1791217890144,
+      "job_id": "90ac9ef8-02f9-4800-b2f6-3b3c14913972",
+      "attempt_no": 1,
+      "pixel_review": "ROOT_REQUIRED_NOT_INSPECTED"
+    },
+    {
+      "index": 1,
+      "at_ms": 1791217892294,
+      "job_id": "90ac9ef8-02f9-4800-b2f6-3b3c14913972",
+      "attempt_no": 1,
+      "pixel_review": "ROOT_REQUIRED_NOT_INSPECTED"
+    },
+    {
+      "index": 2,
+      "at_ms": 1791217894313,
+      "job_id": "90ac9ef8-02f9-4800-b2f6-3b3c14913972",
+      "attempt_no": 1,
+      "pixel_review": "ROOT_REQUIRED_NOT_INSPECTED"
+    }
+  ],
+  "genuine_running_step_transition_captured": true,
+  "one_second_minimum_between_samples": true,
+  "original_ui_preparation_first_sample_only": false,
+  "resumed_original_step_table_scroll_once": true,
+  "subsequent_samples_navigation_load_refresh_scroll_actions": 0,
+  "timer_or_icon_pass": false,
+  "freshness_pass": false,
+  "no_installer_or_queue_action": true
+}

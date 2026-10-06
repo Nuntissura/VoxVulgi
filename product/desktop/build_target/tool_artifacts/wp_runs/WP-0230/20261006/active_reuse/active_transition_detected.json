@@ -1,0 +1,119 @@
+{
+  "journal": {
+    "schema_version": 1,
+    "job_id": "90ac9ef8-02f9-4800-b2f6-3b3c14913972",
+    "started_at_ms": 1791217677415,
+    "updated_at_ms": 1791217912484,
+    "steps": [
+      {
+        "id": "portable_python_win64",
+        "title": "Portable Python (Windows x64)",
+        "status": "done",
+        "started_at_ms": 1791217677421,
+        "finished_at_ms": 1791217680159,
+        "estimated_bytes": null,
+        "delta_bytes": 0,
+        "error": null,
+        "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_d217fd70740f49e58746161f40fafa9f\\logs\\install\\phase2\\90ac9ef8-02f9-4800-b2f6-3b3c14913972\\portable_python_win64.log"
+      },
+      {
+        "id": "python_toolchain",
+        "title": "Python toolchain (venv)",
+        "status": "done",
+        "started_at_ms": 1791217680302,
+        "finished_at_ms": 1791217696160,
+        "estimated_bytes": null,
+        "delta_bytes": 9121,
+        "error": null,
+        "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_d217fd70740f49e58746161f40fafa9f\\logs\\install\\phase2\\90ac9ef8-02f9-4800-b2f6-3b3c14913972\\python_toolchain.log"
+      },
+      {
+        "id": "spleeter",
+        "title": "Spleeter separation (baseline)",
+        "status": "done",
+        "started_at_ms": 1791217696564,
+        "finished_at_ms": 1791217844243,
+        "estimated_bytes": null,
+        "delta_bytes": 245,
+        "error": null,
+        "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_d217fd70740f49e58746161f40fafa9f\\logs\\install\\phase2\\90ac9ef8-02f9-4800-b2f6-3b3c14913972\\spleeter.log"
+      },
+      {
+        "id": "diarization",
+        "title": "Diarization (baseline)",
+        "status": "done",
+        "started_at_ms": 1791217844606,
+        "finished_at_ms": 1791217912461,
+        "estimated_bytes": null,
+        "delta_bytes": -304,
+        "error": null,
+        "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_d217fd70740f49e58746161f40fafa9f\\logs\\install\\phase2\\90ac9ef8-02f9-4800-b2f6-3b3c14913972\\diarization.log"
+      },
+      {
+        "id": "tts_preview",
+        "title": "TTS preview (system voices)",
+        "status": "running",
+        "started_at_ms": 1791217912484,
+        "finished_at_ms": null,
+        "estimated_bytes": null,
+        "delta_bytes": null,
+        "error": null,
+        "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_d217fd70740f49e58746161f40fafa9f\\logs\\install\\phase2\\90ac9ef8-02f9-4800-b2f6-3b3c14913972\\tts_preview.log"
+      },
+      {
+        "id": "tts_neural_local_v1",
+        "title": "Neural TTS local (Kokoro)",
+        "status": "queued",
+        "started_at_ms": null,
+        "finished_at_ms": null,
+        "estimated_bytes": null,
+        "delta_bytes": null,
+        "error": null,
+        "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_d217fd70740f49e58746161f40fafa9f\\logs\\install\\phase2\\90ac9ef8-02f9-4800-b2f6-3b3c14913972\\tts_neural_local_v1.log"
+      },
+      {
+        "id": "tts_voice_preserving_local_v1",
+        "title": "Voice-preserving dub (OpenVoice V2)",
+        "status": "queued",
+        "started_at_ms": null,
+        "finished_at_ms": null,
+        "estimated_bytes": null,
+        "delta_bytes": null,
+        "error": null,
+        "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_d217fd70740f49e58746161f40fafa9f\\logs\\install\\phase2\\90ac9ef8-02f9-4800-b2f6-3b3c14913972\\tts_voice_preserving_local_v1.log"
+      },
+      {
+        "id": "voice_clone_cosyvoice_v1",
+        "title": "Voice-preserving dub (CosyVoice 2)",
+        "status": "queued",
+        "started_at_ms": null,
+        "finished_at_ms": null,
+        "estimated_bytes": null,
+        "delta_bytes": null,
+        "error": null,
+        "log_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_d217fd70740f49e58746161f40fafa9f\\logs\\install\\phase2\\90ac9ef8-02f9-4800-b2f6-3b3c14913972\\voice_clone_cosyvoice_v1.log"
+      }
+    ]
+  },
+  "detected_at_ms": 1791217912755,
+  "previous_step_statuses": [
+    "done",
+    "done",
+    "done",
+    "running",
+    "queued",
+    "queued",
+    "queued",
+    "queued"
+  ],
+  "step_statuses": [
+    "done",
+    "done",
+    "done",
+    "done",
+    "running",
+    "queued",
+    "queued",
+    "queued"
+  ]
+}

@@ -1,0 +1,153 @@
+{
+  "status": "ONE_ORIGINAL_UNHELD_NORMAL_INSTALL_TIMING_CAPTURED_REVIEW_REQUIRED",
+  "job": {
+    "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+    "item_id": null,
+    "batch_id": null,
+    "type": "install_phase2_packs_v1",
+    "status": "running",
+    "progress": 0.20625001192092896,
+    "error": null,
+    "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+    "created_at_ms": 1791307774428,
+    "started_at_ms": 1791307775458,
+    "finished_at_ms": null,
+    "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+    "target_title": null,
+    "retry_of_job_id": null,
+    "retry_replacement_job_id": null,
+    "lane": "localization",
+    "track": "localization",
+    "target_key": null,
+    "attempt_no": 1,
+    "app_busy_attempts": 0
+  },
+  "owner": {
+    "pid": 245968,
+    "started_at_ms": 1791307732855,
+    "path": "D:\\Projects\\LLM projects\\VoxVulgi\\product\\desktop\\build_target\\Current\\release\\desktop.exe",
+    "exit_code": 259,
+    "root": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698",
+    "nonce": "ddbb4bfe9c4e4b3e97bb5cca7c840698",
+    "current_head": "347d8005cb30c6fd4498d7958e6d2e828c778b1b",
+    "artifact_source": "e052b36b7e7a016f0c723d8613d0979f69e07611",
+    "source": "e052b36b7e7a016f0c723d8613d0979f69e07611",
+    "exe": "D:\\Projects\\LLM projects\\VoxVulgi\\product\\desktop\\build_target\\Current\\release\\desktop.exe",
+    "creation_ms": 1791307732855,
+    "exe_sha256": "f755a7bb2e38eb6e0790e486fb7b64b610327bad8803b8eb7e194aa74ead43a9",
+    "session_owned": true,
+    "job_name": "Local\\VoxVulgi_WP0230_63bf8ce3aa0b4d8fbc1e0c4b725c4ab3"
+  },
+  "confirm_clock": {
+    "confirm_request_started_at_ms": 1791307774411,
+    "confirm_receipt_at_ms": 1791307774416
+  },
+  "captures": [
+    {
+      "started_at_ms": 1791307775392,
+      "finished_at_ms": 1791307775896,
+      "snapshot": {
+        "path": "\\\\?\\D:\\Projects\\LLM projects\\VoxVulgi\\governance\\snapshots\\WP-0230\\genuine_first_unheld_start_0_1791307775883.png"
+      },
+      "canonical": {
+        "jobs": [
+          {
+            "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+            "item_id": null,
+            "batch_id": null,
+            "type": "install_phase2_packs_v1",
+            "status": "running",
+            "progress": 0.0,
+            "error": null,
+            "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+            "created_at_ms": 1791307774428,
+            "started_at_ms": 1791307775458,
+            "finished_at_ms": null,
+            "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+            "target_title": null,
+            "retry_of_job_id": null,
+            "retry_replacement_job_id": null,
+            "lane": "localization",
+            "track": "localization",
+            "target_key": null,
+            "attempt_no": 1,
+            "app_busy_attempts": 0
+          }
+        ],
+        "queue_paused": false
+      }
+    },
+    {
+      "started_at_ms": 1791307775922,
+      "finished_at_ms": 1791307776343,
+      "snapshot": {
+        "path": "\\\\?\\D:\\Projects\\LLM projects\\VoxVulgi\\governance\\snapshots\\WP-0230\\genuine_first_unheld_start_1_1791307776336.png"
+      },
+      "canonical": {
+        "jobs": [
+          {
+            "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+            "item_id": null,
+            "batch_id": null,
+            "type": "install_phase2_packs_v1",
+            "status": "running",
+            "progress": 0.20625001192092896,
+            "error": null,
+            "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+            "created_at_ms": 1791307774428,
+            "started_at_ms": 1791307775458,
+            "finished_at_ms": null,
+            "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+            "target_title": null,
+            "retry_of_job_id": null,
+            "retry_replacement_job_id": null,
+            "lane": "localization",
+            "track": "localization",
+            "target_key": null,
+            "attempt_no": 1,
+            "app_busy_attempts": 0
+          }
+        ],
+        "queue_paused": false
+      }
+    },
+    {
+      "started_at_ms": 1791307777360,
+      "finished_at_ms": 1791307777763,
+      "snapshot": {
+        "path": "\\\\?\\D:\\Projects\\LLM projects\\VoxVulgi\\governance\\snapshots\\WP-0230\\genuine_first_unheld_start_2_1791307777758.png"
+      },
+      "canonical": {
+        "jobs": [
+          {
+            "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+            "item_id": null,
+            "batch_id": null,
+            "type": "install_phase2_packs_v1",
+            "status": "running",
+            "progress": 0.20625001192092896,
+            "error": null,
+            "params_json": "{\"resume_localization_run\":null,\"force\":false}",
+            "created_at_ms": 1791307774428,
+            "started_at_ms": 1791307775458,
+            "finished_at_ms": null,
+            "logs_path": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698\\logs\\jobs\\4b33ee0b-10db-4c69-b3c5-402c367a5f1f.jsonl",
+            "target_title": null,
+            "retry_of_job_id": null,
+            "retry_replacement_job_id": null,
+            "lane": "localization",
+            "track": "localization",
+            "target_key": null,
+            "attempt_no": 1,
+            "app_busy_attempts": 0
+          }
+        ],
+        "queue_paused": false
+      }
+    }
+  ],
+  "prior_canonical_and_journals_unchanged": true,
+  "installer_runs": 1,
+  "force": false,
+  "close_pending_until_terminal": true
+}

@@ -1,0 +1,26 @@
+{
+  "status": "COLD_CANONICAL_NO_HISTORY_CAPTURED_OWNED_CLOSED",
+  "owner": {
+    "pid": 249004,
+    "started_at_ms": 1791307011640,
+    "path": "D:\\Projects\\LLM projects\\VoxVulgi\\product\\desktop\\build_target\\Current\\release\\desktop.exe",
+    "exit_code": 259,
+    "root": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698",
+    "nonce": "ddbb4bfe9c4e4b3e97bb5cca7c840698",
+    "current_head": "347d8005cb30c6fd4498d7958e6d2e828c778b1b",
+    "artifact_source": "e052b36b7e7a016f0c723d8613d0979f69e07611",
+    "exe_sha256": "f755a7bb2e38eb6e0790e486fb7b64b610327bad8803b8eb7e194aa74ead43a9",
+    "session_owned": true,
+    "job_name": "Local\\VoxVulgi_WP0230_7fceb3ce44524626b902928407a94068"
+  },
+  "jobs": [],
+  "history_exists": false,
+  "remaining_owned_members": [],
+  "native_descendant_handles_signaled": true,
+  "named_job_handle_unavailable": true,
+  "app_exit_code": 0,
+  "pixels_verdict": "PENDING_ROOT_OPEN",
+  "install_actions": 0,
+  "data_mutations": 0,
+  "forced_stops": 0
+}

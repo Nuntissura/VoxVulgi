@@ -1,0 +1,10 @@
+{
+  "mode": "read-only canonical SQLite",
+  "root": "C:\\Users\\ILJASM~1\\AppData\\Local\\Temp\\voxvulgi_install_proof_ddbb4bfe9c4e4b3e97bb5cca7c840698",
+  "row": {
+    "id": "4b33ee0b-10db-4c69-b3c5-402c367a5f1f",
+    "status": "canceled",
+    "attempt_no": 1,
+    "finished_at_ms": 1791307972656
+  }
+}
