@@ -55,6 +55,8 @@
 
 ## Proof Standard Policy
 
+- [VV-VALIDATION-SCOPE-001] Run or add tests and validation only for the code, behavior, artifacts, or requirements being worked on in the current operator-authorized task.
+- [VV-VALIDATION-SCOPE-002] Do not run unrelated test suites, audit adjacent features, or expand validation tooling beyond what directly verifies that work.
 - A WP is not `DONE` unless it satisfies `governance/workflow/PROOF_STANDARD.md`.
 - New proof bundles should include `summary.md` under `product/desktop/build_target/tool_artifacts/wp_runs/<WP-ID>/...`.
 - Build-only verification is not sufficient for UI/operator-heavy packets when the proof standard requires app-boundary or manual evidence.

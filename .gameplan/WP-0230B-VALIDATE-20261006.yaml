@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: WP-0230B-VALIDATE-20261006
 parent: null
-generation: 16
+generation: 17
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -41,3 +41,4 @@ steps:
 - {id: GP-025, role: any, at: before_round, do: require candidate source read from git instead of typed SHA, check: {type: file, path: .local/wp0230b_validation_20261006_v4.py, contains: source = subprocess.check_output}, source: Close argument source mistyped and unused; actual owner c54 ledger checked; subsequent source read from git, state: active}
 - {id: GP-026, role: any, at: before_round, do: require native extended PNG path normalization before relative reference, check: {type: file, path: .local/record_wp0230b_validation_final_20261006.py, contains: removeprefix}, source: Final record refused extended-path relative reference before writes; normalize equivalent Windows prefix, state: active}
 - {id: GP-027, role: any, at: before_round, do: require original HF raw archive before owned output returns, check: {type: file, path: product/engine/src/cmd.rs, contains: 'transfer_scope.archive_hf_output(&stdout,&stderr'}, source: Successful HF stderr discarded; liveUI passed but raw A02 reconciliation absent, state: active}
+- {id: GP-028, role: any, at: before_round, do: require gate PASS before dispatch, check: {type: file, path: .local/wp0230b_validation_20261006_v5.py, contains: assert gate_result.returncode == 0}, source: Confirmation note exceeded120 chars; gate refused before tests, state: active}
