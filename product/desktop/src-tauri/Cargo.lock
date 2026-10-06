@@ -804,6 +804,7 @@ dependencies = [
  "tauri-plugin-opener",
  "tauri-runtime",
  "tempfile",
+ "tokio",
  "uuid",
  "voxvulgi_engine",
  "webview2-com",

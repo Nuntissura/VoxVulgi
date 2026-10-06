@@ -1,6 +1,7 @@
 mod agent_control;
 mod agent_viewport;
 mod install_proof;
+mod phase2_transfer_delay;
 use base64::Engine as _;
 #[cfg(target_os = "windows")]
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -3288,6 +3289,7 @@ struct AppState {
 
 impl Drop for AppState {
     fn drop(&mut self) {
+        phase2_transfer_delay::close(&self.paths);
         if let Some(runner) = &self.runner {
             runner.stop();
         }
@@ -13807,7 +13809,9 @@ pub(crate) fn phase2_transfer_status_readback(paths: &AppPaths, job_id: &str) ->
 #[tauri::command]
 async fn tools_phase2_transfer_status(state: State<'_, AppState>, job_id: String) -> Result<serde_json::Value, String> {
     let paths=state.paths.clone();
-    tauri::async_runtime::spawn_blocking(move || phase2_transfer_status_readback(&paths,&job_id)).await.map_err(|e|e.to_string())?
+    let authentic=tauri::async_runtime::spawn_blocking(move || phase2_transfer_status_readback(&paths,&job_id)).await.map_err(|e|e.to_string())??;
+    phase2_transfer_delay::delay(&state,&authentic).await;
+    Ok(authentic)
 }
 #[tauri::command]
 async fn tools_phase2_packs_install_latest_state(

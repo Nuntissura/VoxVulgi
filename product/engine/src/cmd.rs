@@ -230,6 +230,7 @@ where
                     format!("owned child pid {child_pid} was canceled and terminated")
                 },
             );
+            transfer_scope.archive_hf_output(&stdout,&stderr,if timed_out {"timeout"} else {"canceled"},false);
             return Err(retain_command_error(error, publish_pip_output(capture_pip, &stdout, &stderr)));
         }
         match child.try_wait() {
@@ -243,6 +244,7 @@ where
                 let stdout = stdout_receiver
                     .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now()))
                     .map_err(|_| {
+                        transfer_scope.archive_hf_output(&[],&[],"stdout_pipe_timeout",false);
                         std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
                             format!(
@@ -253,6 +255,7 @@ where
                 let stderr = stderr_receiver
                     .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now()))
                     .map_err(|_| {
+                        transfer_scope.archive_hf_output(&stdout,&[],"stderr_pipe_timeout",false);
                         std::io::Error::new(
                             std::io::ErrorKind::TimedOut,
                             format!(
@@ -260,6 +263,7 @@ where
                             ),
                         )
                     })?;
+                transfer_scope.archive_hf_output(&stdout,&stderr,if status.success() {"success"} else {"nonzero_exit"},true);
                 publish_pip_output(capture_pip, &stdout, &stderr)?;
                 return Ok((
                     std::process::Output {
@@ -280,6 +284,7 @@ where
                     .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now())).unwrap_or_default();
                 let stderr = stderr_receiver
                     .recv_timeout(pipe_deadline.saturating_duration_since(Instant::now())).unwrap_or_default();
+                transfer_scope.archive_hf_output(&stdout,&stderr,"wait_error",false);
                 return Err(retain_command_error(error, publish_pip_output(capture_pip, &stdout, &stderr)));
             }
         }

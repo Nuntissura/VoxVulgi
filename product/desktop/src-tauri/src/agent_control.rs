@@ -287,6 +287,11 @@ fn recover_interrupted_phase2_original(paths:&AppPaths, request:&Value, original
 
 fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, String> {
     match command {
+        "tools.phase2_transfer_delay.arm" | "tools.phase2_transfer_delay.status" => {
+            let app=AGENT_APP_HANDLE.get().ok_or("application unavailable")?;
+            let state=app.try_state::<AppState>().ok_or("startup not ready")?;
+            if command.ends_with(".arm") {super::phase2_transfer_delay::arm(&state,request)} else {super::phase2_transfer_delay::status(&state,request)}
+        }
         "ui.viewport.inspect" => super::agent_viewport::execute(request, false),
         "ui.viewport.set" => super::agent_viewport::execute(request, true),
         "tools.recover_interrupted_phase2_proof" => {
@@ -596,6 +601,7 @@ fn execute(paths: &AppPaths, command: &str, request: &Value) -> Result<Value, St
 }
 
 fn is_read(command: &str) -> bool {
+    if command=="tools.phase2_transfer_delay.status" {return true;}
     matches!(command, "ui.viewport.inspect" | "tools.voice_runtime_paths" | "tools.voice_readiness" | "tools.phase2_transfer_status" | "localization.inspect" | "database.runtime_status" | "jobs.list" | "jobs.inspect" | "jobs.logs" | "jobs.overview" | "jobs.activity" | "downloads.presets" | "downloads.batch_members" | "subscriptions.failed_downloads" | "operation.get")
 }
 
@@ -679,6 +685,16 @@ pub(super) fn handle(body: &str) -> (&'static str, String) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn phase2_transfer_delay_catalog_requires_exact_bounded_mutation_and_read_only_status() {
+        let c=catalog();let commands=c["commands"].as_array().unwrap();
+        let arm=commands.iter().find(|v|v["name"]=="tools.phase2_transfer_delay.arm").unwrap();
+        let status=commands.iter().find(|v|v["name"]=="tools.phase2_transfer_delay.status").unwrap();
+        assert!(!is_read("tools.phase2_transfer_delay.arm"));assert!(is_read("tools.phase2_transfer_delay.status"));
+        let request=json!({"bridge_token":"token","actor_id":"actor","operation_id":"operation","command":"tools.phase2_transfer_delay.arm","proof_nonce":"0123456789abcdef0123456789abcdef","job_id":"57ac04a0-3857-4b34-9655-08944448de67","attempt_no":1,"command_id":"363d9516-d2de-4008-9a1a-57d794a68d5d","hold_ms":8000});
+        assert!(validate_input(&request,arm).is_ok());let mut excessive=request.clone();excessive["hold_ms"]=json!(8001);assert!(validate_input(&excessive,arm).is_err());
+        assert!(validate_input(&json!({"actor_id":"actor","command":"tools.phase2_transfer_delay.status","proof_nonce":"0123456789abcdef0123456789abcdef"}),status).is_ok());
+    }
     use super::*;
     #[test] fn wp0330_viewport_catalog_is_process_bound_and_rejects_arbitrary_inputs() {
         let c=catalog();

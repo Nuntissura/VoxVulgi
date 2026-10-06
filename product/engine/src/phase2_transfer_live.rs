@@ -16,10 +16,16 @@ const FRAME_LIMIT:usize=4096;
 thread_local! {static STEP:RefCell<Option<Arc<Step>>> = const {RefCell::new(None)};}
 static LIVE:OnceLock<Mutex<HashMap<String,Arc<Step>>>>=OnceLock::new();
 fn key(paths:&AppPaths,id:&str)->String {format!("{}:{id}",paths.base_dir.to_string_lossy())}
-struct Step {key:String,job_id:String,attempt_no:u32,step_id:String,active:AtomicBool,command:Mutex<Option<Arc<Command>>>}
+pub(crate) type HfArchiveSink=Arc<dyn Fn(&HfRawArchive)->std::io::Result<()>+Send+Sync>;
+#[derive(Serialize)]
+pub(crate) struct HfRawArchive {pub job_id:String,pub attempt_no:u32,pub step_id:String,pub command_id:String,pub child_pid:u32,pub outcome:String,pub stdout:Vec<u8>,pub stderr:Vec<u8>,pub omitted_frames:usize,pub complete:bool}
+struct Step {paths:AppPaths,archive:Option<HfArchiveSink>,key:String,job_id:String,attempt_no:u32,step_id:String,active:AtomicBool,command:Mutex<Option<Arc<Command>>>}
 pub struct StepScope {current:Option<Arc<Step>>,previous:Option<Arc<Step>>,thread_bound:std::marker::PhantomData<std::rc::Rc<()>>}
 pub fn enter_step(paths:&AppPaths,id:&str,attempt:u32,step:&str)->StepScope {
-    let current=Arc::new(Step {key:key(paths,id),job_id:id.into(),attempt_no:attempt,step_id:step.into(),active:AtomicBool::new(true),command:Mutex::new(None)});
+    enter_step_with_archive(paths,id,attempt,step,None)
+}
+pub(crate) fn enter_step_with_archive(paths:&AppPaths,id:&str,attempt:u32,step:&str,archive:Option<HfArchiveSink>)->StepScope {
+    let current=Arc::new(Step {paths:paths.clone(),archive,key:key(paths,id),job_id:id.into(),attempt_no:attempt,step_id:step.into(),active:AtomicBool::new(true),command:Mutex::new(None)});
     let registered=LIVE.get_or_init(||Mutex::new(HashMap::new())).try_lock().ok().is_some_and(|mut map| {
         map.retain(|_,v|v.active.load(Ordering::Acquire));
         if map.len()>=LIMIT || map.contains_key(&current.key) {return false;}
@@ -93,7 +99,46 @@ impl Decoder {
 }
 pub struct Command {step:Arc<Step>,id:String,pid:u32,protocol:String,active:AtomicBool,lost:AtomicBool,start:Instant,decoder:Mutex<Decoder>}
 pub struct CommandScope(Option<Arc<Command>>);
-impl CommandScope {pub fn observer(&self)->Option<Arc<Command>> {self.0.clone()}}
+impl CommandScope {
+    pub fn observer(&self)->Option<Arc<Command>> {self.0.clone()}
+    /// Terminal owning-thread publication, separate from optional decoder measurements and pip logs.
+    pub(crate) fn archive_hf_output(&self,stdout:&[u8],stderr:&[u8],outcome:&str,pipes_complete:bool) {
+        let Some(c)=&self.0 else {return;};
+        if c.protocol!="huggingface_http_payload" {return;}
+        let Some(sink)=&c.step.archive else {return;};
+        let (stdout,stdout_omitted)=raw_hf_frames(stdout,&c.id);
+        let (stderr,stderr_omitted)=raw_hf_frames(stderr,&c.id);
+        let omitted=stdout_omitted.saturating_add(stderr_omitted);
+        let record=HfRawArchive {job_id:c.step.job_id.clone(),attempt_no:c.step.attempt_no,step_id:c.step.step_id.clone(),command_id:c.id.clone(),child_pid:c.pid,outcome:outcome.into(),stdout,stderr,omitted_frames:omitted,complete:pipes_complete&&omitted==0};
+        let failure=sink(&record).err();
+        if failure.is_some()||!record.complete {
+            crate::diagnostics::emit_trace_event(&c.step.paths,"phase2_hf_raw_archive_incomplete","warn",serde_json::json!({"job_id":c.step.job_id,"attempt_no":c.step.attempt_no,"step_id":c.step.step_id,"command_id":c.id,"child_pid":c.pid,"omitted_frames":omitted,"archive_write_failed":failure.is_some(),"archive_error_kind":failure.as_ref().map(|e|format!("{:?}",e.kind())),"pipes_complete":pipes_complete}));
+        }
+    }
+}
+/// Preserve source-emitted lines verbatim; inspect structure only to exclude secrets/unbounded data.
+/// No decoded counters are serialized as independent raw evidence.
+fn raw_hf_frames(bytes:&[u8],nonce:&str)->(Vec<u8>,usize) {
+    const ARCHIVE_LIMIT:usize=4*1024*1024;
+    let prefix=format!("@@VV_TRANSFER {nonce} ");let mut raw=Vec::new();let mut omitted=0usize;
+    for line in bytes.split_inclusive(|b|*b==b'\n') {
+        if !line.starts_with(prefix.as_bytes()) {continue;}
+        let safe=line.len()<=FRAME_LIMIT&&line.ends_with(b"\n")&&serde_json::from_slice::<Value>(&line[prefix.len()..]).ok().is_some_and(|v| {
+            let Some(fields)=v.as_object() else {return false;};
+            fields.iter().all(|(key,value)|match key.as_str() {
+                "schema"=>value=="vv.phase2.http_transfer.v1",
+                "event"=>matches!(value.as_str(),Some("begin"|"update"|"invalid"|"bar_closed")),
+                "unit"=>value=="B",
+                "counter_source"=>value=="original_http_update_payload_sum",
+                "gap"=>value.is_boolean(),
+                "sequence"|"bar"|"received_bytes"|"initial_bytes"|"total_bytes"|"delta_bytes"|"observed_monotonic_ns"|"command_start_monotonic_ns"|"observed_boot_tick_ms"=>value.is_null()||value.as_u64().is_some(),
+                _=>false,
+            })&&fields.get("schema")==Some(&Value::from("vv.phase2.http_transfer.v1"))
+        });
+        if !safe||raw.len().saturating_add(line.len())>ARCHIVE_LIMIT {omitted=omitted.saturating_add(1);continue;}
+        raw.extend_from_slice(line);
+    }(raw,omitted)
+}
 impl Drop for CommandScope {fn drop(&mut self) {if let Some(c)=&self.0 {c.active.store(false,Ordering::Release);}}}
 pub fn begin_command(command:&std::process::Command,pid:u32)->CommandScope {
     let env=|name:&str|command.get_envs().find(|(key,_)|*key==name).and_then(|(_,v)|v).and_then(|v|v.to_str()).map(str::to_owned);
@@ -199,6 +244,44 @@ fn replace_python_code(command:&mut std::process::Command,code:&str,isolated:boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(windows)]
+    #[test] fn hf_raw_archive_actual_owned_success_error_and_cancel_retain_original_results() {
+        for mode in ["success","nonzero_exit","canceled"] {
+            let temp=tempfile::tempdir().unwrap();let paths=AppPaths::new(temp.path().to_path_buf());
+            let records=Arc::new(Mutex::new(Vec::new()));let received=records.clone();
+            let _step=enter_step_with_archive(&paths,"real-original",1,"model",Some(Arc::new(move|r| {received.lock().unwrap().push((r.outcome.clone(),r.stderr.clone()));Ok(())})));
+            let nonce=uuid::Uuid::new_v4().to_string();let raw=String::from_utf8(frame(1,1,100,100)).unwrap().replace("nonce",&nonce);
+            let tail=match mode {"success"=>"exit 0","nonzero_exit"=>"exit 7",_=>"Start-Sleep -Seconds 5"};
+            let script=format!("[Console]::Error.WriteLine('{}'); Write-Output 'original stdout'; {tail}",raw.trim());
+            let mut command=crate::cmd::command("powershell.exe");command.args(["-NoProfile","-NonInteractive","-Command",&script]);command.env("VOXVULGI_TRANSFER_NONCE",nonce).env("VOXVULGI_TRANSFER_PROTOCOL","huggingface_http_payload");
+            let started=Instant::now();let result=crate::cmd::run_owned_output(&mut command,Duration::from_secs(10),||mode=="canceled"&&started.elapsed()>Duration::from_secs(2));
+            if mode=="canceled" {assert_eq!(result.unwrap_err().kind(),std::io::ErrorKind::Interrupted);} else {let output=result.unwrap();assert_eq!(output.status.success(),mode=="success");assert!(String::from_utf8_lossy(&output.stdout).contains("original stdout"));}
+            let actual=records.lock().unwrap();assert_eq!(actual.len(),1);assert_eq!(actual[0].0,mode);assert!(String::from_utf8_lossy(&actual[0].1).contains(raw.trim()));
+        }
+    }
+    #[test] fn hf_raw_archive_preserves_source_bytes_and_refuses_private_or_unbounded_frames() {
+        let raw=frame(1,1,100,100);let mut input=b"private https://example.invalid?token=secret\n".to_vec();input.extend_from_slice(&raw);
+        let (archived,omitted)=raw_hf_frames(&input,"nonce");assert_eq!(archived,raw);assert_eq!(omitted,0);
+        let forbidden=b"@@VV_TRANSFER nonce {\"schema\":\"vv.phase2.http_transfer.v1\",\"url\":\"secret\"}\n";
+        let (archived,omitted)=raw_hf_frames(forbidden,"nonce");assert!(archived.is_empty());assert_eq!(omitted,1);
+        let mut many=Vec::new();while many.len()<=4*1024*1024 {many.extend_from_slice(&raw);}
+        let (archived,omitted)=raw_hf_frames(&many,"nonce");assert!(archived.len()<=4*1024*1024);assert!(omitted>0);
+        assert!(archived.chunks(raw.len()).all(|v|v==raw));
+    }
+    #[test] fn hf_raw_archive_owns_exact_command_channels_and_optional_failure_does_not_escape() {
+        let temp=tempfile::tempdir().unwrap();let paths=AppPaths::new(temp.path().to_path_buf());
+        let records=Arc::new(Mutex::new(Vec::new()));let captured=records.clone();
+        let sink:HfArchiveSink=Arc::new(move|r| {captured.lock().unwrap().push((r.job_id.clone(),r.attempt_no,r.step_id.clone(),r.command_id.clone(),r.outcome.clone(),r.stdout.clone(),r.stderr.clone(),r.complete));Err(std::io::Error::other("owned archive refusal"))});
+        let _step=enter_step_with_archive(&paths,"original",3,"cosy",Some(sink));
+        let mut command=crate::cmd::command("unused");let nonce=uuid::Uuid::new_v4().to_string();command.env("VOXVULGI_TRANSFER_NONCE",&nonce).env("VOXVULGI_TRANSFER_PROTOCOL","huggingface_http_payload");
+        let scope=begin_command(&command,123);let raw=String::from_utf8(frame(1,1,100,100)).unwrap().replace("nonce",&nonce).into_bytes();
+        for outcome in ["success","nonzero_exit","canceled","timeout"] {scope.archive_hf_output(&[],&raw,outcome,true);}
+        let actual=records.lock().unwrap();assert_eq!(actual.len(),4);
+        for r in actual.iter() {assert_eq!((&r.0,r.1,&r.2,&r.3),( &"original".to_string(),3,&"cosy".to_string(),&nonce));assert!(r.5.is_empty());assert_eq!(r.6,raw);assert!(r.7);}
+        drop(actual);
+        command.env("VOXVULGI_TRANSFER_PROTOCOL","pip_raw");begin_command(&command,124).archive_hf_output(&raw,&raw,"success",true);
+        assert_eq!(records.lock().unwrap().len(),4,"Pip remains solely under its mandatory original sink");
+    }
     #[test] fn capture_preserves_partial_bytes_and_interrupted_read() {
         struct Reader(u8);impl Read for Reader {fn read(&mut self,b:&mut[u8])->std::io::Result<usize>{self.0+=1;match self.0{1=>Err(std::io::ErrorKind::Interrupted.into()),2=>{b[..3].copy_from_slice(b"abc");Ok(3)},_=>Err(std::io::ErrorKind::Other.into())}}}
         assert_eq!(capture(Reader(0),None,false),b"abc");

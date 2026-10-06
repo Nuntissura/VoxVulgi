@@ -9930,6 +9930,25 @@ fn phase2_pip_output_sink(paths: AppPaths, guard: Option<InstallProofDispatchGua
     })
 }
 
+/// Optional HF evidence stays separate from mandatory pip logs and never decides install success.
+fn phase2_hf_archive_sink(paths:AppPaths,guard:Option<InstallProofDispatchGuard>,log_path:PathBuf)->crate::phase2_transfer_live::HfArchiveSink {
+    Arc::new(move|record| {
+        let stem=format!("hf_attempt_{}_{}",record.attempt_no,record.command_id);
+        let parent=log_path.parent().ok_or_else(||std::io::Error::other("HF archive parent missing"))?;
+        let stdout=parent.join(format!("{stem}.stdout.log"));let stderr=parent.join(format!("{stem}.stderr.log"));let receipt=parent.join(format!("{stem}.receipt.json"));
+        let targets=[stdout.clone(),stderr.clone(),receipt.clone()];
+        let check=||->std::io::Result<()> {if let Some(guard)=&guard {(guard.targets)(&paths,&targets).map_err(|e|std::io::Error::other(e.to_string()))?;}Ok(())};
+        check()?;
+        for (path,bytes) in [(&stdout,record.stdout.as_slice()),(&stderr,record.stderr.as_slice())] {
+            check()?;let mut options=OpenOptions::new();options.write(true).create_new(true);
+            #[cfg(windows)] {use std::os::windows::fs::OpenOptionsExt;options.share_mode(0x1|0x2);}
+            let mut file=options.open(path)?;check()?;file.write_all(bytes)?;file.flush()?;
+        }
+        let metadata=serde_json::json!({"schema":"vv.phase2.hf_raw_archive.v1","job_id":record.job_id,"attempt_no":record.attempt_no,"step_id":record.step_id,"command_id":record.command_id,"child_pid":record.child_pid,"outcome":record.outcome,"complete":record.complete,"omitted_frames":record.omitted_frames,"stdout_bytes":record.stdout.len(),"stderr_bytes":record.stderr.len(),"stdout_sha256":hex::encode(Sha256::digest(&record.stdout)),"stderr_sha256":hex::encode(Sha256::digest(&record.stderr)),"scope":"source-emitted raw numeric producer lines only; other output excluded for privacy; not installer-success authority"});
+        check()?;let mut file=OpenOptions::new().write(true).create_new(true).open(receipt)?;check()?;file.write_all(serde_json::to_string_pretty(&metadata)?.as_bytes())?;file.flush()?;Ok(())
+    })
+}
+
 pub fn start_runner(paths: AppPaths) -> Result<JobRunnerHandle> {
     start_runner_inner(paths, None)
 }
@@ -21216,7 +21235,7 @@ if __name__ == "__main__":
                 // Optional telemetry obtains canonical identity before child/FS work; its failure cannot fail installation.
                 let transfer_scope = get_job(paths, job_id).ok().flatten()
                     .filter(|job| job.job_type == "install_phase2_packs_v1" && job.status == JobStatus::Running)
-                    .map(|job| crate::phase2_transfer_live::enter_step(paths, job_id, job.attempt_no, &step_id));
+                    .map(|job| crate::phase2_transfer_live::enter_step_with_archive(paths, job_id, job.attempt_no, &step_id, Some(phase2_hf_archive_sink(paths.clone(), install_proof_guard.cloned(), log_path.clone()))));
                 let result = run_phase2_logged_install(
                     phase2_pip_output_sink(paths.clone(), install_proof_guard.cloned(), log_path.clone()),
                     || -> Result<()> { match step_id.as_str() {
@@ -33367,6 +33386,20 @@ mod tests {
         }
     }
 
+    #[test] fn wp0230b_hf_raw_sink_retains_separate_channels_scope_and_guard_refusal() {
+        let dir=tempfile::tempdir().unwrap();let paths=AppPaths::new(dir.path().to_path_buf());
+        let record=crate::phase2_transfer_live::HfRawArchive {job_id:"original".into(),attempt_no:2,step_id:"cosy".into(),command_id:uuid::Uuid::new_v4().to_string(),child_pid:123,outcome:"canceled".into(),stdout:b"source stdout\n".to_vec(),stderr:b"source stderr\n".to_vec(),omitted_frames:0,complete:true};
+        let sink=phase2_hf_archive_sink(paths.clone(),None,dir.path().join("cosy.log"));sink(&record).unwrap();
+        let stem=format!("hf_attempt_{}_{}",record.attempt_no,record.command_id);
+        assert_eq!(std::fs::read(dir.path().join(format!("{stem}.stdout.log"))).unwrap(),record.stdout);
+        assert_eq!(std::fs::read(dir.path().join(format!("{stem}.stderr.log"))).unwrap(),record.stderr);
+        let receipt:serde_json::Value=serde_json::from_slice(&std::fs::read(dir.path().join(format!("{stem}.receipt.json"))).unwrap()).unwrap();
+        assert_eq!(receipt["job_id"],"original");assert_eq!(receipt["attempt_no"],2);assert_eq!(receipt["outcome"],"canceled");assert_eq!(receipt["stderr_sha256"],hex::encode(Sha256::digest(&record.stderr)));
+        assert!(sink(&record).is_err(),"Never overwrite authentic prior raw evidence");
+        let guard=InstallProofDispatchGuard {check:Arc::new(|_,_|Ok(())),enter:Arc::new(|_,_|Ok(Box::new(()))),targets:Arc::new(|_,_|Err(EngineError::InstallFailed("exact archive target refused".into())))};
+        let sub=dir.path().join("refused");std::fs::create_dir(&sub).unwrap();
+        assert!(phase2_hf_archive_sink(paths,Some(guard),sub.join("cosy.log"))(&record).is_err());assert_eq!(std::fs::read_dir(sub).unwrap().count(),0);
+    }
     #[test]
     fn wp0229_pip_log_sink_preserves_channel_bytes_and_rechecks_exact_target() {
         let dir=tempfile::tempdir().unwrap();let paths=AppPaths::new(dir.path().to_path_buf());let log=dir.path().join("exact_step.log");

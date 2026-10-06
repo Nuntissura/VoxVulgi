@@ -3,6 +3,34 @@
   "title": "VoxVulgi user and agent manual",
   "commands": [
     {
+      "name": "tools.phase2_transfer_delay.arm",
+      "description": "Arm one diagnostic delay of the ORIGINAL Tauri transfer-read response after an authentic running transfer read. Exclusive headless installer proof only; normal/live, workflow and Safe Mode refused. Exact nonce/job/attempt/command required. Hold1..8000ms, arm TTL20s; no SQL write, fabricated values or frontend changes. Observe claimed state through status while the real frontend IPC is pending; independent snapshots remain available. Terminal/identity changes invalidate; canceled future records canceled. Actor and operation receipt identify this diagnostic mutation.",
+      "read_only": false,
+      "effect": "reversible_state_change",
+      "input_schema": {
+        "type": "object",
+        "required": ["bridge_token", "actor_id", "operation_id", "command", "proof_nonce", "job_id", "attempt_no", "command_id", "hold_ms"],
+        "properties": {
+          "bridge_token": {"type": "string"}, "actor_id": {"type": "string", "minLength": 1, "maxLength": 80},
+          "operation_id": {"type": "string", "minLength": 1, "maxLength": 120}, "command": {"const": "tools.phase2_transfer_delay.arm"},
+          "proof_nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"}, "job_id": {"type": "string"},
+          "attempt_no": {"type": "integer", "minimum": 1}, "command_id": {"type": "string"},
+          "hold_ms": {"type": "integer", "minimum": 1, "maximum": 8000}
+        }, "additionalProperties": false
+      }
+    },
+    {
+      "name": "tools.phase2_transfer_delay.status",
+      "description": "Read one-shot IPC-delay state/counts in the same exclusive headless installer proof root. Requires exact proof nonce; never claims or delays a response. Identity/terminal mismatch invalidates pending diagnostic delay. Does not read or write transfer values into the frontend.",
+      "read_only": true,
+      "effect": "read",
+      "input_schema": {
+        "type": "object", "required": ["bridge_token", "actor_id", "command", "proof_nonce"],
+        "properties": {"actor_id": {"type": "string", "minLength": 1, "maxLength": 80}, "bridge_token": {"type": "string"}, "command": {"const": "tools.phase2_transfer_delay.status"}, "proof_nonce": {"type": "string", "pattern": "^[0-9a-f]{32}$"}},
+        "additionalProperties": false
+      }
+    },
+    {
       "name": "tools.recover_interrupted_phase2_proof",
       "description": "Original jobs_recover_orphaned_running exact recovery for the one genuine interrupted initial-owner Phase2 installer in an explicitly reattached disposable install-proof root. Requires headless, Safe Mode off, no runner/active worker, original producer receipt and journal binding, exact attempt/selection confirmation and queue.pause through the original product command. Preserves original ID/attempt/journal, marks the installer interrupted; never requeues installers, creates replacements, starts runners or changes normal operator roots. Root must independently prove its freshly owned original process and children absent after genuine interruption.",
       "read_only": false,

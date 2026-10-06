@@ -239,6 +239,13 @@
     ],
     "completion_limit": "NEEDS_VALIDATION. Genuine original installer completed8/8 and both live transfer pages passed; exact raw HF archive and remaining mandatory boundaries did not pass."
   },
+  "correction11": {
+    "scope": "Finish correction09/10 packaged pending-IPC proof with a one-shot diagnostic response delay; frontend and authentic returned transfer values remain unchanged.",
+    "selected_approach": "Authenticated bridge arm/status commands restricted to the current exclusive headless installer proof root. Delay only the original Tauri transfer-read response after its authentic exact running job/attempt/step/command read. Hold at most8000ms, arm TTL20s; asynchronously sleep with no database permit or mutex retained. Bridge snapshots and status remain responsive.",
+    "sources": ["https://v2.tauri.app/develop/calling-rust/#async-commands", "https://docs.rs/tokio/latest/tokio/time/fn.sleep.html"],
+    "risks_controls": "Refuse normal/live, workflow and Safe Mode; require exact nonce and physical ownership, UUID/attempt/command identity and current running transfer. One claimant, observable claimed/released/canceled/invalidated state, terminal/job/root change invalidation and cancellation drop cleanup. No SQL writes, arbitrary JavaScript, fabricated transfer or process suspension.",
+    "validation": "Owning one-shot/TTL/identity/cancellation tests, original catalog schema and packaged real delayed IPC with independent expiry screenshot/status; no completion claim before those pass."
+  },
   "implementation": {
     "status": "IMPLEMENTED",
     "date": "2026-10-05",
