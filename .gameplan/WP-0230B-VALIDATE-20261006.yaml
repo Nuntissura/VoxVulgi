@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: WP-0230B-VALIDATE-20261006
 parent: null
-generation: 17
+generation: 27
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -42,3 +42,12 @@ steps:
 - {id: GP-026, role: any, at: before_round, do: require native extended PNG path normalization before relative reference, check: {type: file, path: .local/record_wp0230b_validation_final_20261006.py, contains: removeprefix}, source: Final record refused extended-path relative reference before writes; normalize equivalent Windows prefix, state: active}
 - {id: GP-027, role: any, at: before_round, do: require original HF raw archive before owned output returns, check: {type: file, path: product/engine/src/cmd.rs, contains: 'transfer_scope.archive_hf_output(&stdout,&stderr'}, source: Successful HF stderr discarded; liveUI passed but raw A02 reconciliation absent, state: active}
 - {id: GP-028, role: any, at: before_round, do: require gate PASS before dispatch, check: {type: file, path: .local/wp0230b_validation_20261006_v5.py, contains: assert gate_result.returncode == 0}, source: Confirmation note exceeded120 chars; gate refused before tests, state: active}
+- {id: GP-029, role: any, at: before_round, do: require exact desktop loader failure before targeted remedy, check: {type: file, path: product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/remediation_02/desktop_delay.log, contains: STATUS_ENTRYPOINT_NOT_FOUND}, source: Desktop4test image failed before entrypoint; engine32 passed, state: active}
+- {id: GP-030, role: any, at: before_round, do: require valid UTF8 BOM codec in targeted runner, check: {type: file, path: .local/wp0230b_delay_manifest_targeted_v4.py, not_contains: utf8-sig}, source: Prepared runner used invalid codec before any derived image or tests, state: active}
+- {id: GP-031, role: any, at: before_round, do: require XML encoding autodetection for existing manifest, check: {type: file, path: .local/wp0230b_delay_manifest_resume_v1.py, contains: canonicalize(from_file=extracted)}, source: MT extracted UTF16 manifest; text decoder failed before tests, state: retired}
+- {id: GP-032, role: any, at: before_round, do: require XML BOM autodetection for existing manifest, check: {type: file, path: .local/wp0230b_delay_manifest_resume_v1.py, contains: canonicalize(from_file=extracted)}, source: 'Correct GP031: actual efbbbf UTF8 BOM; default text decoding caused invalid XML', state: active}
+- {id: GP-033, role: any, at: before_round, do: require same admitted HF job across successive55s observer windows, check: {type: confirm}, source: Prior45s observer ended before actualHF around80s afteradmission, state: active}
+- {id: GP-034, role: any, at: before_round, do: require native signaled exit proof before membership reinventory, check: {type: file, path: .local/wp0230b_two_root_original_proof_v4.py, contains: Live member identity unavailable; HOLD}, source: Observer03 child exited during image query; V4 reinventory requires retained handle signaled, state: active}
+- {id: GP-035, role: any, at: before_round, do: require continuous adjacent HF windows before original admission, check: {type: file, path: .local/wp0230b_openvoice_original_delay_v4.py, contains: observer_end=observer_started+180}, source: Final02 interwindow gap50034ms missed131MB HF transfer, state: active}
+- {id: GP-036, role: any, at: before_round, do: require named CLI option replacement for lifecycle dispatch, check: {type: confirm}, source: Reattach196040 positional indexes displaced terminal source output; no launch, state: active}
+- {id: GP-037, role: any, at: before_round, do: require current PID sidecar and retry only same receipt permission race, check: {type: file, path: .local/wp0230b_two_root_original_proof_v6.py, contains: 'discovered[''pid'']==child.pid'}, source: Hard crash retains stale sidecar; B cancel receipt writer lock; V6 reads bounded without repeating mutation, state: active}

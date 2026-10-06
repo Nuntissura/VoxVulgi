@@ -1,6 +1,6 @@
 {
   "file_id": "WP0230B_TRANSFER_PROGRESS_EXECUTION_CONTRACT_V3",
-  "status": "NEEDS_VALIDATION",
+  "status": "DONE",
   "version": 3,
   "wp_id": "WP-0230b",
   "title": "Phase2 real transfer bytes, speed and remaining-transfer ETA",
@@ -72,7 +72,7 @@
         "product/engine/resources"
       ],
       "proof": "Primary-source exact version/source reconciliation; no upgrade/install as research.",
-      "status": "IMPLEMENTED_NEEDS_VALIDATION"
+      "status": "DONE"
     },
     {
       "id": "WP0230B-MT02",
@@ -84,7 +84,7 @@
         "product/engine/src/job_activity.rs"
       ],
       "proof": "Owning focused stream-before-exit + full stdout/stderr/sticky-error/cancellation/timeout/nested/thread isolation negatives; genuine supported pip/HF original download after installed candidate.",
-      "status": "IMPLEMENTED_NEEDS_VALIDATION"
+      "status": "DONE"
     },
     {
       "id": "WP0230B-MT03",
@@ -96,7 +96,7 @@
         "product/desktop/src/lib/phase2Progress.ts"
       ],
       "proof": "Known/unknown totals, stale/retry/terminal/reset, rate/ETA and shared feed contracts; actual same original install pair UI audit/dump/snapshot canonical job/journal plus source/candidate binding.",
-      "status": "IMPLEMENTED_NEEDS_VALIDATION"
+      "status": "DONE"
     }
   ],
   "proof_limits": [
@@ -147,102 +147,206 @@
   },
   "taskboard": "governance/workflow/TASK_BOARD.md#WP-0230b",
   "verification_execution": {
-    "status": "PARTIAL_VALIDATION_RAW_HF_ARCHIVE_BLOCKER",
+    "status": "PASS",
     "date": "2026-10-06",
-    "source_head": "7f5cc786698be83c74e76079726d8931afcfc5f7",
+    "source_head": "e052b36b7e7a016f0c723d8613d0979f69e07611",
     "proof_root": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006",
     "results": {
-      "focused_02": {
-        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/focused_02/result.json",
-        "sha256": "fedcc9a682bae599a3605dee39a582a72410ba13e7e49c0b52c839e0c07f900e",
-        "status": "PASS",
-        "source": "0a31a2d263dbece3dfac5e7982ad4e13e687dd4e"
+      "frontend_affected_01": {
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/frontend_affected_01/result.json",
+        "sha256": "e335ac466bac4b4f8dc9186bdfbc4953397aef8dc4f6d89407d7b575c7a3174a",
+        "status": "PASS"
       },
-      "cmd_01": {
-        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/cmd_01/result.json",
-        "sha256": "019d07ccdb7f7c3d58b27930400f26a5bc120db70eb48f37babf1fe70cf8c4cd",
-        "status": "PASS",
-        "source": "addc6f5fb5d66616ce56f68dd8562eede40a5e3e"
+      "desktop_delay_03": {
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/desktop_delay_03/result.json",
+        "sha256": "a03d68cb07d4127be952ae40057834d75359bae6237ba3f53579ce059a1a22e1",
+        "status": "PASS"
       },
-      "ui_03": {
-        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/ui_03/result.json",
-        "sha256": "f0969819f60d8fc37a6f981f29bb78f9fb108849602182ab47a3cbca9a2ab111",
-        "status": "PASS",
-        "source": "c54a3dbfab772964ff67cba98c000cc4d9d01df6"
+      "core_05": {
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/core_05/result.json",
+        "sha256": "756b1ba858c59380649f24fe00b36095fe35af09cb5c8e3ef7a42ca47ead8848",
+        "status": "PASS"
       },
-      "frontend_03": {
-        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/frontend_03/result.json",
-        "sha256": "517010939c77959e82f3562452937c1c18c08ea333feb7ff70b6aa0dfb429c87",
-        "status": "PASS",
-        "source": "c54a3dbfab772964ff67cba98c000cc4d9d01df6"
-      },
-      "engine_03": {
-        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/engine_03/result.json",
-        "sha256": "7dbfd4f268bdfc96f9a11bc1c4f412c81dd33472b6826986ca3719a207ad2e94",
-        "status": "PASS",
-        "source": "7f5cc786698be83c74e76079726d8931afcfc5f7"
-      },
-      "core_04": {
-        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/core_04/result.json",
-        "sha256": "478c8194f11edae039451edf4f1751c1461b6cef9a466912f97d660ce3b696e8",
-        "status": "PASS",
-        "source": "7f5cc786698be83c74e76079726d8931afcfc5f7"
-      },
-      "boundary_01": {
-        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/boundary_01/result.json",
-        "sha256": "a0af8c3886ec43f5aae081ab1f3f3c1c0df3f6e7ccd6b04f72a037ac4f074abd",
-        "status": "PASS_READONLY_BOUNDARY_LIVE_TRANSFER_NOT_PROVEN",
-        "source": "addc6f5fb5d66616ce56f68dd8562eede40a5e3e"
-      },
-      "actual_adapters_02": {
-        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/actual_adapters_02/result.json",
-        "sha256": "92f2ac22800f62ba3f605ae35945d30ab94890c40d51b127cc6e0150af0ae783",
-        "status": "PASS_ACTUAL_ADAPTERS_NOT_FULL_INSTALLER_UI",
-        "source": null
+      "engine32": {
+        "tests": 32,
+        "source": "45a5e109eb8fb4717dfb23c9af44e43c3b5010b7",
+        "logs": [
+          {
+            "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/remediation_02/engine_transfer.log",
+            "sha256": "f780b8a4c039480103cc8ceda0b6280788fdaa388a4554c8d563b370f611ef51"
+          },
+          {
+            "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/remediation_02/owned_output_lifecycle.log",
+            "sha256": "d31a8ef9e9b5aeb0889d37989560a5378f4b1ea49493c6387c1e1b3fca8cb7bb"
+          },
+          {
+            "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/remediation_02/hf_original_sink.log",
+            "sha256": "4171bd11f8341b1d40856fa8626425a3a36e40c1c1e0a2f74972c4cea42ca899"
+          }
+        ]
       }
     },
     "artifacts": {
       "desktop": {
         "path": "product/desktop/build_target/Current/release/desktop.exe",
-        "sha256": "47c8552f52f06460416aec6572e4a16bd36c89c33fe22f77234a6c3e9d7146d7",
-        "bytes": 60809216
+        "sha256": "f755a7bb2e38eb6e0790e486fb7b64b610327bad8803b8eb7e194aa74ead43a9"
       },
       "installer": {
         "path": "product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.205_x64-setup.exe",
-        "sha256": "2c215be342d7da3b486c2f417817c41a8f919da8977f42f844c59cafea0bc34e",
-        "bytes": 234122983
+        "sha256": "6d7de035e3c7f90462a390b45758686c16656befca6e21fbc293feb000deae97"
       }
     },
-    "independent_review": {
-      "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/original_pair_08/independent_final_review.json",
-      "sha256": "40ea253fd1e029eb4e5eaf9c3d31e02c9bc89633ebe97e50ae326a6513fdf766"
+    "acceptance_mapping": {
+      "A01": "Genuine owned crash; independent original-target absence; exact original e01f7 attempt1 recovered interrupted with unchanged2/8 journal; opened actual interrupted UI and DOM25% geometry.",
+      "A02": "Original103870 HF15 raw frames complete/zero omitted; independent genuine successive bytes, source-clock rate/ETA and canonical success reconciliation. Prior genuine pip and cache-negative proof retained.",
+      "A03": "Owning reset/resume/retry/stale/malformed/unknown-total tests plus actual packaged pending-IPC expiry; no unrelated negative-path network rerun.",
+      "A04": "Source-pinned original pip/HF wrappers, preserved isolated acquisition and explicit unsupported-source behavior; original inputs/dependencies unchanged by telemetry.",
+      "A05": "Focused command/thread/bar/lifetime isolation and bounded nonblocking source guards; actual concurrent original roots101 paired readbacks with zero canonical/owner mismatches. Positive byte overlap NOT observed and not required by literal isolation criterion.",
+      "A06": "Authentic mandatory pip stdout/stderr and sticky lifecycle32-test batch; original B canceled job preserves failed-step diagnostic independently.",
+      "A07": "Prior original_pair08 real paired Diagnostics/Localization UI/feed/canonical proof reused: shared frontend projection unchanged; current pending screenshot corroborates expiry.",
+      "A08": "Existing original setup validation/job success remains canonical; transfer ETA covers current download only. Real originals naturally completed8/8.",
+      "A09": "Source clock/queue-loss/malformed/oversized/cross-bar/resume negatives in owning tests; raw source-clock reconciliation and current packaged expiry.",
+      "A10": "Authenticated exact-owner read-only capability/manual; affected frontend15 and desktop4 tests pass."
     },
-    "resolved_failures": [
+    "remaining": [],
+    "limits": [
+      "No positive parallel byte-overlap claim; original concurrent scope isolation is proven.",
+      "Snapshot pixels show no distinct blue progress fill; rendered DOM65/260 geometry and visible2/8 agree with canonical journal.",
+      "Desktop libtest needed a resource-only SxS manifest copy; original failed loader result retained and original code/data section equivalence verified.",
+      "Operator-installed app and offline ISO were not updated; current0.1.205 app/core and standard installer are built artifacts."
+    ],
+    "independent_raw_live": {
+      "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/runtime_completion/wp0230b_openvoice_final_03/independent_raw_live.json",
+      "sha256": "e6e9aba2854e6afb41fef7ff9ca2c1ee2e0a5be1b0c392f13805ffeda1b44f9c"
+    },
+    "independent_crash_scope_review": {
+      "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/runtime_completion/wp0230b_two_root_final_01/independent_review.json",
+      "sha256": "f5242c0bb3bf1146fe61251bee58b679fd4783c3046f03b3423570a33610270b"
+    },
+    "pending_runtime": {
+      "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/runtime_completion/wp0230b_openvoice_final_04/phase_delay-observe_1791271517787933000/result.json",
+      "sha256": "d706a92488ba5fade704607f032904b19686c486c68d23fa625a2396bdca831c"
+    },
+    "independent_terminal": {
+      "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/runtime_completion/wp0230b_owned_close_hf_04/independent_closed_review.json",
+      "sha256": "f6b9560e6e649158990dedff11db880580f1a8650b9e2a7f709667d734036c9c"
+    },
+    "root_opened_visuals": [
       {
-        "failure": "Rust E0597 observer scope lifetime",
-        "resolution": "addc6f5; subsequent engine/core checks passed"
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/runtime_completion/visuals/original_interrupted_A_1791271251894.png",
+        "sha256": "715ed4f50b12d63112b6f7a6098504600f75c2aef47d35df41bcae68759f9d82",
+        "opened_by_root": true,
+        "opened_by_independent_reviewer": true
       },
       {
-        "failure": "Localization failed installer lost original repair action after restart",
-        "resolution": "c54a3db canonical exact-job restore; twenty focused UI tests and genuine repair admission passed"
-      },
-      {
-        "failure": "Original Cosy [-I,-c] excluded from instrumentation",
-        "resolution": "7f5cc78 preserves -I/arguments/env/cwd; fourteen engine tests and actual original Cosy transfer/8-step completion passed"
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/runtime_completion/visuals/actual_ipc_pending_diagnostics_1791271592448.png",
+        "sha256": "e04dbd58d3236a7ab4f49409d29de62b8f2b60828b5f73db0b4a374747da54be",
+        "opened_by_root": true,
+        "opened_by_independent_reviewer": true
       }
     ],
-    "remaining": [
-      "A02 raw HF reconciliation FAILED: original successful HF stderr is discarded by tools.rs run_python_checked_with_timeout; cmd.rs scoped pip capture excludes HF. Retain original owned HF producer frames without changing pip mandatory logging or original acquisition results, then reconcile genuine raw bytes/timing with the saved shared-page feed.",
-      "A01: parent WP0230 genuine force-quit/restart with exact original interrupted attempt and N/M remains unproven; graceful shutdown and successful completion do not replace it.",
-      "Correction09/10: packaged React pending-read/IPC-delay rate/ETA expiry remains unproven; owning delayed-resolution tests passed.",
-      "A03/A05: complete original resume/retry generation reconciliation and parallel installer scope boundary remain unproven; baseline arithmetic and owning isolation tests passed."
-    ],
-    "completion_limit": "NEEDS_VALIDATION. Genuine original installer completed8/8 and both live transfer pages passed; exact raw HF archive and remaining mandatory boundaries did not pass."
+    "proof_reuse": "No product change45a5\u2192e052; engine32 reused. Frontend projection/pins/lifecycle unchanged where earlier source-bound proofs are reused. Only affected frontend15/desktop4 plus canonical CoreOnly build and missing WP runtime boundaries ran.",
+    "prior_verification_execution": {
+      "status": "PARTIAL_VALIDATION_RAW_HF_ARCHIVE_BLOCKER",
+      "date": "2026-10-06",
+      "source_head": "7f5cc786698be83c74e76079726d8931afcfc5f7",
+      "proof_root": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006",
+      "results": {
+        "focused_02": {
+          "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/focused_02/result.json",
+          "sha256": "fedcc9a682bae599a3605dee39a582a72410ba13e7e49c0b52c839e0c07f900e",
+          "status": "PASS",
+          "source": "0a31a2d263dbece3dfac5e7982ad4e13e687dd4e"
+        },
+        "cmd_01": {
+          "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/cmd_01/result.json",
+          "sha256": "019d07ccdb7f7c3d58b27930400f26a5bc120db70eb48f37babf1fe70cf8c4cd",
+          "status": "PASS",
+          "source": "addc6f5fb5d66616ce56f68dd8562eede40a5e3e"
+        },
+        "ui_03": {
+          "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/ui_03/result.json",
+          "sha256": "f0969819f60d8fc37a6f981f29bb78f9fb108849602182ab47a3cbca9a2ab111",
+          "status": "PASS",
+          "source": "c54a3dbfab772964ff67cba98c000cc4d9d01df6"
+        },
+        "frontend_03": {
+          "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/frontend_03/result.json",
+          "sha256": "517010939c77959e82f3562452937c1c18c08ea333feb7ff70b6aa0dfb429c87",
+          "status": "PASS",
+          "source": "c54a3dbfab772964ff67cba98c000cc4d9d01df6"
+        },
+        "engine_03": {
+          "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/engine_03/result.json",
+          "sha256": "7dbfd4f268bdfc96f9a11bc1c4f412c81dd33472b6826986ca3719a207ad2e94",
+          "status": "PASS",
+          "source": "7f5cc786698be83c74e76079726d8931afcfc5f7"
+        },
+        "core_04": {
+          "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/core_04/result.json",
+          "sha256": "478c8194f11edae039451edf4f1751c1461b6cef9a466912f97d660ce3b696e8",
+          "status": "PASS",
+          "source": "7f5cc786698be83c74e76079726d8931afcfc5f7"
+        },
+        "boundary_01": {
+          "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/boundary_01/result.json",
+          "sha256": "a0af8c3886ec43f5aae081ab1f3f3c1c0df3f6e7ccd6b04f72a037ac4f074abd",
+          "status": "PASS_READONLY_BOUNDARY_LIVE_TRANSFER_NOT_PROVEN",
+          "source": "addc6f5fb5d66616ce56f68dd8562eede40a5e3e"
+        },
+        "actual_adapters_02": {
+          "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/actual_adapters_02/result.json",
+          "sha256": "92f2ac22800f62ba3f605ae35945d30ab94890c40d51b127cc6e0150af0ae783",
+          "status": "PASS_ACTUAL_ADAPTERS_NOT_FULL_INSTALLER_UI",
+          "source": null
+        }
+      },
+      "artifacts": {
+        "desktop": {
+          "path": "product/desktop/build_target/Current/release/desktop.exe",
+          "sha256": "47c8552f52f06460416aec6572e4a16bd36c89c33fe22f77234a6c3e9d7146d7",
+          "bytes": 60809216
+        },
+        "installer": {
+          "path": "product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.205_x64-setup.exe",
+          "sha256": "2c215be342d7da3b486c2f417817c41a8f919da8977f42f844c59cafea0bc34e",
+          "bytes": 234122983
+        }
+      },
+      "independent_review": {
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/original_pair_08/independent_final_review.json",
+        "sha256": "40ea253fd1e029eb4e5eaf9c3d31e02c9bc89633ebe97e50ae326a6513fdf766"
+      },
+      "resolved_failures": [
+        {
+          "failure": "Rust E0597 observer scope lifetime",
+          "resolution": "addc6f5; subsequent engine/core checks passed"
+        },
+        {
+          "failure": "Localization failed installer lost original repair action after restart",
+          "resolution": "c54a3db canonical exact-job restore; twenty focused UI tests and genuine repair admission passed"
+        },
+        {
+          "failure": "Original Cosy [-I,-c] excluded from instrumentation",
+          "resolution": "7f5cc78 preserves -I/arguments/env/cwd; fourteen engine tests and actual original Cosy transfer/8-step completion passed"
+        }
+      ],
+      "remaining": [
+        "A02 raw HF reconciliation FAILED: original successful HF stderr is discarded by tools.rs run_python_checked_with_timeout; cmd.rs scoped pip capture excludes HF. Retain original owned HF producer frames without changing pip mandatory logging or original acquisition results, then reconcile genuine raw bytes/timing with the saved shared-page feed.",
+        "A01: parent WP0230 genuine force-quit/restart with exact original interrupted attempt and N/M remains unproven; graceful shutdown and successful completion do not replace it.",
+        "Correction09/10: packaged React pending-read/IPC-delay rate/ETA expiry remains unproven; owning delayed-resolution tests passed.",
+        "A03/A05: complete original resume/retry generation reconciliation and parallel installer scope boundary remain unproven; baseline arithmetic and owning isolation tests passed."
+      ],
+      "completion_limit": "NEEDS_VALIDATION. Genuine original installer completed8/8 and both live transfer pages passed; exact raw HF archive and remaining mandatory boundaries did not pass."
+    }
   },
   "correction11": {
     "scope": "Finish correction09/10 packaged pending-IPC proof with a one-shot diagnostic response delay; frontend and authentic returned transfer values remain unchanged.",
     "selected_approach": "Authenticated bridge arm/status commands restricted to the current exclusive headless installer proof root. Delay only the original Tauri transfer-read response after its authentic exact running job/attempt/step/command read. Hold at most8000ms, arm TTL20s; asynchronously sleep with no database permit or mutex retained. Bridge snapshots and status remain responsive.",
-    "sources": ["https://v2.tauri.app/develop/calling-rust/#async-commands", "https://docs.rs/tokio/latest/tokio/time/fn.sleep.html"],
+    "sources": [
+      "https://v2.tauri.app/develop/calling-rust/#async-commands",
+      "https://docs.rs/tokio/latest/tokio/time/fn.sleep.html"
+    ],
     "risks_controls": "Refuse normal/live, workflow and Safe Mode; require exact nonce and physical ownership, UUID/attempt/command identity and current running transfer. One claimant, observable claimed/released/canceled/invalidated state, terminal/job/root change invalidation and cancellation drop cleanup. No SQL writes, arbitrary JavaScript, fabricated transfer or process suspension.",
     "validation": "Owning one-shot/TTL/identity/cancellation tests, original catalog schema and packaged real delayed IPC with independent expiry screenshot/status; no completion claim before those pass."
   },
@@ -251,7 +355,7 @@
     "date": "2026-10-05",
     "files": "19 product files: engine observers/adapters, Tauri and bridge readback, shared frontend feed and both consumers",
     "preservation": "f692cad initial0/M and CSS/native progress retained; original install and assigned0.1.205 unchanged",
-    "tests": "Helper7/transfer12/lifecycle14 retained; UI20/desktop399/TypeScript passed at c54; engine14 and canonical CoreOnly build passed at7f5. Exact stage/source bindings in verification_execution.",
-    "installed": "Current app/core and standard NSIS installer built unchanged0.1.205. Disposable hidden original installer57ac completed8/8; operator installation was not updated. Live shared UI passed; full WP proof remains incomplete."
+    "tests": "Affected engine32/frontend15/desktop4 and canonical CoreOnly passed; valid earlier proofs reused. Exact source/artifact/test bindings and acceptance mapping in verification_execution.",
+    "installed": "Current0.1.205 app/core and standard NSIS built; quiet exact candidate original download/raw, pending IPC, concurrent scope and same-attempt crash recovery boundaries passed. Operator installation unchanged."
   }
 }
