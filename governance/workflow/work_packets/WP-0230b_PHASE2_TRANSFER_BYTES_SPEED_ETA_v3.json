@@ -147,92 +147,104 @@
   },
   "taskboard": "governance/workflow/TASK_BOARD.md#WP-0230b",
   "verification_execution": {
-    "status": "PARTIAL_VALIDATION_NEEDS_RUNTIME_PROOF",
+    "status": "PARTIAL_VALIDATION_RAW_HF_ARCHIVE_BLOCKER",
     "date": "2026-10-06",
-    "source_head": "addc6f5fb5d66616ce56f68dd8562eede40a5e3e",
+    "source_head": "7f5cc786698be83c74e76079726d8931afcfc5f7",
     "proof_root": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006",
     "results": {
       "focused_02": {
         "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/focused_02/result.json",
         "sha256": "fedcc9a682bae599a3605dee39a582a72410ba13e7e49c0b52c839e0c07f900e",
-        "status": "PASS"
-      },
-      "engine_02": {
-        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/engine_02/result.json",
-        "sha256": "32495196f153ecb88858b3723eb981597679a9f10c691d58d2b333e0cd0a2383",
-        "status": "PASS"
-      },
-      "frontend_01": {
-        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/frontend_01/result.json",
-        "sha256": "22eba9d8034aebc6bdac04b715be4be06552e6f48c443e455570a1b0e48f1a8d",
-        "status": "PASS"
+        "status": "PASS",
+        "source": "0a31a2d263dbece3dfac5e7982ad4e13e687dd4e"
       },
       "cmd_01": {
         "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/cmd_01/result.json",
         "sha256": "019d07ccdb7f7c3d58b27930400f26a5bc120db70eb48f37babf1fe70cf8c4cd",
-        "status": "PASS"
+        "status": "PASS",
+        "source": "addc6f5fb5d66616ce56f68dd8562eede40a5e3e"
       },
-      "core_01": {
-        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/core_01/result.json",
-        "sha256": "890bf2791711f9770ffd97995c593f1ce906ddc82696e1d23e6226386e8ff61e",
-        "status": "PASS"
+      "ui_03": {
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/ui_03/result.json",
+        "sha256": "f0969819f60d8fc37a6f981f29bb78f9fb108849602182ab47a3cbca9a2ab111",
+        "status": "PASS",
+        "source": "c54a3dbfab772964ff67cba98c000cc4d9d01df6"
+      },
+      "frontend_03": {
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/frontend_03/result.json",
+        "sha256": "517010939c77959e82f3562452937c1c18c08ea333feb7ff70b6aa0dfb429c87",
+        "status": "PASS",
+        "source": "c54a3dbfab772964ff67cba98c000cc4d9d01df6"
+      },
+      "engine_03": {
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/engine_03/result.json",
+        "sha256": "7dbfd4f268bdfc96f9a11bc1c4f412c81dd33472b6826986ca3719a207ad2e94",
+        "status": "PASS",
+        "source": "7f5cc786698be83c74e76079726d8931afcfc5f7"
+      },
+      "core_04": {
+        "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/core_04/result.json",
+        "sha256": "478c8194f11edae039451edf4f1751c1461b6cef9a466912f97d660ce3b696e8",
+        "status": "PASS",
+        "source": "7f5cc786698be83c74e76079726d8931afcfc5f7"
       },
       "boundary_01": {
         "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/boundary_01/result.json",
         "sha256": "a0af8c3886ec43f5aae081ab1f3f3c1c0df3f6e7ccd6b04f72a037ac4f074abd",
-        "status": "PASS_READONLY_BOUNDARY_LIVE_TRANSFER_NOT_PROVEN"
+        "status": "PASS_READONLY_BOUNDARY_LIVE_TRANSFER_NOT_PROVEN",
+        "source": "addc6f5fb5d66616ce56f68dd8562eede40a5e3e"
       },
       "actual_adapters_02": {
         "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/actual_adapters_02/result.json",
         "sha256": "92f2ac22800f62ba3f605ae35945d30ab94890c40d51b127cc6e0150af0ae783",
         "status": "PASS_ACTUAL_ADAPTERS_NOT_FULL_INSTALLER_UI",
-        "observations": [
-          {
-            "name": "pip_real_wheel_dry_run",
-            "exit_code": 0,
-            "live_positive_updates": 50
-          },
-          {
-            "name": "hf_real_model_cold",
-            "exit_code": 0,
-            "live_positive_updates": 2
-          },
-          {
-            "name": "hf_same_model_cached",
-            "exit_code": 0,
-            "live_positive_updates": 0
-          }
-        ],
-        "source_modules_preserved": true,
-        "verified_model_sha256": "a6ac6a63997761ae2997373e2ee1c47040854b4b759ea41ec48e4e42df0f4d73"
+        "source": null
       }
     },
     "artifacts": {
       "desktop": {
         "path": "product/desktop/build_target/Current/release/desktop.exe",
-        "sha256": "a6c818f47fa4a83a7e15755b5ebf973b73740f7f8b84900269d57bc6742e73c1",
-        "bytes": 60808704
+        "sha256": "47c8552f52f06460416aec6572e4a16bd36c89c33fe22f77234a6c3e9d7146d7",
+        "bytes": 60809216
       },
       "installer": {
         "path": "product/desktop/build_target/Current/release/bundle/nsis/VoxVulgi_0.1.205_x64-setup.exe",
-        "sha256": "891c9fde4250e12683e7bfec84750c9ada79e03ea71b7acada3db261e3cdfbfd",
-        "bytes": 234123145
+        "sha256": "2c215be342d7da3b486c2f417817c41a8f919da8977f42f844c59cafea0bc34e",
+        "bytes": 234122983
       }
     },
-    "remaining": [
-      "Recorded validation failure 2026-10-06: original Cosy model call tools.rs uses [-I,-c,code], but phase2_transfer_live.rs accepts only [-c,code] and rebuilds without isolation. Remediate exact isolated invocation recognition and preserve -I; prove original arguments/env/cwd and genuine Cosy boundary without changing package pins.",
-      "A07: same genuine tracked Phase2 installation with paired Diagnostics/Localization transfer pixels, audit, dump and canonical attempt/journal.",
-      "Full original installer resume/cancel/concurrency and Cosy interpreter boundary proof remain unexecuted.",
-      "Parent WP0230 genuine crash/recovery acceptance remains separate and unproven by this batch."
+    "independent_review": {
+      "path": "product/desktop/build_target/tool_artifacts/wp_runs/WP-0230b/20261006/original_pair_08/independent_final_review.json",
+      "sha256": "40ea253fd1e029eb4e5eaf9c3d31e02c9bc89633ebe97e50ae326a6513fdf766"
+    },
+    "resolved_failures": [
+      {
+        "failure": "Rust E0597 observer scope lifetime",
+        "resolution": "addc6f5; subsequent engine/core checks passed"
+      },
+      {
+        "failure": "Localization failed installer lost original repair action after restart",
+        "resolution": "c54a3db canonical exact-job restore; twenty focused UI tests and genuine repair admission passed"
+      },
+      {
+        "failure": "Original Cosy [-I,-c] excluded from instrumentation",
+        "resolution": "7f5cc78 preserves -I/arguments/env/cwd; fourteen engine tests and actual original Cosy transfer/8-step completion passed"
+      }
     ],
-    "completion_limit": "No DONE: real paired installer GUI and remaining original production boundary proof not established."
+    "remaining": [
+      "A02 raw HF reconciliation FAILED: original successful HF stderr is discarded by tools.rs run_python_checked_with_timeout; cmd.rs scoped pip capture excludes HF. Retain original owned HF producer frames without changing pip mandatory logging or original acquisition results, then reconcile genuine raw bytes/timing with the saved shared-page feed.",
+      "A01: parent WP0230 genuine force-quit/restart with exact original interrupted attempt and N/M remains unproven; graceful shutdown and successful completion do not replace it.",
+      "Correction09/10: packaged React pending-read/IPC-delay rate/ETA expiry remains unproven; owning delayed-resolution tests passed.",
+      "A03/A05: complete original resume/retry generation reconciliation and parallel installer scope boundary remain unproven; baseline arithmetic and owning isolation tests passed."
+    ],
+    "completion_limit": "NEEDS_VALIDATION. Genuine original installer completed8/8 and both live transfer pages passed; exact raw HF archive and remaining mandatory boundaries did not pass."
   },
   "implementation": {
     "status": "IMPLEMENTED",
     "date": "2026-10-05",
     "files": "19 product files: engine observers/adapters, Tauri and bridge readback, shared frontend feed and both consumers",
     "preservation": "f692cad initial0/M and CSS/native progress retained; original install and assigned0.1.205 unchanged",
-    "tests": "Focused and desktop contract checks passed; see verification_execution. Compile lifetime remediation addc6f5 passed engine and canonical core build.",
-    "installed": "Current app/core and standard NSIS installer built at unchanged0.1.205; Current executable tested headless in disposable root. Operator installation not updated."
+    "tests": "Helper7/transfer12/lifecycle14 retained; UI20/desktop399/TypeScript passed at c54; engine14 and canonical CoreOnly build passed at7f5. Exact stage/source bindings in verification_execution.",
+    "installed": "Current app/core and standard NSIS installer built unchanged0.1.205. Disposable hidden original installer57ac completed8/8; operator installation was not updated. Live shared UI passed; full WP proof remains incomplete."
   }
 }

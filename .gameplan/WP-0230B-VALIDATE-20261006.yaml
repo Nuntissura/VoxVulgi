@@ -11,7 +11,7 @@ precedence: 'on conflict CODEX, role profile, WP contract, WP-STATE, MT win; cor
 scope: session
 assignment: WP-0230B-VALIDATE-20261006
 parent: null
-generation: 12
+generation: 15
 expensive_actions: []
 steps:
 - {id: GP-001, role: any, at: before_round, do: verify HEAD == remote(branch); fetch first, check: {type: git, head_equals_remote: true}, source: 'preset:build-round', state: active}
@@ -37,3 +37,6 @@ steps:
 - {id: GP-021, role: any, at: before_round, do: require SHA hexadecimal case normalization and durable copy errors, check: {type: file, path: .local/wp0230b_cosy_backend_code_input_20261006_v2.py, contains: .lower()}, source: Backendinput01 rejected same SHA case beforecopy; v2 fixes comparison and records exception receipts, state: active}
 - {id: GP-022, role: any, at: before_round, do: require canonical restart restore before original repair action, check: {type: file, path: product/desktop/src/lib/phase2InstallRestore.ts, contains: job.id !== id}, source: Repair hidden after restart because failure state transient; exact canonical reread restores existing UI, state: active}
 - {id: GP-023, role: any, at: before_round, do: require native volume identity normalization equal Rust low32, check: {type: file, path: .local/wp0230b_owned_lifecycle_v2.py, contains: v.volume & 0xffffffff}, source: Close01 refused before WM_CLOSE; native64 serial differs Rustas-u32; full128 file ID matches, state: active}
+- {id: GP-024, role: any, at: before_round, do: require original isolated Cosy acquisition flag preserved, check: {type: file, path: product/engine/src/phase2_transfer_live.rs, contains: 'if isolated {replacement.arg("-I");}'}, source: 'ActualCosy [-I,-c] invocation refused telemetry; exact support preserves isolation; fourteen Rust tests green', state: active}
+- {id: GP-025, role: any, at: before_round, do: require candidate source read from git instead of typed SHA, check: {type: file, path: .local/wp0230b_validation_20261006_v4.py, contains: source = subprocess.check_output}, source: Close argument source mistyped and unused; actual owner c54 ledger checked; subsequent source read from git, state: active}
+- {id: GP-026, role: any, at: before_round, do: require native extended PNG path normalization before relative reference, check: {type: file, path: .local/record_wp0230b_validation_final_20261006.py, contains: removeprefix}, source: Final record refused extended-path relative reference before writes; normalize equivalent Windows prefix, state: active}
